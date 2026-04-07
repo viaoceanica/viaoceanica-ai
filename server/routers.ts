@@ -70,6 +70,36 @@ export const appRouter = router({
     }),
   }),
 
+  // ─── Company Members Management ─────────────────────────────────
+  companyMembers: router({
+    updateRole: protectedProcedure
+      .input(z.object({ userId: z.number(), role: z.enum(["admin", "member"]) }))
+      .mutation(async ({ ctx, input }) => {
+        if (!ctx.user.companyId) throw new Error("Sem empresa associada");
+        if (ctx.user.companyRole !== "owner" && ctx.user.companyRole !== "admin") throw new Error("Sem permissão");
+        // Cannot change own role
+        if (input.userId === ctx.user.id) throw new Error("Não pode alterar o seu próprio papel");
+        // Cannot change owner's role
+        const target = await db.getUserById(input.userId);
+        if (!target || target.companyId !== ctx.user.companyId) throw new Error("Membro não encontrado");
+        if (target.companyRole === "owner") throw new Error("Não pode alterar o papel do proprietário");
+        await db.updateUser(input.userId, { companyRole: input.role });
+        return { success: true };
+      }),
+    remove: protectedProcedure
+      .input(z.object({ userId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        if (!ctx.user.companyId) throw new Error("Sem empresa associada");
+        if (ctx.user.companyRole !== "owner" && ctx.user.companyRole !== "admin") throw new Error("Sem permissão");
+        if (input.userId === ctx.user.id) throw new Error("Não pode remover-se a si próprio");
+        const target = await db.getUserById(input.userId);
+        if (!target || target.companyId !== ctx.user.companyId) throw new Error("Membro não encontrado");
+        if (target.companyRole === "owner") throw new Error("Não pode remover o proprietário");
+        await db.updateUser(input.userId, { companyId: null, companyRole: "member" });
+        return { success: true };
+      }),
+  }),
+
   // ─── Teams ───────────────────────────────────────────────────────
   teams: router({
     list: protectedProcedure.query(async ({ ctx }) => {

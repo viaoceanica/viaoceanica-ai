@@ -136,6 +136,41 @@ describe("admin procedures", () => {
   });
 });
 
+describe("companyMembers procedures", () => {
+  it("rejects unauthenticated access to updateRole", async () => {
+    const ctx = createMockContext(null);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.companyMembers.updateRole({ userId: 2, role: "admin" })).rejects.toThrow();
+  });
+
+  it("rejects unauthenticated access to remove", async () => {
+    const ctx = createMockContext(null);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.companyMembers.remove({ userId: 2 })).rejects.toThrow();
+  });
+
+  it("rejects non-owner/admin from updating roles", async () => {
+    const user = createTestUser({ companyRole: "member" });
+    const ctx = createMockContext(user);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.companyMembers.updateRole({ userId: 2, role: "admin" })).rejects.toThrow("Sem permiss\u00e3o");
+  });
+
+  it("rejects self-role change", async () => {
+    const user = createTestUser({ companyRole: "owner" });
+    const ctx = createMockContext(user);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.companyMembers.updateRole({ userId: user.id, role: "admin" })).rejects.toThrow("N\u00e3o pode alterar o seu pr\u00f3prio papel");
+  });
+
+  it("rejects self-removal", async () => {
+    const user = createTestUser({ companyRole: "owner" });
+    const ctx = createMockContext(user);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.companyMembers.remove({ userId: user.id })).rejects.toThrow("N\u00e3o pode remover-se a si pr\u00f3prio");
+  });
+});
+
 describe("protected procedures", () => {
   it("rejects unauthenticated access to company.get", async () => {
     const ctx = createMockContext(null);

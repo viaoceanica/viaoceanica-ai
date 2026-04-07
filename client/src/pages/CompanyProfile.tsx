@@ -135,7 +135,7 @@ export default function CompanyProfile() {
                     </p>
                   </div>
                   {!isCurrent && (
-                    <Button variant="outline" size="sm" className="w-full mt-4" onClick={() => toast.info("Contacte o administrador para alterar o plano")}>
+                    <Button variant="outline" size="sm" className="w-full mt-4" onClick={() => toast.info("Para alterar o plano, contacte o administrador da plataforma. O upgrade será aplicado de imediato.")}>
                       Selecionar
                     </Button>
                   )}

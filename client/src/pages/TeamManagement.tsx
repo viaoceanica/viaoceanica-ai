@@ -4,14 +4,19 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { trpc } from "@/lib/trpc";
-import { Plus, Send, Trash2, Users, UserPlus } from "lucide-react";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { Plus, Send, Trash2, Users, UserPlus, MoreHorizontal, ShieldCheck, User, UserMinus } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function TeamManagement() {
+  const { user: currentUser } = useAuth();
   const { data: members, isLoading: membersLoading, refetch: refetchMembers } = trpc.company.members.useQuery();
   const { data: teams, isLoading: teamsLoading, refetch: refetchTeams } = trpc.teams.list.useQuery();
   const { data: pendingInvites, refetch: refetchInvites } = trpc.invitations.list.useQuery();
@@ -28,11 +33,30 @@ export default function TeamManagement() {
     onSuccess: () => { refetchInvites(); toast.success("Convite enviado"); },
     onError: (e) => toast.error(e.message),
   });
+  const updateRole = trpc.companyMembers.updateRole.useMutation({
+    onSuccess: () => { refetchMembers(); toast.success("Papel atualizado"); },
+    onError: (e) => toast.error(e.message),
+  });
+  const removeMember = trpc.companyMembers.remove.useMutation({
+    onSuccess: () => { refetchMembers(); toast.success("Membro removido"); },
+    onError: (e) => toast.error(e.message),
+  });
 
   const [newTeamName, setNewTeamName] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<"admin" | "member">("member");
   const [teamDialogOpen, setTeamDialogOpen] = useState(false);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
+
+  const canManageMembers = currentUser?.companyRole === "owner" || currentUser?.companyRole === "admin";
+
+  const getRoleBadge = (role: string | null) => {
+    switch (role) {
+      case "owner": return <Badge variant="default">Proprietário</Badge>;
+      case "admin": return <Badge className="bg-blue-100 text-blue-700 hover:bg-blue-100">Admin</Badge>;
+      default: return <Badge variant="secondary">Membro</Badge>;
+    }
+  };
 
   return (
     <div className="space-y-8">
@@ -69,14 +93,27 @@ export default function TeamManagement() {
                     onChange={(e) => setInviteEmail(e.target.value)}
                   />
                 </div>
+                <div className="space-y-2">
+                  <Label>Papel</Label>
+                  <Select value={inviteRole} onValueChange={(v) => setInviteRole(v as "admin" | "member")}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="member">Membro</SelectItem>
+                      <SelectItem value="admin">Admin</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setInviteDialogOpen(false)}>Cancelar</Button>
                 <Button
                   onClick={() => {
                     if (!inviteEmail) return;
-                    invite.mutate({ email: inviteEmail });
+                    invite.mutate({ email: inviteEmail, role: inviteRole });
                     setInviteEmail("");
+                    setInviteRole("member");
                     setInviteDialogOpen(false);
                   }}
                   disabled={invite.isPending}
@@ -101,26 +138,95 @@ export default function TeamManagement() {
                   <TableHead>Email</TableHead>
                   <TableHead>Papel</TableHead>
                   <TableHead>Desde</TableHead>
+                  {canManageMembers && <TableHead className="w-[60px]">Ações</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {members?.map((m) => (
-                  <TableRow key={m.id}>
-                    <TableCell className="font-medium">{m.name || "—"}</TableCell>
-                    <TableCell>{m.email || "—"}</TableCell>
-                    <TableCell>
-                      <Badge variant={m.companyRole === "owner" ? "default" : "secondary"}>
-                        {m.companyRole === "owner" ? "Proprietário" : m.companyRole === "admin" ? "Admin" : "Membro"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground text-sm">
-                      {new Date(m.createdAt).toLocaleDateString("pt-PT")}
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {members?.map((m) => {
+                  const isOwner = m.companyRole === "owner";
+                  const isSelf = m.id === currentUser?.id;
+                  const canActOn = canManageMembers && !isOwner && !isSelf;
+
+                  return (
+                    <TableRow key={m.id}>
+                      <TableCell className="font-medium">{m.name || "—"}</TableCell>
+                      <TableCell>{m.email || "—"}</TableCell>
+                      <TableCell>{getRoleBadge(m.companyRole)}</TableCell>
+                      <TableCell className="text-muted-foreground text-sm">
+                        {new Date(m.createdAt).toLocaleDateString("pt-PT")}
+                      </TableCell>
+                      {canManageMembers && (
+                        <TableCell>
+                          {canActOn ? (
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button variant="ghost" size="icon" className="h-8 w-8">
+                                  <MoreHorizontal className="h-4 w-4" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                {m.companyRole === "member" ? (
+                                  <DropdownMenuItem
+                                    onClick={() => updateRole.mutate({ userId: m.id, role: "admin" })}
+                                    className="cursor-pointer"
+                                  >
+                                    <ShieldCheck className="h-4 w-4 mr-2" />
+                                    Promover a Admin
+                                  </DropdownMenuItem>
+                                ) : (
+                                  <DropdownMenuItem
+                                    onClick={() => updateRole.mutate({ userId: m.id, role: "member" })}
+                                    className="cursor-pointer"
+                                  >
+                                    <User className="h-4 w-4 mr-2" />
+                                    Alterar para Membro
+                                  </DropdownMenuItem>
+                                )}
+                                <DropdownMenuSeparator />
+                                <AlertDialog>
+                                  <AlertDialogTrigger asChild>
+                                    <DropdownMenuItem
+                                      onSelect={(e) => e.preventDefault()}
+                                      className="cursor-pointer text-destructive focus:text-destructive"
+                                    >
+                                      <UserMinus className="h-4 w-4 mr-2" />
+                                      Remover da empresa
+                                    </DropdownMenuItem>
+                                  </AlertDialogTrigger>
+                                  <AlertDialogContent>
+                                    <AlertDialogHeader>
+                                      <AlertDialogTitle>Remover membro</AlertDialogTitle>
+                                      <AlertDialogDescription>
+                                        Tem a certeza que deseja remover <strong>{m.name || m.email}</strong> da empresa?
+                                        Esta ação não pode ser desfeita.
+                                      </AlertDialogDescription>
+                                    </AlertDialogHeader>
+                                    <AlertDialogFooter>
+                                      <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                                      <AlertDialogAction
+                                        onClick={() => removeMember.mutate({ userId: m.id })}
+                                        className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                      >
+                                        Remover
+                                      </AlertDialogAction>
+                                    </AlertDialogFooter>
+                                  </AlertDialogContent>
+                                </AlertDialog>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">
+                              {isSelf ? "Você" : ""}
+                            </span>
+                          )}
+                        </TableCell>
+                      )}
+                    </TableRow>
+                  );
+                })}
                 {(!members || members.length === 0) && (
                   <TableRow>
-                    <TableCell colSpan={4} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={canManageMembers ? 5 : 4} className="text-center text-muted-foreground py-8">
                       Nenhum membro encontrado
                     </TableCell>
                   </TableRow>
@@ -136,7 +242,10 @@ export default function TeamManagement() {
               <div className="space-y-2">
                 {pendingInvites.map((inv) => (
                   <div key={inv.id} className="flex items-center justify-between py-2 px-3 rounded-lg bg-muted/50">
-                    <span className="text-sm">{inv.email}</span>
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm">{inv.email}</span>
+                      <Badge variant="outline" className="text-xs capitalize">{inv.role}</Badge>
+                    </div>
                     <Badge variant="outline" className="text-xs">Pendente</Badge>
                   </div>
                 ))}
@@ -212,14 +321,34 @@ export default function TeamManagement() {
                       </p>
                     </div>
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="text-muted-foreground hover:text-destructive"
-                    onClick={() => deleteTeam.mutate({ teamId: team.id })}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="text-muted-foreground hover:text-destructive"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Eliminar equipa</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          Tem a certeza que deseja eliminar a equipa <strong>{team.name}</strong>? Todos os membros serão removidos da equipa.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                        <AlertDialogAction
+                          onClick={() => deleteTeam.mutate({ teamId: team.id })}
+                          className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                        >
+                          Eliminar
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
                 </div>
               ))}
             </div>
