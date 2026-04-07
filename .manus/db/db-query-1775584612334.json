@@ -1,0 +1,9 @@
+{
+  "query": "CREATE TABLE `companies` (\n\t`id` int AUTO_INCREMENT NOT NULL,\n\t`name` varchar(255) NOT NULL,\n\t`logo` text,\n\t`sector` varchar(255),\n\t`email` varchar(320),\n\t`phone` varchar(50),\n\t`address` text,\n\t`website` varchar(500),\n\t`planId` int,\n\t`tokensBalance` int NOT NULL DEFAULT 0,\n\t`externalTokensBalance` int NOT NULL DEFAULT 0,\n\t`createdAt` timestamp NOT NULL DEFAULT (now()),\n\t`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,\n\tCONSTRAINT `companies_id` PRIMARY KEY(`id`)\n);",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway03.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 3cVh5zkX4ywvzHG.30195676fa91 --database 6DXmdNCUWEVw8L9yJrZixa --execute CREATE TABLE `companies` (\n\t`id` int AUTO_INCREMENT NOT NULL,\n\t`name` varchar(255) NOT NULL,\n\t`logo` text,\n\t`sector` varchar(255),\n\t`email` varchar(320),\n\t`phone` varchar(50),\n\t`address` text,\n\t`website` varchar(500),\n\t`planId` int,\n\t`tokensBalance` int NOT NULL DEFAULT 0,\n\t`externalTokensBalance` int NOT NULL DEFAULT 0,\n\t`createdAt` timestamp NOT NULL DEFAULT (now()),\n\t`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,\n\tCONSTRAINT `companies_id` PRIMARY KEY(`id`)\n);",
+  "rows": [],
+  "messages": [],
+  "stdout": "",
+  "stderr": "",
+  "execution_time_ms": 545
+}

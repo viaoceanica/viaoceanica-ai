@@ -1,0 +1,22 @@
+# Project TODO
+
+- [x] Schema da base de dados (empresas, utilizadores, equipas, membros, planos, tokens, módulos)
+- [x] Sistema de autenticação próprio (email/password) — registo, login, logout
+- [ ] Recuperação de password (placeholder criado, backend por implementar)
+- [x] Tema claro como padrão com paleta Via Oceânica (verde-água #00FFAC, amarelo #FFB800, fundo claro)
+- [x] Landing page pública
+- [x] Página de registo de empresa (email/password)
+- [x] Página de login
+- [x] Página de recuperação de password
+- [x] Dashboard empresarial (visão geral: tokens, equipa, plano ativo)
+- [x] Visualização de tokens internos e externos (interface gráfica)
+- [x] Gestão de equipas (criar equipas, convidar membros por email)
+- [ ] Remover membros da empresa e alterar papéis na UI
+- [x] Gestão de conta empresarial (editar perfil, visualizar planos)
+- [ ] Upgrade/downgrade de plano funcional via admin
+- [ ] Secções de faturação e preferências (fase futura)
+- [x] Planos de subscrição (Starter, Professional, Enterprise, Custom) — geridos via backend
+- [x] Configurador modular (ativar/desativar módulos: Restauração, Gestão Email) — apenas interface gráfica
+- [x] Painel de administração: lista de empresas, atribuir tokens gratuitos, gerir planos, monitorização global
+- [x] Admin: visualização de tokens totais e por empresa, e por módulo
+- [x] Testes vitest
