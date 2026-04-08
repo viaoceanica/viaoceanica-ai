@@ -311,3 +311,46 @@ export async function getAllTokenTransactions() {
   if (!db) return [];
   return db.select().from(tokenTransactions).orderBy(desc(tokenTransactions.createdAt));
 }
+
+// ─── User Recent Activity ────────────────────────────────────────────
+
+export async function getUserRecentActivity(userId: number, companyId?: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  const activity: { type: string; description: string; date: Date }[] = [];
+
+  // Token transactions from the company
+  if (companyId) {
+    const txns = await db.select().from(tokenTransactions)
+      .where(eq(tokenTransactions.companyId, companyId))
+      .orderBy(desc(tokenTransactions.createdAt))
+      .limit(10);
+    for (const tx of txns) {
+      activity.push({
+        type: tx.type === "credit" ? "token_credit" : "token_debit",
+        description: tx.description || (tx.type === "credit" ? "Tokens creditados" : "Tokens debitados"),
+        date: tx.createdAt,
+      });
+    }
+  }
+
+  // Invitations sent by the company
+  if (companyId) {
+    const invites = await db.select().from(invitations)
+      .where(eq(invitations.companyId, companyId))
+      .orderBy(desc(invitations.createdAt))
+      .limit(5);
+    for (const inv of invites) {
+      activity.push({
+        type: "invitation",
+        description: `Convite enviado para ${inv.email}`,
+        date: inv.createdAt,
+      });
+    }
+  }
+
+  // Sort by date descending and limit to 15
+  activity.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  return activity.slice(0, 15);
+}

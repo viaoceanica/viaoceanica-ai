@@ -32,6 +32,7 @@ import {
   LogOut,
   PanelLeft,
   Shield,
+  UserCircle,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -44,6 +45,7 @@ const companyMenuItems = [
   { icon: Puzzle, label: "Módulos", path: "/dashboard/modules" },
   { icon: Coins, label: "Tokens", path: "/dashboard/tokens" },
   { icon: Building2, label: "Empresa", path: "/dashboard/company" },
+  { icon: UserCircle, label: "Perfil", path: "/dashboard/profile" },
   { icon: Settings, label: "Definições", path: "/dashboard/settings" },
 ];
 
@@ -252,6 +254,10 @@ function DashboardLayoutContent({
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuItem onClick={() => setLocation("/dashboard/profile")} className="cursor-pointer">
+                  <UserCircle className="mr-2 h-4 w-4" />
+                  Perfil
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => setLocation("/dashboard/settings")} className="cursor-pointer">
                   <Settings className="mr-2 h-4 w-4" />
                   Definições

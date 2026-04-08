@@ -20,3 +20,4 @@
 - [x] Painel de administração: lista de empresas, atribuir tokens gratuitos, gerir planos, monitorização global
 - [x] Admin: visualização de tokens totais e por empresa, e por módulo
 - [x] Testes vitest (18 testes a passar)
+- [x] Página de perfil de utilizador (informações pessoais, atividade recente)

@@ -171,6 +171,27 @@ describe("companyMembers procedures", () => {
   });
 });
 
+describe("profile procedures", () => {
+  it("rejects unauthenticated access to profile.get", async () => {
+    const ctx = createMockContext(null);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.profile.get()).rejects.toThrow();
+  });
+
+  it("rejects unauthenticated access to profile.updateName", async () => {
+    const ctx = createMockContext(null);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.profile.updateName({ name: "New Name" })).rejects.toThrow();
+  });
+
+  it("validates name is not empty on updateName", async () => {
+    const user = createTestUser();
+    const ctx = createMockContext(user);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.profile.updateName({ name: "" })).rejects.toThrow();
+  });
+});
+
 describe("protected procedures", () => {
   it("rejects unauthenticated access to company.get", async () => {
     const ctx = createMockContext(null);

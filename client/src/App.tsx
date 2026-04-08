@@ -17,6 +17,7 @@ import Modules from "./pages/Modules";
 import Tokens from "./pages/Tokens";
 import CompanyProfile from "./pages/CompanyProfile";
 import SettingsPage from "./pages/SettingsPage";
+import UserProfile from "./pages/UserProfile";
 
 // Admin pages
 import AdminDashboard from "./pages/admin/AdminDashboard";
@@ -34,6 +35,7 @@ function CompanyDashboardRoutes() {
         <Route path="/dashboard/modules" component={Modules} />
         <Route path="/dashboard/tokens" component={Tokens} />
         <Route path="/dashboard/company" component={CompanyProfile} />
+        <Route path="/dashboard/profile" component={UserProfile} />
         <Route path="/dashboard/settings" component={SettingsPage} />
         <Route component={NotFound} />
       </Switch>

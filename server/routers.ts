@@ -41,8 +41,44 @@ export const appRouter = router({
         return { success: true };
       }),
   }),
+  // ─── Profile ───────────────────────────────────────────────────────
+  profile: router({
+    get: protectedProcedure.query(async ({ ctx }) => {
+      const user = await db.getUserById(ctx.user.id);
+      if (!user) throw new Error("Utilizador não encontrado");
+      let company = null;
+      let plan = null;
+      let teams: { id: number; name: string }[] = [];
+      if (user.companyId) {
+        company = await db.getCompanyById(user.companyId);
+        if (company?.planId) plan = await db.getPlanById(company.planId);
+        const allTeams = await db.getTeamsByCompany(user.companyId);
+        teams = allTeams.map(t => ({ id: t.id, name: t.name }));
+      }
+      const recentActivity = await db.getUserRecentActivity(ctx.user.id, user.companyId ?? undefined);
+      return {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        companyRole: user.companyRole,
+        createdAt: user.createdAt,
+        lastSignedIn: user.lastSignedIn,
+        company: company ? { id: company.id, name: company.name, sector: company.sector } : null,
+        plan: plan ? { name: plan.name } : null,
+        teams,
+        recentActivity,
+      };
+    }),
+    updateName: protectedProcedure
+      .input(z.object({ name: z.string().min(1) }))
+      .mutation(async ({ ctx, input }) => {
+        await db.updateUser(ctx.user.id, { name: input.name });
+        return { success: true };
+      }),
+  }),
 
-  // ─── Company ─────────────────────────────────────────────────────
+  // ─── Company ───────────────────────────────────────────────────────
   company: router({
     get: protectedProcedure.query(async ({ ctx }) => {
       if (!ctx.user.companyId) return null;
