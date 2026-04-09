@@ -195,3 +195,7 @@
 - [x] Adicionar rota /dashboard/billing ao App.tsx e navegação
 - [x] Rebuild e deploy no VPS
 - [x] Testar fluxo de billing no browser
+
+### Configuração OpenAI API Key
+- [x] Adicionar OPENAI_API_KEY ao docker-compose.yml do ai-service
+- [x] Reiniciar ai-service e verificar que chamadas AI funcionam (gpt-4o-mini testado, metering a funcionar)
