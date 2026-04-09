@@ -213,3 +213,74 @@ export type TokenTransaction = typeof tokenTransactions.$inferSelect;
 export type ModuleRegistryEntry = typeof moduleRegistry.$inferSelect;
 export type TenantModule = typeof tenantModules.$inferSelect;
 export type ModulePermission = typeof modulePermissions.$inferSelect;
+
+// ─── Password Reset Tokens ─────────────────────────────────────────
+
+export const passwordResetTokens = pgTable("password_reset_tokens", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").references(() => users.id, { onDelete: "cascade" }).notNull(),
+  token: varchar("token", { length: 128 }).notNull().unique(),
+  expiresAt: timestamp("expires_at").notNull(),
+  used: boolean("used").default(false).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type PasswordResetToken = typeof passwordResetTokens.$inferSelect;
+
+// ─── Billing Enums ─────────────────────────────────────────────────
+
+export const invoiceStatusEnum = pgEnum("invoice_status", ["draft", "pending", "paid", "overdue", "cancelled"]);
+export const paymentMethodTypeEnum = pgEnum("payment_method_type", ["bank_transfer", "credit_card", "mbway", "multibanco", "paypal", "other"]);
+export const billingCycleEnum = pgEnum("billing_cycle", ["monthly", "yearly"]);
+
+// ─── Billing Profiles ──────────────────────────────────────────────
+
+export const billingProfiles = pgTable("billing_profiles", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").references(() => companies.id, { onDelete: "cascade" }).notNull().unique(),
+  legalName: varchar("legal_name", { length: 255 }),
+  nif: varchar("nif", { length: 20 }),
+  address: text("address"),
+  postalCode: varchar("postal_code", { length: 20 }),
+  city: varchar("city", { length: 100 }),
+  country: varchar("country", { length: 100 }).default("Portugal"),
+  email: varchar("email", { length: 320 }),
+  phone: varchar("phone", { length: 50 }),
+  preferredPaymentMethod: paymentMethodTypeEnum("preferred_payment_method").default("bank_transfer"),
+  billingCycle: billingCycleEnum("billing_cycle").default("monthly"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// ─── Invoices ──────────────────────────────────────────────────────
+
+export const invoices = pgTable("invoices", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").references(() => companies.id, { onDelete: "cascade" }).notNull(),
+  invoiceNumber: varchar("invoice_number", { length: 50 }).notNull().unique(),
+  status: invoiceStatusEnum("status").default("draft").notNull(),
+  billingCycle: billingCycleEnum("billing_cycle").default("monthly"),
+  periodStart: timestamp("period_start"),
+  periodEnd: timestamp("period_end"),
+  subtotal: integer("subtotal").default(0).notNull(),
+  taxRate: integer("tax_rate").default(23),
+  taxAmount: integer("tax_amount").default(0).notNull(),
+  total: integer("total").default(0).notNull(),
+  currency: varchar("currency", { length: 3 }).default("EUR"),
+  planName: varchar("plan_name", { length: 100 }),
+  planId: integer("plan_id").references(() => plans.id),
+  lineItems: jsonb("line_items"),
+  paidAt: timestamp("paid_at"),
+  dueDate: timestamp("due_date"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// ─── Billing Type Exports ──────────────────────────────────────────
+
+export type BillingProfile = typeof billingProfiles.$inferSelect;
+export type InsertBillingProfile = typeof billingProfiles.$inferInsert;
+export type Invoice = typeof invoices.$inferSelect;
+export type InsertInvoice = typeof invoices.$inferInsert;

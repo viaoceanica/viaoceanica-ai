@@ -2,7 +2,7 @@
 
 - [x] Schema da base de dados (empresas, utilizadores, equipas, membros, planos, tokens, módulos)
 - [x] Sistema de autenticação próprio (email/password) — registo, login, logout
-- [ ] Recuperação de password (placeholder criado — requer serviço de email, fase futura)
+- [x] Recuperação de password (implementado com SMTP via mail.viaoceanica.com)
 - [x] Tema claro como padrão com paleta Via Oceânica (verde-água #00FFAC, amarelo #FFB800, fundo claro)
 - [x] Landing page pública
 - [x] Página de registo de empresa (email/password)
@@ -14,7 +14,7 @@
 - [x] Remover membros da empresa e alterar papéis na UI
 - [x] Gestão de conta empresarial (editar perfil, visualizar planos)
 - [x] Upgrade/downgrade de plano funcional via admin (admin atribui plano; empresa contacta admin)
-- [ ] Secções de faturação e preferências (fase futura — não incluído nesta versão)
+- [x] Secções de faturação e preferências (implementado — billing profiles + invoices)
 - [x] Planos de subscrição (Starter, Professional, Enterprise, Custom) — geridos via backend
 - [x] Configurador modular (ativar/desativar módulos: Restauração, Gestão Email) — apenas interface gráfica
 - [x] Painel de administração: lista de empresas, atribuir tokens gratuitos, gerir planos, monitorização global
@@ -173,3 +173,25 @@
 - [x] ViaContab escuta postMessage e usa tenantId do contexto do dashboard (fallback "demo" após 2s)
 - [x] Loading state enquanto aguarda contexto do dashboard
 - [x] Atualizar mensagens de erro de tenant para refletir injeção automática
+
+### Recuperação de password (SMTP)
+- [x] Adicionar tabela password_reset_tokens na DB (PostgreSQL)
+- [x] Instalar nodemailer no platform-core
+- [x] Criar módulo de email (SMTP config com nodemailer)
+- [x] Criar rota POST /api/auth/forgot-password (gera token, envia email)
+- [x] Criar rota POST /api/auth/reset-password (valida token, atualiza password)
+- [x] Atualizar ForgotPassword.tsx para chamar API real
+- [x] Criar página ResetPassword.tsx para definir nova password
+- [x] Adicionar rota /reset-password/:token no App.tsx
+- [x] Adicionar SMTP env vars ao docker-compose.yml
+- [x] Rebuild e deploy platform-core + shell no VPS
+- [x] Testar fluxo completo de recuperação de password
+
+### Billing Schema e UI de Faturação
+- [x] Analisar schema existente (plans, token_transactions, companies)
+- [x] Criar tabelas billing_profiles e invoices na DB
+- [x] Criar rotas de billing no platform-core (CRUD billing profile, listar faturas)
+- [x] Criar página BillingPage.tsx no dashboard frontend
+- [x] Adicionar rota /dashboard/billing ao App.tsx e navegação
+- [x] Rebuild e deploy no VPS
+- [x] Testar fluxo de billing no browser

@@ -11,6 +11,7 @@ import Home from "./pages/Home";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import ForgotPassword from "./pages/ForgotPassword";
+import ResetPassword from "./pages/ResetPassword";
 import Dashboard from "./pages/Dashboard";
 import TeamManagement from "./pages/TeamManagement";
 import Modules from "./pages/Modules";
@@ -19,6 +20,7 @@ import CompanyProfile from "./pages/CompanyProfile";
 import SettingsPage from "./pages/SettingsPage";
 import UserProfile from "./pages/UserProfile";
 import ModulePage from "./pages/ModulePage";
+import Billing from "./pages/Billing";
 
 // Admin pages
 import AdminDashboard from "./pages/admin/AdminDashboard";
@@ -48,6 +50,8 @@ function CompanyDashboardContent() {
     content = <UserProfile />;
   } else if (location === "/dashboard/settings") {
     content = <SettingsPage />;
+  } else if (location === "/dashboard/billing") {
+    content = <Billing />;
   } else if (moduleMatch) {
     content = <ModulePage />;
   } else {
@@ -94,6 +98,7 @@ function Router() {
   if (location === "/login") return <Login />;
   if (location === "/register") return <Register />;
   if (location === "/forgot-password") return <ForgotPassword />;
+  if (location.startsWith("/reset-password/")) return <ResetPassword />;
   if (location.startsWith("/dashboard")) return <CompanyDashboardContent />;
   if (location.startsWith("/admin")) return <AdminContent />;
   return <NotFound />;
