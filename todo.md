@@ -59,18 +59,18 @@
 - [x] Billing service scaffold criado
 - [ ] Implementar schema billing_db e executar migrações
 - [x] Estrutura preparada para schemas por módulo
-- [ ] Criar schemas específicos para restauracao_db e gestao_email_db
+- [x] Criar schemas específicos para restauracao_db e gestao_email_db (tabelas criadas no PostgreSQL)
 - [x] Adaptar ORM/queries para PostgreSQL (Drizzle com driver pg/postgres)
 - [x] Implementar tenant_id em todas as tabelas tenant-scoped com guardrails de isolamento
 
 ### Fase 4: Serviço AI centralizado com metering
 - [x] AI service scaffold criado (endpoints, metering structure, health/ready)
-- [ ] Completar integração com provider AI real (remover TODOs/placeholders)
-- [ ] Implementar tabela raw AI usage events (usage_event_id, tenant_id, module_key, user_id, provider, model, tokens, cost, etc.)
-- [ ] Implementar tabela aggregated billing summaries (por tenant, module, provider, model, período)
+- [x] Completar integração com provider AI real (OpenAI proxy com metering)
+- [x] Implementar tabela raw AI usage events (ai_usage_events com tenant, module, model, tokens, cost, duration)
+- [x] Implementar tabela aggregated billing summaries (ai_usage_summaries com upsert mensal)
 - [x] Arquitetura definida para módulos chamarem AI service
 - [ ] Implementar chamadas reais dos módulos ao ai-service
-- [ ] Metering obrigatório: cada chamada AI emite raw usage event
+- [x] Metering obrigatório: cada chamada AI emite raw usage event + atualiza summary
 - [ ] Dashboard de consumo AI por tenant e por módulo
 
 ### Fase 5: Docker Compose, Redis e deployment
@@ -80,16 +80,16 @@
 - [x] Configurar reverse proxy (nginx) em frente ao gateway (nginx.conf + rate limiting)
 - [x] Health checks e readiness checks nos containers principais
 - [x] Auditar /health e /ready: platform-core, gateway, mod-contabilidade todos verificados
-- [ ] CPU/memory limits definidos por container
-- [ ] CI/CD baseline para build e deploy independente de cada serviço
+- [x] CPU/memory limits definidos por container
+- [x] CI/CD baseline para build e deploy independente de cada serviço (GitHub Actions workflow)
 - [x] Documentação de environment variables (deploy/env-reference.md)
-- [ ] Implementar estratégia concreta de gestão de secrets (Docker secrets ou .env injection)
+- [x] Implementar estratégia concreta de gestão de secrets (.env injection com docker-compose)
 
 ### Fase 6: Documentação e entrega
-- [ ] Architecture Decision Records (ADRs) formais
+- [x] Architecture Decision Records (ADRs) formais (5 ADRs criados em docs/adrs/)
 - [x] Documentação do module contract e manifest schema (contracts/)
 - [x] Documentação de arquitetura e docker-compose.yml
-- [ ] Expandir para runbook de deployment executável (prereqs, migrações, TLS, rollback)
+- [x] Expandir para runbook de deployment executável (docs/DEPLOYMENT-RUNBOOK.md)
 - [x] Guia de onboarding de novos módulos (ARCHITECTURE.md — "Adding a New Module")
 
 ### Deploy VPS (77.42.95.216)
