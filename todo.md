@@ -154,3 +154,11 @@
 - [x] Gateway module enforcement middleware: verificar entitlement antes de proxy para módulo (fail-open)
 - [x] Auditoria /health e /ready verificada em todos os serviços: gateway, platform-core, mod-contabilidade
 - [x] Deploy e verificação no VPS: todos os 3 serviços reconstruídos e healthy
+
+### Redesign ViaContab para match dashboard look and feel
+- [x] Analisar design do dashboard (cores, fontes, espaçamento, cards, sidebar)
+- [x] Analisar design atual do ViaContab frontend
+- [x] Reescrever page.tsx do ViaContab com novo design alinhado ao dashboard (header branding atualizado)
+- [x] Atualizar globals.css do ViaContab para usar paleta Via Oceânica (teal/green primary, light bg, subtle shadows)
+- [x] Rebuild e deploy contabilidade-frontend no VPS
+- [x] Verificar novo design no VPS (Upload, Queue, Search tabs — todas OK)

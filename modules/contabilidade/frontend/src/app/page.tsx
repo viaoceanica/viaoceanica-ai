@@ -1241,9 +1241,9 @@ export default function Home() {
     <div className="app-shell">
       <header className="top-header">
         <div>
-          <p className="eyebrow">ViaContab · UX Pass 1</p>
-          <h1>Contabilidade com fluxo claro</h1>
-          <p className="subtext">Tabs claras, passo-a-passo no upload, fila com bulk actions e pesquisa rápida.</p>
+          <p className="eyebrow">Módulo de Contabilidade</p>
+          <h1>Gestão de Faturas</h1>
+          <p className="subtext">Upload, classificação automática e pesquisa inteligente de documentos fiscais.</p>
         </div>
         <div className="shortcut-hints">Atalhos: <kbd>/</kbd> Search · <kbd>u</kbd> Upload · <kbd>g</kbd> <kbd>q</kbd> Queue</div>
       </header>
