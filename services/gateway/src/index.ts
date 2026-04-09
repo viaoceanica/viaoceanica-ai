@@ -220,7 +220,8 @@ app.use(
 );
 
 // Module API routes: /api/module/<module_key>/* → module backend
-app.use("/api/module/:moduleKey", (req, res, next) => {
+// Includes entitlement enforcement: checks if the tenant has the module enabled
+app.use("/api/module/:moduleKey", async (req, res, next) => {
   const moduleKey = req.params.moduleKey;
   const targetUrl = getModuleUrl(moduleKey);
 
@@ -229,6 +230,27 @@ app.use("/api/module/:moduleKey", (req, res, next) => {
       success: false,
       error: { code: "MODULE_NOT_FOUND", message: `Module '${moduleKey}' is not registered or not running` },
     });
+  }
+
+  // Enforce module entitlement: check if tenant has access to this module
+  const tenantId = req.headers["x-viao-tenant-id"];
+  if (tenantId && tenantId !== "0") {
+    try {
+      const checkUrl = `${PLATFORM_CORE_URL}/api/v1/entitlements/check?tenantId=${tenantId}&moduleKey=${moduleKey}`;
+      const checkRes = await fetch(checkUrl);
+      if (checkRes.ok) {
+        const checkData = await checkRes.json() as any;
+        if (checkData.success && !checkData.data?.enabled) {
+          return res.status(403).json({
+            success: false,
+            error: { code: "MODULE_DISABLED", message: `Module '${moduleKey}' is not enabled for your company` },
+          });
+        }
+      }
+      // If entitlement check fails (service down), allow through (fail-open)
+    } catch {
+      console.warn(`[Gateway] Entitlement check failed for module '${moduleKey}', allowing through (fail-open)`);
+    }
   }
 
   return createProxyMiddleware({

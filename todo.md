@@ -48,7 +48,7 @@
 - [x] Implementar module registry centralizado na base de dados (modules, tenant_modules, tenant_module_settings)
 - [x] Shell consome module manifest do registry para construir navegação dinâmica (DashboardLayout existente; integração com novo registry por completar)
 - [x] Gateway routing e header injection implementados
-- [ ] Gateway enforcement de módulos desativados (deny path) — por completar com testes
+- [x] Gateway enforcement de módulos desativados (deny path) — /check endpoint + gateway middleware
 - [x] Tenant entitlements: módulos por tenant com suporte a global, plan-based, tenant-specific e beta
 
 ### Fase 3: Migrar para PostgreSQL (Supabase)
@@ -79,7 +79,7 @@
 - [x] Configurar Redis para cache, rate limiting, session helpers e background jobs (redis container + env vars)
 - [x] Configurar reverse proxy (nginx) em frente ao gateway (nginx.conf + rate limiting)
 - [x] Health checks e readiness checks nos containers principais
-- [ ] Auditar e completar /health e /ready em todos os serviços
+- [x] Auditar /health e /ready: platform-core, gateway, mod-contabilidade todos verificados
 - [ ] CPU/memory limits definidos por container
 - [ ] CI/CD baseline para build e deploy independente de cada serviço
 - [x] Documentação de environment variables (deploy/env-reference.md)
@@ -123,8 +123,8 @@
 - [x] Verificar todas as sub-páginas no VPS (10/10 OK)
 
 ### Problemas conhecidos (menores)
-- [ ] Preços dos planos mostram NaN€/mês (campo price pode ser null na DB)
-- [ ] Plano Custom mostra "Até -1 membros" (maxMembers pode ser -1 ou null)
+- [x] Preços dos planos mostram NaN€/mês (corrigido: usar monthlyPrice em vez de price)
+- [x] Plano Custom mostra "Até -1 membros" (corrigido: tratar -1 como ilimitado)
 
 ### Integração ViaContab como Módulo Contabilidade
 - [x] Copiar backend ViaContab para modules/contabilidade/ no projeto
@@ -145,3 +145,12 @@
 - [x] Verificar /health e /ready no root do módulo contabilidade (health OK, ready OK com DB)
 - [x] Confirmar DB config: viaoceanica_contabilidade schema inicializado e usado pelo módulo (/ready confirma DB ok)
 - [x] Teste end-to-end no VPS: health OK, DB ready, API online, iframe funcional (upload/classificação requer ficheiros reais)
+
+### Correções e melhorias (2026-04-09)
+- [x] Fix preços dos planos: usar monthlyPrice (centavos) em vez de price (CompanyProfile, AdminPlans)
+- [x] Fix plano Custom: tratar maxMembers=-1 como "Ilimitado" (Dashboard, CompanyProfile, AdminPlans)
+- [x] Platform-core /ready com DB ping real (SELECT 1) — remover TODO placeholder
+- [x] Entitlements /check endpoint para gateway enforcement (GET /api/v1/entitlements/check?tenantId=X&moduleKey=Y)
+- [x] Gateway module enforcement middleware: verificar entitlement antes de proxy para módulo (fail-open)
+- [x] Auditoria /health e /ready verificada em todos os serviços: gateway, platform-core, mod-contabilidade
+- [x] Deploy e verificação no VPS: todos os 3 serviços reconstruídos e healthy

@@ -247,4 +247,33 @@ router.get("/active", requireAuth, async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /check — Quick entitlement check for gateway enforcement ─────
+// No auth required — called internally by the gateway with tenantId & moduleKey
+
+router.get("/check", async (req: Request, res: Response) => {
+  try {
+    const tenantId = Number(req.query.tenantId);
+    const moduleKey = req.query.moduleKey as string;
+
+    if (!tenantId || !moduleKey) {
+      return res.status(400).json({ success: false, error: { code: "MISSING_PARAMS" } });
+    }
+
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+
+    const result = await db
+      .select()
+      .from(tenantModules)
+      .where(and(eq(tenantModules.tenantId, tenantId), eq(tenantModules.moduleKey, moduleKey)))
+      .limit(1);
+
+    const enabled = result.length > 0 && result[0].enabled;
+    return res.json({ success: true, data: { enabled } });
+  } catch (error) {
+    console.error("[Entitlements] Check error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
+
 export { router as entitlementsRouter };

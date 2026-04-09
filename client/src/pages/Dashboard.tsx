@@ -86,7 +86,7 @@ export default function Dashboard() {
               <div className="text-2xl font-bold">{members?.length ?? 0}</div>
             )}
             <p className="text-xs text-muted-foreground mt-1">
-              {plan ? `máx. ${plan.maxMembers >= 999 ? "ilimitados" : plan.maxMembers}` : "—"}
+              {plan ? `máx. ${plan.maxMembers < 0 || plan.maxMembers >= 999 ? "ilimitados" : plan.maxMembers}` : "—"}
             </p>
           </CardContent>
         </Card>
@@ -123,7 +123,7 @@ export default function Dashboard() {
                 <p className="text-sm text-muted-foreground mt-1">{plan.description}</p>
                 <div className="flex gap-6 mt-3 text-sm text-muted-foreground">
                   <span>{(plan.tokensPerMonth ?? 0).toLocaleString("pt-PT")} tokens/mês</span>
-                  <span>{(plan.maxMembers ?? 0) >= 999 ? "Membros ilimitados" : `Até ${plan.maxMembers} membros`}</span>
+                  <span>{(plan.maxMembers ?? 0) < 0 || (plan.maxMembers ?? 0) >= 999 ? "Membros ilimitados" : `Até ${plan.maxMembers} membros`}</span>
                 </div>
               </div>
               <Button variant="outline" size="sm" onClick={() => setLocation("/dashboard/company")}>

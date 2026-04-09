@@ -132,9 +132,9 @@ export default function CompanyProfile() {
                   <p className="text-sm text-muted-foreground mb-4">{p.description}</p>
                   <div className="space-y-1 text-sm">
                     <p><span className="font-medium">{p.tokensPerMonth.toLocaleString("pt-PT")}</span> tokens/mês</p>
-                    <p>Até <span className="font-medium">{p.maxMembers >= 999 ? "ilimitados" : p.maxMembers}</span> membros</p>
+                    <p>Até <span className="font-medium">{p.maxMembers < 0 || p.maxMembers >= 999 ? "ilimitados" : p.maxMembers}</span> membros</p>
                     <p className="text-lg font-bold mt-3">
-                      {p.price === 0 ? "Gratuito" : `${(p.price / 100).toFixed(0)}€/mês`}
+                      {(p.monthlyPrice ?? 0) === 0 ? "Gratuito" : `${((p.monthlyPrice ?? 0) / 100).toFixed(0)}€/mês`}
                     </p>
                   </div>
                   {!isCurrent && (

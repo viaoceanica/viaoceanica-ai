@@ -17,6 +17,7 @@ import { authRouter } from "./auth/routes.js";
 import { registryRouter } from "./registry/routes.js";
 import { tenantsRouter } from "./tenants/routes.js";
 import { entitlementsRouter } from "./entitlements/routes.js";
+import { getDb } from "./db.js";
 
 const PORT = parseInt(process.env.PLATFORM_CORE_PORT || "4000");
 
@@ -32,12 +33,28 @@ app.get("/health", (_req, res) => {
 });
 
 app.get("/ready", async (_req, res) => {
+  const deps: Record<string, string> = { database: "unknown" };
+  let allOk = true;
+
   // Check database connectivity
   try {
-    // TODO: actual DB ping
-    res.json({ status: "ready", dependencies: { database: "ok", redis: "ok" } });
+    const db = await getDb();
+    if (db) {
+      await db.execute("SELECT 1" as any);
+      deps.database = "ok";
+    } else {
+      deps.database = "error";
+      allOk = false;
+    }
   } catch {
-    res.status(503).json({ status: "not_ready", dependencies: { database: "error" } });
+    deps.database = "error";
+    allOk = false;
+  }
+
+  if (allOk) {
+    res.json({ status: "ready", dependencies: deps });
+  } else {
+    res.status(503).json({ status: "not_ready", dependencies: deps });
   }
 });
 

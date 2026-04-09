@@ -31,7 +31,7 @@ export default function AdminPlans() {
               </CardHeader>
               <CardContent>
                 <div className="text-2xl font-bold mb-4">
-                  {p.price === 0 ? "Gratuito" : `${(p.price / 100).toFixed(0)}€/mês`}
+                  {(p.monthlyPrice ?? 0) === 0 ? "Gratuito" : `${((p.monthlyPrice ?? 0) / 100).toFixed(0)}€/mês`}
                 </div>
                 <div className="space-y-2 text-sm">
                   <div className="flex items-center gap-2">
@@ -40,7 +40,7 @@ export default function AdminPlans() {
                   </div>
                   <div className="flex items-center gap-2">
                     <Check className="h-3 w-3 text-primary" />
-                    <span>{p.maxMembers >= 999 ? "Membros ilimitados" : `Até ${p.maxMembers} membros`}</span>
+                    <span>{p.maxMembers < 0 || p.maxMembers >= 999 ? "Membros ilimitados" : `Até ${p.maxMembers} membros`}</span>
                   </div>
                 </div>
               </CardContent>
