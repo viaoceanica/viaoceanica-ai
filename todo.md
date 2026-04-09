@@ -199,3 +199,20 @@
 ### Configuração OpenAI API Key
 - [x] Adicionar OPENAI_API_KEY ao docker-compose.yml do ai-service
 - [x] Reiniciar ai-service e verificar que chamadas AI funcionam (gpt-4o-mini testado, metering a funcionar)
+
+### Configuração OpenAI no módulo ViaContab
+- [x] Verificar como o módulo contabilidade lê a chave OpenAI (OPENAI_API_KEY via pydantic-settings)
+- [x] Corrigir extraction_model de gpt-5.4-mini para gpt-4o-mini
+- [x] Configurar credenciais R2 (Cloudflare) para storage de ficheiros
+- [x] Adicionar OPENAI_API_KEY ao mod-contabilidade no docker-compose
+- [ ] Reiniciar mod-contabilidade e verificar processamento de faturas com IA
+
+### ViaContab UI Cleanup
+- [x] Remover secção Telemetria de fricção (upload funnel) da página principal
+- [x] Remover indicadores API/DB/OCR do topo da página principal (manter código para futuro)
+- [x] Deploy e verificar no browser
+
+### ViaContab Queue Tab Cleanup
+- [x] Remover card "Falhas de importação" do tab Queue (manter código para futuro)
+- [x] Remover card "Revisão e bloqueios" do tab Queue (manter código para futuro)
+- [x] Deploy e verificar no browser
