@@ -10,6 +10,8 @@ import {
   modules,
   companyModules,
   InsertCompanyModule,
+  modulePermissions,
+  InsertModulePermission,
   tokenTransactions,
   InsertTokenTransaction,
 } from "../drizzle/schema";
@@ -282,6 +284,84 @@ export async function setCompanyModule(data: InsertCompanyModule) {
   } else {
     await db.insert(companyModules).values(data);
   }
+}
+
+// ─── Module Permissions ────────────────────────────────────────────
+
+export async function getModulePermissions(companyModuleId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(modulePermissions).where(eq(modulePermissions.companyModuleId, companyModuleId));
+}
+
+export async function setModulePermissions(companyModuleId: number, permissions: { teamId?: number; userId?: number }[]) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  // Remove existing permissions for this company module
+  await db.delete(modulePermissions).where(eq(modulePermissions.companyModuleId, companyModuleId));
+  // Insert new permissions
+  if (permissions.length > 0) {
+    await db.insert(modulePermissions).values(
+      permissions.map(p => ({ companyModuleId, teamId: p.teamId ?? null, userId: p.userId ?? null }))
+    );
+  }
+}
+
+export async function getCompanyModulesWithDetails(companyId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  const cms = await db.select().from(companyModules).where(eq(companyModules.companyId, companyId));
+  const allMods = await db.select().from(modules);
+  return cms.map(cm => {
+    const mod = allMods.find(m => m.id === cm.moduleId);
+    return { ...cm, slug: mod?.slug, name: mod?.name, icon: mod?.icon, description: mod?.description };
+  });
+}
+
+export async function getActiveModulesForUser(userId: number, companyId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  // Get enabled company modules
+  const cms = await db.select().from(companyModules)
+    .where(and(eq(companyModules.companyId, companyId), eq(companyModules.isEnabled, true)));
+  if (cms.length === 0) return [];
+  // Get all modules metadata
+  const allMods = await db.select().from(modules);
+  // Get user's team memberships
+  const userTeams = await db.select().from(teamMembers).where(eq(teamMembers.userId, userId));
+  const userTeamIds = userTeams.map(t => t.teamId);
+  // Get user info to check if owner/admin
+  const userResult = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  const user = userResult[0];
+  const isOwnerOrAdmin = user?.companyRole === "owner" || user?.companyRole === "admin";
+  
+  const result: { id: number; companyModuleId: number; slug: string; name: string; icon: string | null }[] = [];
+  
+  for (const cm of cms) {
+    const mod = allMods.find(m => m.id === cm.moduleId);
+    if (!mod) continue;
+    // Owner/admin always has access to all active modules
+    if (isOwnerOrAdmin) {
+      result.push({ id: mod.id, companyModuleId: cm.id, slug: mod.slug, name: mod.name, icon: mod.icon });
+      continue;
+    }
+    // Check permissions
+    const perms = await db.select().from(modulePermissions).where(eq(modulePermissions.companyModuleId, cm.id));
+    // If no permissions set, module is accessible to all
+    if (perms.length === 0) {
+      result.push({ id: mod.id, companyModuleId: cm.id, slug: mod.slug, name: mod.name, icon: mod.icon });
+      continue;
+    }
+    // Check if user has direct permission or via team
+    const hasAccess = perms.some(p => 
+      (p.userId && p.userId === userId) || 
+      (p.teamId && userTeamIds.includes(p.teamId))
+    );
+    if (hasAccess) {
+      result.push({ id: mod.id, companyModuleId: cm.id, slug: mod.slug, name: mod.name, icon: mod.icon });
+    }
+  }
+  return result;
 }
 
 // ─── Token Transactions ──────────────────────────────────────────────

@@ -226,6 +226,35 @@ export const appRouter = router({
         await db.setCompanyModule({ companyId: ctx.user.companyId, moduleId: input.moduleId, isEnabled: input.isEnabled });
         return { success: true };
       }),
+    // Get active modules for the current user (for sidebar)
+    activeForUser: protectedProcedure.query(async ({ ctx }) => {
+      if (!ctx.user.companyId) return [];
+      return db.getActiveModulesForUser(ctx.user.id, ctx.user.companyId);
+    }),
+    // Get permissions for a specific company module
+    getPermissions: protectedProcedure
+      .input(z.object({ companyModuleId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        if (!ctx.user.companyId) return [];
+        return db.getModulePermissions(input.companyModuleId);
+      }),
+    // Set permissions for a company module (owner/admin only)
+    setPermissions: protectedProcedure
+      .input(z.object({
+        companyModuleId: z.number(),
+        permissions: z.array(z.object({ teamId: z.number().optional(), userId: z.number().optional() })),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        if (!ctx.user.companyId) throw new Error("Sem empresa associada");
+        if (ctx.user.companyRole !== "owner" && ctx.user.companyRole !== "admin") throw new Error("Sem permiss\u00e3o");
+        await db.setModulePermissions(input.companyModuleId, input.permissions);
+        return { success: true };
+      }),
+    // Get company modules with details (for module management page)
+    companyModulesDetailed: protectedProcedure.query(async ({ ctx }) => {
+      if (!ctx.user.companyId) return [];
+      return db.getCompanyModulesWithDetails(ctx.user.companyId);
+    }),
   }),
 
   // ─── Tokens ──────────────────────────────────────────────────────

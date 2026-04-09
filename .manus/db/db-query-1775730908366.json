@@ -1,0 +1,9 @@
+{
+  "query": "CREATE TABLE `module_permissions` (`id` int AUTO_INCREMENT NOT NULL, `companyModuleId` int NOT NULL, `teamId` int, `userId` int, `grantedAt` timestamp NOT NULL DEFAULT (now()), CONSTRAINT `module_permissions_id` PRIMARY KEY(`id`));",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway03.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 3cVh5zkX4ywvzHG.30195676fa91 --database 6DXmdNCUWEVw8L9yJrZixa --execute CREATE TABLE `module_permissions` (`id` int AUTO_INCREMENT NOT NULL, `companyModuleId` int NOT NULL, `teamId` int, `userId` int, `grantedAt` timestamp NOT NULL DEFAULT (now()), CONSTRAINT `module_permissions_id` PRIMARY KEY(`id`));",
+  "rows": [],
+  "messages": [],
+  "stdout": "",
+  "stderr": "",
+  "execution_time_ms": 502
+}

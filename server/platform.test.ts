@@ -226,3 +226,64 @@ describe("protected procedures", () => {
     expect(typeof result.external).toBe("number");
   });
 });
+
+describe("modules.activeForUser", () => {
+  it("rejects unauthenticated access", async () => {
+    const ctx = createMockContext(null);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.modules.activeForUser()).rejects.toThrow();
+  });
+
+  it("returns empty array for user without company", async () => {
+    const user = createTestUser({ companyId: null as any });
+    const ctx = createMockContext(user);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.modules.activeForUser();
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toHaveLength(0);
+  });
+
+  it("returns array for user with company", async () => {
+    const user = createTestUser();
+    const ctx = createMockContext(user);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.modules.activeForUser();
+    expect(Array.isArray(result)).toBe(true);
+  });
+});
+
+describe("modules.getPermissions", () => {
+  it("rejects unauthenticated access", async () => {
+    const ctx = createMockContext(null);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.modules.getPermissions({ companyModuleId: 1 })).rejects.toThrow();
+  });
+
+  it("returns empty array for user without company", async () => {
+    const user = createTestUser({ companyId: null as any });
+    const ctx = createMockContext(user);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.modules.getPermissions({ companyModuleId: 1 });
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toHaveLength(0);
+  });
+});
+
+describe("modules.setPermissions", () => {
+  it("rejects unauthenticated access", async () => {
+    const ctx = createMockContext(null);
+    const caller = appRouter.createCaller(ctx);
+    await expect(
+      caller.modules.setPermissions({ companyModuleId: 1, permissions: [] })
+    ).rejects.toThrow();
+  });
+
+  it("rejects non-owner/admin from setting permissions", async () => {
+    const user = createTestUser({ companyRole: "member" });
+    const ctx = createMockContext(user);
+    const caller = appRouter.createCaller(ctx);
+    await expect(
+      caller.modules.setPermissions({ companyModuleId: 1, permissions: [] })
+    ).rejects.toThrow();
+  });
+});

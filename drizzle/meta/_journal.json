@@ -15,6 +15,13 @@
       "when": 1775584587294,
       "tag": "0001_classy_yellowjacket",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1775730880966,
+      "tag": "0002_lush_scream",
+      "breakpoints": true
     }
   ]
 }

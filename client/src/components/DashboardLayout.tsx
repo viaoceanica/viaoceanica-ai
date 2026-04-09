@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/sidebar";
 import { LOGO_URL } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
+import { trpc } from "@/lib/trpc";
 import {
   LayoutDashboard,
   Users,
@@ -43,11 +44,20 @@ import {
   UserCircle,
   ChevronRight,
   Lock,
+  UtensilsCrossed,
+  Mail,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { Button } from "./ui/button";
+
+// Map icon names from DB to lucide components
+const moduleIconMap: Record<string, React.ElementType> = {
+  UtensilsCrossed,
+  Mail,
+  Puzzle, // fallback
+};
 
 // Sub-items inside "Definições"
 const settingsSubItems = [
@@ -151,6 +161,11 @@ function DashboardLayoutContent({
   const sidebarRef = useRef<HTMLDivElement>(null);
   const isMobile = useIsMobile();
 
+  // Fetch active modules for the current user
+  const { data: activeModules } = trpc.modules.activeForUser.useQuery(undefined, {
+    enabled: variant === "company",
+  });
+
   // Check if any settings sub-item is active
   const isSettingsActive = settingsSubItems.some(item => location.startsWith(item.path));
   // Start closed — only open when user is on a settings sub-page
@@ -168,6 +183,9 @@ function DashboardLayoutContent({
       return item?.label ?? "Menu";
     }
     if (location === "/dashboard") return "Dashboard";
+    // Check active modules
+    const modMatch = activeModules?.find(m => location.startsWith(`/dashboard/module/${m.slug}`));
+    if (modMatch) return modMatch.name;
     const sub = settingsSubItems.find(i => location.startsWith(i.path));
     return sub?.label ?? "Dashboard";
   };
@@ -244,7 +262,7 @@ function DashboardLayoutContent({
                 })}
               </SidebarMenu>
             ) : (
-              /* ─── Company: Dashboard + Definições (collapsible) ─── */
+              /* ─── Company: Dashboard + Active Modules + Definições ─── */
               <SidebarMenu className="px-2 py-1">
                 {/* Dashboard — main item */}
                 <SidebarMenuItem>
@@ -258,6 +276,26 @@ function DashboardLayoutContent({
                     <span>Dashboard</span>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
+
+                {/* Active modules — dynamic items */}
+                {activeModules && activeModules.length > 0 && activeModules.map(mod => {
+                  const ModIcon = moduleIconMap[mod.icon || ""] || Puzzle;
+                  const modPath = `/dashboard/module/${mod.slug}`;
+                  const isModActive = location.startsWith(modPath);
+                  return (
+                    <SidebarMenuItem key={mod.slug}>
+                      <SidebarMenuButton
+                        isActive={isModActive}
+                        onClick={() => setLocation(modPath)}
+                        tooltip={mod.name}
+                        className="h-10 transition-all font-normal"
+                      >
+                        <ModIcon className={`h-4 w-4 ${isModActive ? "text-primary" : ""}`} />
+                        <span>{mod.name}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  );
+                })}
 
                 {/* Definições — collapsible with sub-items */}
                 <Collapsible

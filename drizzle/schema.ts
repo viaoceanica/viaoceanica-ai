@@ -123,6 +123,18 @@ export const companyModules = mysqlTable("company_modules", {
 export type CompanyModule = typeof companyModules.$inferSelect;
 export type InsertCompanyModule = typeof companyModules.$inferInsert;
 
+// ─── Module Permissions (per team or per user) ─────────────────────────
+export const modulePermissions = mysqlTable("module_permissions", {
+  id: int("id").autoincrement().primaryKey(),
+  companyModuleId: int("companyModuleId").notNull(),
+  teamId: int("teamId"),       // if set, grants access to entire team
+  userId: int("userId"),       // if set, grants access to specific user
+  grantedAt: timestamp("grantedAt").defaultNow().notNull(),
+});
+
+export type ModulePermission = typeof modulePermissions.$inferSelect;
+export type InsertModulePermission = typeof modulePermissions.$inferInsert;
+
 // ─── Token Transactions ──────────────────────────────────────────────
 export const tokenTransactions = mysqlTable("token_transactions", {
   id: int("id").autoincrement().primaryKey(),

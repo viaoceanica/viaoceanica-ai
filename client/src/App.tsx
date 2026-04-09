@@ -1,7 +1,7 @@
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
-import { Route, Switch } from "wouter";
+import { Route, Switch, useLocation } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import DashboardLayout from "./components/DashboardLayout";
@@ -18,6 +18,7 @@ import Tokens from "./pages/Tokens";
 import CompanyProfile from "./pages/CompanyProfile";
 import SettingsPage from "./pages/SettingsPage";
 import UserProfile from "./pages/UserProfile";
+import ModulePage from "./pages/ModulePage";
 
 // Admin pages
 import AdminDashboard from "./pages/admin/AdminDashboard";
@@ -26,53 +27,76 @@ import AdminTokens from "./pages/admin/AdminTokens";
 import AdminModules from "./pages/admin/AdminModules";
 import AdminPlans from "./pages/admin/AdminPlans";
 
-function CompanyDashboardRoutes() {
+function CompanyDashboardContent() {
+  const [location] = useLocation();
+  
+  // Match module/:slug pattern
+  const moduleMatch = location.match(/^\/dashboard\/module\/(.+)$/);
+  
+  let content;
+  if (location === "/dashboard") {
+    content = <Dashboard />;
+  } else if (location === "/dashboard/team") {
+    content = <TeamManagement />;
+  } else if (location === "/dashboard/modules") {
+    content = <Modules />;
+  } else if (location === "/dashboard/tokens") {
+    content = <Tokens />;
+  } else if (location === "/dashboard/company") {
+    content = <CompanyProfile />;
+  } else if (location === "/dashboard/profile") {
+    content = <UserProfile />;
+  } else if (location === "/dashboard/settings") {
+    content = <SettingsPage />;
+  } else if (moduleMatch) {
+    content = <ModulePage />;
+  } else {
+    content = <NotFound />;
+  }
+
   return (
     <DashboardLayout variant="company">
-      <Switch>
-        <Route path="/dashboard" component={Dashboard} />
-        <Route path="/dashboard/team" component={TeamManagement} />
-        <Route path="/dashboard/modules" component={Modules} />
-        <Route path="/dashboard/tokens" component={Tokens} />
-        <Route path="/dashboard/company" component={CompanyProfile} />
-        <Route path="/dashboard/profile" component={UserProfile} />
-        <Route path="/dashboard/settings" component={SettingsPage} />
-        <Route component={NotFound} />
-      </Switch>
+      {content}
     </DashboardLayout>
   );
 }
 
-function AdminRoutes() {
+function AdminContent() {
+  const [location] = useLocation();
+  
+  let content;
+  if (location === "/admin") {
+    content = <AdminDashboard />;
+  } else if (location === "/admin/companies") {
+    content = <AdminCompanies />;
+  } else if (location === "/admin/tokens") {
+    content = <AdminTokens />;
+  } else if (location === "/admin/modules") {
+    content = <AdminModules />;
+  } else if (location === "/admin/plans") {
+    content = <AdminPlans />;
+  } else {
+    content = <NotFound />;
+  }
+
   return (
     <DashboardLayout variant="admin">
-      <Switch>
-        <Route path="/admin" component={AdminDashboard} />
-        <Route path="/admin/companies" component={AdminCompanies} />
-        <Route path="/admin/tokens" component={AdminTokens} />
-        <Route path="/admin/modules" component={AdminModules} />
-        <Route path="/admin/plans" component={AdminPlans} />
-        <Route component={NotFound} />
-      </Switch>
+      {content}
     </DashboardLayout>
   );
 }
 
 function Router() {
-  return (
-    <Switch>
-      <Route path="/" component={Home} />
-      <Route path="/login" component={Login} />
-      <Route path="/register" component={Register} />
-      <Route path="/forgot-password" component={ForgotPassword} />
-      <Route path="/dashboard/:rest*" component={CompanyDashboardRoutes} />
-      <Route path="/dashboard" component={CompanyDashboardRoutes} />
-      <Route path="/admin/:rest*" component={AdminRoutes} />
-      <Route path="/admin" component={AdminRoutes} />
-      <Route path="/404" component={NotFound} />
-      <Route component={NotFound} />
-    </Switch>
-  );
+  const [location] = useLocation();
+  
+  // Route based on location prefix
+  if (location === "/") return <Home />;
+  if (location === "/login") return <Login />;
+  if (location === "/register") return <Register />;
+  if (location === "/forgot-password") return <ForgotPassword />;
+  if (location.startsWith("/dashboard")) return <CompanyDashboardContent />;
+  if (location.startsWith("/admin")) return <AdminContent />;
+  return <NotFound />;
 }
 
 function App() {

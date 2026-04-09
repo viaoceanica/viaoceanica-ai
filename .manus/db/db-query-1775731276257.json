@@ -1,0 +1,22 @@
+{
+  "query": "SELECT id, slug, name, icon FROM modules;",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway03.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 3cVh5zkX4ywvzHG.30195676fa91 --database 6DXmdNCUWEVw8L9yJrZixa --execute SELECT id, slug, name, icon FROM modules;",
+  "rows": [
+    {
+      "id": "1",
+      "slug": "restauracao",
+      "name": "Restauração",
+      "icon": "UtensilsCrossed"
+    },
+    {
+      "id": "2",
+      "slug": "gestao-email",
+      "name": "Gestão Email",
+      "icon": "Mail"
+    }
+  ],
+  "messages": [],
+  "stdout": "id\tslug\tname\ticon\n1\trestauracao\tRestauração\tUtensilsCrossed\n2\tgestao-email\tGestão Email\tMail\n",
+  "stderr": "",
+  "execution_time_ms": 361
+}

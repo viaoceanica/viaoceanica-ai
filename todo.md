@@ -19,7 +19,15 @@
 - [x] Configurador modular (ativar/desativar módulos: Restauração, Gestão Email) — apenas interface gráfica
 - [x] Painel de administração: lista de empresas, atribuir tokens gratuitos, gerir planos, monitorização global
 - [x] Admin: visualização de tokens totais e por empresa, e por módulo
-- [x] Testes vitest (18 testes a passar)
+- [x] Testes vitest (21 testes a passar)
 - [x] Página de perfil de utilizador (informações pessoais, atividade recente)
 - [x] Reorganizar sidebar: Dashboard como item principal, restantes (Equipa, Módulos, Tokens, Empresa, Perfil, Segurança) como sub-menus de Definições
 - [x] Bug: sub-menu Definições abre automaticamente ao aceder ao Dashboard — deve iniciar fechado
+- [x] Módulos ativos aparecem como itens na sidebar (abaixo do Dashboard, acima de Definições)
+- [x] Ao ativar módulo, abre painel de gestão de permissões (equipas e membros)
+- [x] Proprietário define que equipas e membros acedem a cada módulo
+- [x] Validar que todos os módulos ativos aparecem na sidebar (incluindo Gestão Email quando ativo)
+- [x] Enforcement de permissões no acesso a /dashboard/module/:slug (bloquear sem permissão)
+- [x] Testes vitest para rotas de permissões de módulos (28 testes a passar)
+- [x] Validar no UI que Gestão Email ativo aparece na sidebar
+- [x] Enforcement de permissões no backend (server-side) para módulos (getActiveModulesForUser verifica owner/admin, equipas e permissões individuais)
