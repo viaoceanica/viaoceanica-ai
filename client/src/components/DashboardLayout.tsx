@@ -30,7 +30,7 @@ import {
 } from "@/components/ui/sidebar";
 import { LOGO_URL } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { trpc } from "@/lib/trpc";
+import { useQuery } from "@/hooks/useApi";
 import {
   LayoutDashboard,
   Users,
@@ -161,10 +161,11 @@ function DashboardLayoutContent({
   const sidebarRef = useRef<HTMLDivElement>(null);
   const isMobile = useIsMobile();
 
-  // Fetch active modules for the current user
-  const { data: activeModules } = trpc.modules.activeForUser.useQuery(undefined, {
-    enabled: variant === "company",
-  });
+  // Fetch active modules for the current user (entitlements)
+  const { data: activeModules } = useQuery<any[]>(
+    variant === "company" ? "/api/platform/entitlements/modules" : null,
+    { enabled: variant === "company" }
+  );
 
   // Check if any settings sub-item is active
   const isSettingsActive = settingsSubItems.some(item => location.startsWith(item.path));
@@ -184,7 +185,7 @@ function DashboardLayoutContent({
     }
     if (location === "/dashboard") return "Dashboard";
     // Check active modules
-    const modMatch = activeModules?.find(m => location.startsWith(`/dashboard/module/${m.slug}`));
+    const modMatch = activeModules?.find((m: any) => location.startsWith(`/dashboard/module/${m.moduleKey}`));
     if (modMatch) return modMatch.name;
     const sub = settingsSubItems.find(i => location.startsWith(i.path));
     return sub?.label ?? "Dashboard";
@@ -278,12 +279,12 @@ function DashboardLayoutContent({
                 </SidebarMenuItem>
 
                 {/* Active modules — dynamic items */}
-                {activeModules && activeModules.length > 0 && activeModules.map(mod => {
+                {activeModules && activeModules.length > 0 && activeModules.filter((m: any) => m.enabled).map((mod: any) => {
                   const ModIcon = moduleIconMap[mod.icon || ""] || Puzzle;
-                  const modPath = `/dashboard/module/${mod.slug}`;
+                  const modPath = `/dashboard/module/${mod.moduleKey}`;
                   const isModActive = location.startsWith(modPath);
                   return (
-                    <SidebarMenuItem key={mod.slug}>
+                    <SidebarMenuItem key={mod.moduleKey}>
                       <SidebarMenuButton
                         isActive={isModActive}
                         onClick={() => setLocation(modPath)}

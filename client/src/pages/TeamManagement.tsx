@@ -8,7 +8,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { trpc } from "@/lib/trpc";
+import { useQuery, useMutation, useDynamicMutation, apiFetch } from "@/hooks/useApi";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Plus, Send, Trash2, Users, UserPlus, MoreHorizontal, ShieldCheck, User, UserMinus } from "lucide-react";
 import { useState } from "react";
@@ -17,27 +17,32 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 export default function TeamManagement() {
   const { user: currentUser } = useAuth();
-  const { data: members, isLoading: membersLoading, refetch: refetchMembers } = trpc.company.members.useQuery();
-  const { data: teams, isLoading: teamsLoading, refetch: refetchTeams } = trpc.teams.list.useQuery();
-  const { data: pendingInvites, refetch: refetchInvites } = trpc.invitations.list.useQuery();
 
-  const createTeam = trpc.teams.create.useMutation({
+  const { data: members, isLoading: membersLoading, refetch: refetchMembers } = useQuery<any[]>("/api/platform/tenants/members");
+  const { data: teams, isLoading: teamsLoading, refetch: refetchTeams } = useQuery<any[]>("/api/platform/tenants/teams");
+  const { data: pendingInvites, refetch: refetchInvites } = useQuery<any[]>("/api/platform/tenants/invitations");
+
+  const createTeam = useMutation<{ name: string }>("/api/platform/tenants/teams", "POST", {
     onSuccess: () => { refetchTeams(); toast.success("Equipa criada"); },
     onError: (e) => toast.error(e.message),
   });
-  const deleteTeam = trpc.teams.delete.useMutation({
+
+  const deleteTeamMut = useDynamicMutation("DELETE", {
     onSuccess: () => { refetchTeams(); toast.success("Equipa eliminada"); },
     onError: (e) => toast.error(e.message),
   });
-  const invite = trpc.invitations.create.useMutation({
+
+  const inviteMut = useMutation<{ email: string; role: string }>("/api/platform/tenants/invitations", "POST", {
     onSuccess: () => { refetchInvites(); toast.success("Convite enviado"); },
     onError: (e) => toast.error(e.message),
   });
-  const updateRole = trpc.companyMembers.updateRole.useMutation({
+
+  const updateRoleMut = useDynamicMutation("PUT", {
     onSuccess: () => { refetchMembers(); toast.success("Papel atualizado"); },
     onError: (e) => toast.error(e.message),
   });
-  const removeMember = trpc.companyMembers.remove.useMutation({
+
+  const removeMemberMut = useDynamicMutation("DELETE", {
     onSuccess: () => { refetchMembers(); toast.success("Membro removido"); },
     onError: (e) => toast.error(e.message),
   });
@@ -109,14 +114,14 @@ export default function TeamManagement() {
               <DialogFooter>
                 <Button variant="outline" onClick={() => setInviteDialogOpen(false)}>Cancelar</Button>
                 <Button
-                  onClick={() => {
+                  onClick={async () => {
                     if (!inviteEmail) return;
-                    invite.mutate({ email: inviteEmail, role: inviteRole });
+                    await inviteMut.mutateAsync({ email: inviteEmail, role: inviteRole });
                     setInviteEmail("");
                     setInviteRole("member");
                     setInviteDialogOpen(false);
                   }}
-                  disabled={invite.isPending}
+                  disabled={inviteMut.isPending}
                 >
                   <Send className="h-4 w-4 mr-1" />
                   Enviar convite
@@ -153,7 +158,7 @@ export default function TeamManagement() {
                       <TableCell>{m.email || "—"}</TableCell>
                       <TableCell>{getRoleBadge(m.companyRole)}</TableCell>
                       <TableCell className="text-muted-foreground text-sm">
-                        {new Date(m.createdAt).toLocaleDateString("pt-PT")}
+                        {m.createdAt ? new Date(m.createdAt).toLocaleDateString("pt-PT") : "—"}
                       </TableCell>
                       {canManageMembers && (
                         <TableCell>
@@ -167,7 +172,7 @@ export default function TeamManagement() {
                               <DropdownMenuContent align="end">
                                 {m.companyRole === "member" ? (
                                   <DropdownMenuItem
-                                    onClick={() => updateRole.mutate({ userId: m.id, role: "admin" })}
+                                    onClick={() => updateRoleMut.mutateAsync(`/api/platform/tenants/members/${m.id}/role`, { role: "admin" })}
                                     className="cursor-pointer"
                                   >
                                     <ShieldCheck className="h-4 w-4 mr-2" />
@@ -175,7 +180,7 @@ export default function TeamManagement() {
                                   </DropdownMenuItem>
                                 ) : (
                                   <DropdownMenuItem
-                                    onClick={() => updateRole.mutate({ userId: m.id, role: "member" })}
+                                    onClick={() => updateRoleMut.mutateAsync(`/api/platform/tenants/members/${m.id}/role`, { role: "member" })}
                                     className="cursor-pointer"
                                   >
                                     <User className="h-4 w-4 mr-2" />
@@ -204,7 +209,7 @@ export default function TeamManagement() {
                                     <AlertDialogFooter>
                                       <AlertDialogCancel>Cancelar</AlertDialogCancel>
                                       <AlertDialogAction
-                                        onClick={() => removeMember.mutate({ userId: m.id })}
+                                        onClick={() => removeMemberMut.mutateAsync(`/api/platform/tenants/members/${m.id}`)}
                                         className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                                       >
                                         Remover
@@ -287,9 +292,9 @@ export default function TeamManagement() {
               <DialogFooter>
                 <Button variant="outline" onClick={() => setTeamDialogOpen(false)}>Cancelar</Button>
                 <Button
-                  onClick={() => {
+                  onClick={async () => {
                     if (!newTeamName) return;
-                    createTeam.mutate({ name: newTeamName });
+                    await createTeam.mutateAsync({ name: newTeamName });
                     setNewTeamName("");
                     setTeamDialogOpen(false);
                   }}
@@ -317,7 +322,7 @@ export default function TeamManagement() {
                     <div>
                       <p className="font-medium">{team.name}</p>
                       <p className="text-xs text-muted-foreground">
-                        Criada em {new Date(team.createdAt).toLocaleDateString("pt-PT")}
+                        {team.createdAt ? `Criada em ${new Date(team.createdAt).toLocaleDateString("pt-PT")}` : ""}
                       </p>
                     </div>
                   </div>
@@ -341,7 +346,7 @@ export default function TeamManagement() {
                       <AlertDialogFooter>
                         <AlertDialogCancel>Cancelar</AlertDialogCancel>
                         <AlertDialogAction
-                          onClick={() => deleteTeam.mutate({ teamId: team.id })}
+                          onClick={() => deleteTeamMut.mutateAsync(`/api/platform/tenants/teams/${team.id}`)}
                           className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                         >
                           Eliminar

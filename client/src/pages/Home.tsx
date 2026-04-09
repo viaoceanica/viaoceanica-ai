@@ -18,7 +18,7 @@ export default function Home() {
           </Link>
           <nav className="flex items-center gap-3">
             {loading ? null : user ? (
-              <Button onClick={() => setLocation(user.role === "admin" ? "/admin" : "/dashboard")} size="sm">
+              <Button onClick={() => setLocation(user.platformRole === "admin" ? "/admin" : "/dashboard")} size="sm">
                 Dashboard
                 <ArrowRight className="ml-1 h-4 w-4" />
               </Button>

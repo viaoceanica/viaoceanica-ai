@@ -12,7 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
-import { trpc } from "@/lib/trpc";
+import { useQuery, useDynamicMutation, apiFetch } from "@/hooks/useApi";
 import { UtensilsCrossed, Mail, Puzzle, Users, UserCircle, Shield } from "lucide-react";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -26,45 +26,31 @@ const iconMap: Record<string, React.ElementType> = {
 type PermissionEntry = { teamId?: number; userId?: number };
 
 export default function Modules() {
-  const { data: allModules, isLoading } = trpc.modules.listAll.useQuery();
-  const { data: companyMods, refetch: refetchCompanyMods } = trpc.modules.companyModules.useQuery();
-  const { data: detailedMods, refetch: refetchDetailed } = trpc.modules.companyModulesDetailed.useQuery();
-  const { data: teamsData } = trpc.teams.list.useQuery();
-  const { data: membersData } = trpc.company.members.useQuery();
+  // Registry: all available modules
+  const { data: allModules, isLoading } = useQuery<any[]>("/api/platform/registry/modules");
+  // Entitlements: tenant's modules (enabled/disabled)
+  const { data: companyMods, refetch: refetchCompanyMods } = useQuery<any[]>("/api/platform/entitlements/modules");
+  // Teams
+  const { data: teamsData } = useQuery<any[]>("/api/platform/tenants/teams");
+  // Members
+  const { data: membersData } = useQuery<any[]>("/api/platform/tenants/members");
 
-  const toggle = trpc.modules.toggle.useMutation({
-    onSuccess: () => {
-      refetchCompanyMods();
-      refetchDetailed();
-    },
-    onError: (e) => toast.error(e.message),
-  });
-
-  const setPermissions = trpc.modules.setPermissions.useMutation({
-    onSuccess: () => {
-      toast.success("Permissões atualizadas");
-      setPermDialogOpen(false);
-      refetchCompanyMods();
-      refetchDetailed();
-    },
-    onError: (e) => toast.error(e.message),
-  });
+  const toggleMod = useDynamicMutation("PUT");
+  const setPermsMut = useDynamicMutation("PUT");
 
   // Permission dialog state
   const [permDialogOpen, setPermDialogOpen] = useState(false);
   const [activeModuleForPerm, setActiveModuleForPerm] = useState<{
-    moduleId: number;
-    companyModuleId: number;
+    moduleKey: string;
     name: string;
   } | null>(null);
   const [selectedTeams, setSelectedTeams] = useState<number[]>([]);
   const [selectedUsers, setSelectedUsers] = useState<number[]>([]);
-  const [permLoading, setPermLoading] = useState(false);
 
   // Load existing permissions when dialog opens
-  const { data: currentPerms, refetch: refetchPerms } = trpc.modules.getPermissions.useQuery(
-    { companyModuleId: activeModuleForPerm?.companyModuleId ?? 0 },
-    { enabled: !!activeModuleForPerm?.companyModuleId }
+  const { data: currentPerms, refetch: refetchPerms } = useQuery<any[]>(
+    activeModuleForPerm ? `/api/platform/entitlements/modules/${activeModuleForPerm.moduleKey}/permissions` : null,
+    { enabled: !!activeModuleForPerm }
   );
 
   useEffect(() => {
@@ -74,37 +60,31 @@ export default function Modules() {
     }
   }, [currentPerms, activeModuleForPerm]);
 
-  const isEnabled = (moduleId: number) => {
-    return companyMods?.some(m => m.moduleId === moduleId && m.isEnabled) ?? false;
+  const isEnabled = (moduleKey: string) => {
+    return companyMods?.some(m => m.moduleKey === moduleKey && m.enabled) ?? false;
   };
 
-  const getCompanyModuleId = (moduleId: number) => {
-    return companyMods?.find(m => m.moduleId === moduleId)?.id;
-  };
-
-  const handleToggle = async (moduleId: number, checked: boolean, moduleName: string) => {
-    await toggle.mutateAsync({ moduleId, isEnabled: checked });
-    if (checked) {
-      // After activating, open permission dialog
-      // Need to refetch to get the companyModuleId
-      const updated = await refetchCompanyMods();
-      const cm = updated.data?.find(m => m.moduleId === moduleId);
-      if (cm) {
-        setActiveModuleForPerm({ moduleId, companyModuleId: cm.id, name: moduleName });
+  const handleToggle = async (moduleKey: string, checked: boolean, moduleName: string) => {
+    try {
+      await toggleMod.mutateAsync(`/api/platform/entitlements/modules/${moduleKey}`, { enabled: checked });
+      await refetchCompanyMods();
+      if (checked) {
+        // After activating, open permission dialog
+        setActiveModuleForPerm({ moduleKey, name: moduleName });
         setSelectedTeams([]);
         setSelectedUsers([]);
         setPermDialogOpen(true);
+        toast.success(`Módulo "${moduleName}" ativado`);
+      } else {
+        toast.success(`Módulo "${moduleName}" desativado`);
       }
-      toast.success(`Módulo "${moduleName}" ativado`);
-    } else {
-      toast.success(`Módulo "${moduleName}" desativado`);
+    } catch (e: any) {
+      toast.error(e.message);
     }
   };
 
-  const handleOpenPermissions = (moduleId: number, moduleName: string) => {
-    const cmId = getCompanyModuleId(moduleId);
-    if (!cmId) return;
-    setActiveModuleForPerm({ moduleId, companyModuleId: cmId, name: moduleName });
+  const handleOpenPermissions = (moduleKey: string, moduleName: string) => {
+    setActiveModuleForPerm({ moduleKey, name: moduleName });
     setPermDialogOpen(true);
   };
 
@@ -114,10 +94,17 @@ export default function Modules() {
       ...selectedTeams.map(teamId => ({ teamId })),
       ...selectedUsers.map(userId => ({ userId })),
     ];
-    await setPermissions.mutateAsync({
-      companyModuleId: activeModuleForPerm.companyModuleId,
-      permissions,
-    });
+    try {
+      await setPermsMut.mutateAsync(
+        `/api/platform/entitlements/modules/${activeModuleForPerm.moduleKey}/permissions`,
+        { permissions }
+      );
+      toast.success("Permissões atualizadas");
+      setPermDialogOpen(false);
+      refetchCompanyMods();
+    } catch (e: any) {
+      toast.error(e.message);
+    }
   };
 
   const toggleTeam = (teamId: number) => {
@@ -147,10 +134,9 @@ export default function Modules() {
         <div className="grid gap-4 md:grid-cols-2">
           {allModules?.map((mod) => {
             const Icon = iconMap[mod.icon || ""] || Puzzle;
-            const enabled = isEnabled(mod.id);
-            const cmId = getCompanyModuleId(mod.id);
+            const enabled = isEnabled(mod.moduleKey);
             return (
-              <Card key={mod.id} className={`border-border/50 transition-all ${enabled ? "ring-1 ring-primary/20 bg-primary/[0.02]" : ""}`}>
+              <Card key={mod.moduleKey} className={`border-border/50 transition-all ${enabled ? "ring-1 ring-primary/20 bg-primary/[0.02]" : ""}`}>
                 <CardHeader className="flex flex-row items-start justify-between pb-3">
                   <div className="flex items-start gap-3">
                     <div className={`h-10 w-10 rounded-lg flex items-center justify-center shrink-0 ${enabled ? "bg-primary/10" : "bg-muted"}`}>
@@ -163,8 +149,8 @@ export default function Modules() {
                   </div>
                   <Switch
                     checked={enabled}
-                    onCheckedChange={(checked) => handleToggle(mod.id, checked, mod.name)}
-                    disabled={toggle.isPending}
+                    onCheckedChange={(checked) => handleToggle(mod.moduleKey, checked, mod.name)}
+                    disabled={toggleMod.isPending}
                   />
                 </CardHeader>
                 <CardContent>
@@ -173,16 +159,16 @@ export default function Modules() {
                       <Badge variant={enabled ? "default" : "secondary"} className="text-xs">
                         {enabled ? "Ativo" : "Inativo"}
                       </Badge>
-                      {!mod.isActive && (
+                      {mod.status !== "active" && (
                         <Badge variant="outline" className="text-xs">Em breve</Badge>
                       )}
                     </div>
-                    {enabled && cmId && (
+                    {enabled && (
                       <Button
                         variant="ghost"
                         size="sm"
                         className="text-xs h-8"
-                        onClick={() => handleOpenPermissions(mod.id, mod.name)}
+                        onClick={() => handleOpenPermissions(mod.moduleKey, mod.name)}
                       >
                         <Shield className="h-3.5 w-3.5 mr-1.5" />
                         Gerir acessos
@@ -293,8 +279,8 @@ export default function Modules() {
             <Button variant="outline" onClick={() => setPermDialogOpen(false)}>
               Cancelar
             </Button>
-            <Button onClick={handleSavePermissions} disabled={setPermissions.isPending}>
-              {setPermissions.isPending ? "A guardar..." : "Guardar permissões"}
+            <Button onClick={handleSavePermissions} disabled={setPermsMut.isPending}>
+              {setPermsMut.isPending ? "A guardar..." : "Guardar permissões"}
             </Button>
           </DialogFooter>
         </DialogContent>

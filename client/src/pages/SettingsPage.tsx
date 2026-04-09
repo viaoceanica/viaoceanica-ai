@@ -3,14 +3,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { trpc } from "@/lib/trpc";
+import { useMutation } from "@/hooks/useApi";
 import { Key, User } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
 export default function SettingsPage() {
   const { user } = useAuth();
-  const changePassword = trpc.auth.changePassword.useMutation({
+  const changePassword = useMutation<{ currentPassword: string; newPassword: string }>("/api/auth/change-password", "POST", {
     onSuccess: () => { toast.success("Password alterada com sucesso"); setPassForm({ current: "", new: "", confirm: "" }); },
     onError: (e) => toast.error(e.message),
   });
@@ -26,7 +26,7 @@ export default function SettingsPage() {
       toast.error("A password deve ter pelo menos 6 caracteres");
       return;
     }
-    changePassword.mutate({ currentPassword: passForm.current, newPassword: passForm.new });
+    changePassword.mutateAsync({ currentPassword: passForm.current, newPassword: passForm.new });
   };
 
   return (

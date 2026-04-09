@@ -1,13 +1,14 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { trpc } from "@/lib/trpc";
+import { useQuery } from "@/hooks/useApi";
 import { Building2, Users, Coins, Puzzle } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function AdminDashboard() {
-  const { data: companies, isLoading: companiesLoading } = trpc.admin.companies.useQuery();
-  const { data: users, isLoading: usersLoading } = trpc.admin.users.useQuery();
-  const { data: modules, isLoading: modulesLoading } = trpc.admin.allModules.useQuery();
-  const { data: plans, isLoading: plansLoading } = trpc.admin.plans.useQuery();
+  // Admin endpoints: GET /api/platform/tenants/admin/*
+  const { data: companies, isLoading: companiesLoading } = useQuery<any[]>("/api/platform/tenants/admin/companies");
+  const { data: users, isLoading: usersLoading } = useQuery<any[]>("/api/platform/tenants/admin/users");
+  const { data: modules, isLoading: modulesLoading } = useQuery<any[]>("/api/platform/registry/modules");
+  const { data: plans, isLoading: plansLoading } = useQuery<any[]>("/api/platform/tenants/admin/plans");
 
   return (
     <div className="space-y-8">
@@ -73,7 +74,7 @@ export default function AdminDashboard() {
             <div className="space-y-3">{[1, 2, 3].map(i => <Skeleton key={i} className="h-12 w-full" />)}</div>
           ) : companies && companies.length > 0 ? (
             <div className="space-y-3">
-              {companies.slice(0, 5).map((c) => (
+              {companies.slice(0, 5).map((c: any) => (
                 <div key={c.id} className="flex items-center justify-between p-3 rounded-lg border border-border/50">
                   <div className="flex items-center gap-3">
                     <div className="h-9 w-9 rounded-lg bg-primary/10 flex items-center justify-center">

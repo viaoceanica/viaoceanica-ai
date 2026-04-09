@@ -4,22 +4,23 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { trpc } from "@/lib/trpc";
+import { useQuery, useDynamicMutation } from "@/hooks/useApi";
 import { Building2, Coins, Eye } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function AdminCompanies() {
-  const { data: companies, isLoading, refetch } = trpc.admin.companies.useQuery();
-  const { data: plans } = trpc.admin.plans.useQuery();
-  const grantTokens = trpc.admin.grantTokens.useMutation({
+  const { data: companies, isLoading, refetch } = useQuery<any[]>("/api/platform/tenants/admin/companies");
+  const { data: plans } = useQuery<any[]>("/api/platform/tenants/admin/plans");
+
+  const grantTokensMut = useDynamicMutation("POST", {
     onSuccess: () => { refetch(); toast.success("Tokens atribuídos"); },
     onError: (e) => toast.error(e.message),
   });
-  const assignPlan = trpc.admin.assignPlan.useMutation({
+  const assignPlanMut = useDynamicMutation("PUT", {
     onSuccess: () => { refetch(); toast.success("Plano atribuído"); },
     onError: (e) => toast.error(e.message),
   });
@@ -33,8 +34,10 @@ export default function AdminCompanies() {
   const [selectedPlan, setSelectedPlan] = useState("");
 
   const [detailDialog, setDetailDialog] = useState<{ open: boolean; companyId: number }>({ open: false, companyId: 0 });
-  const { data: companyDetail } = trpc.admin.companyDetails.useQuery(
-    { companyId: detailDialog.companyId },
+  const { data: companyDetail } = useQuery<any>(
+    detailDialog.open && detailDialog.companyId > 0
+      ? `/api/platform/tenants/admin/companies/${detailDialog.companyId}`
+      : null,
     { enabled: detailDialog.open && detailDialog.companyId > 0 }
   );
 
@@ -67,21 +70,21 @@ export default function AdminCompanies() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {companies?.map((c) => {
-                  const companyPlan = plans?.find(p => p.id === c.planId);
+                {companies?.map((c: any) => {
+                  const companyPlan = plans?.find((p: any) => p.id === c.planId);
                   return (
                     <TableRow key={c.id}>
                       <TableCell className="font-medium">{c.name}</TableCell>
                       <TableCell className="text-muted-foreground">{c.sector || "—"}</TableCell>
-                      <TableCell>{c.tokensBalance.toLocaleString("pt-PT")}</TableCell>
-                      <TableCell>{c.externalTokensBalance.toLocaleString("pt-PT")}</TableCell>
+                      <TableCell>{(c.tokensBalance ?? 0).toLocaleString("pt-PT")}</TableCell>
+                      <TableCell>{(c.externalTokensBalance ?? 0).toLocaleString("pt-PT")}</TableCell>
                       <TableCell>
                         <Badge variant={companyPlan ? "default" : "secondary"} className="text-xs">
                           {companyPlan?.name || "Sem plano"}
                         </Badge>
                       </TableCell>
                       <TableCell className="text-muted-foreground text-sm">
-                        {new Date(c.createdAt).toLocaleDateString("pt-PT")}
+                        {c.createdAt ? new Date(c.createdAt).toLocaleDateString("pt-PT") : "—"}
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-1">
@@ -156,15 +159,18 @@ export default function AdminCompanies() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setGrantDialog(p => ({ ...p, open: false }))}>Cancelar</Button>
             <Button
-              onClick={() => {
+              onClick={async () => {
                 const amount = parseInt(grantAmount);
                 if (!amount || amount <= 0) { toast.error("Quantidade inválida"); return; }
-                grantTokens.mutate({ companyId: grantDialog.companyId, amount, source: grantSource, description: grantDesc || undefined });
+                await grantTokensMut.mutateAsync(
+                  `/api/platform/tenants/admin/companies/${grantDialog.companyId}/tokens`,
+                  { amount, source: grantSource, description: grantDesc || undefined }
+                );
                 setGrantAmount("");
                 setGrantDesc("");
                 setGrantDialog(p => ({ ...p, open: false }));
               }}
-              disabled={grantTokens.isPending}
+              disabled={grantTokensMut.isPending}
             >
               Atribuir
             </Button>
@@ -185,7 +191,7 @@ export default function AdminCompanies() {
               <Select value={selectedPlan} onValueChange={setSelectedPlan}>
                 <SelectTrigger><SelectValue placeholder="Selecionar plano" /></SelectTrigger>
                 <SelectContent>
-                  {plans?.map(p => (
+                  {plans?.map((p: any) => (
                     <SelectItem key={p.id} value={p.id.toString()}>{p.name}</SelectItem>
                   ))}
                 </SelectContent>
@@ -195,13 +201,16 @@ export default function AdminCompanies() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setPlanDialog(p => ({ ...p, open: false }))}>Cancelar</Button>
             <Button
-              onClick={() => {
+              onClick={async () => {
                 if (!selectedPlan) { toast.error("Selecione um plano"); return; }
-                assignPlan.mutate({ companyId: planDialog.companyId, planId: parseInt(selectedPlan) });
+                await assignPlanMut.mutateAsync(
+                  `/api/platform/tenants/admin/companies/${planDialog.companyId}/plan`,
+                  { planId: parseInt(selectedPlan) }
+                );
                 setSelectedPlan("");
                 setPlanDialog(p => ({ ...p, open: false }));
               }}
-              disabled={assignPlan.isPending}
+              disabled={assignPlanMut.isPending}
             >
               Atribuir
             </Button>
@@ -222,13 +231,13 @@ export default function AdminCompanies() {
                 <div><span className="text-muted-foreground">Sector:</span> {companyDetail.company?.sector || "—"}</div>
                 <div><span className="text-muted-foreground">Email:</span> {companyDetail.company?.email || "—"}</div>
                 <div><span className="text-muted-foreground">Plano:</span> {companyDetail.plan?.name || "Sem plano"}</div>
-                <div><span className="text-muted-foreground">Tokens int.:</span> {companyDetail.company?.tokensBalance.toLocaleString("pt-PT")}</div>
-                <div><span className="text-muted-foreground">Tokens ext.:</span> {companyDetail.company?.externalTokensBalance.toLocaleString("pt-PT")}</div>
+                <div><span className="text-muted-foreground">Tokens int.:</span> {(companyDetail.company?.tokensBalance ?? 0).toLocaleString("pt-PT")}</div>
+                <div><span className="text-muted-foreground">Tokens ext.:</span> {(companyDetail.company?.externalTokensBalance ?? 0).toLocaleString("pt-PT")}</div>
               </div>
               <div>
-                <h4 className="text-sm font-medium mb-2">Membros ({companyDetail.members.length})</h4>
+                <h4 className="text-sm font-medium mb-2">Membros ({companyDetail.members?.length ?? 0})</h4>
                 <div className="space-y-1">
-                  {companyDetail.members.map(m => (
+                  {companyDetail.members?.map((m: any) => (
                     <div key={m.id} className="flex items-center justify-between text-sm py-1 px-2 rounded bg-muted/50">
                       <span>{m.name || m.email}</span>
                       <Badge variant="secondary" className="text-xs">{m.companyRole}</Badge>

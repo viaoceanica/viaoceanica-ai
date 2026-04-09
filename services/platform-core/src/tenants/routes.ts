@@ -312,7 +312,113 @@ router.get("/admin/companies", requireAdmin, async (_req: Request, res: Response
   }
 });
 
-// ─── Admin: Grant Tokens ────────────────────────────────────────────
+// ─── Admin: Plans (alias) ──────────────────────────────────────────
+
+router.get("/admin/plans", requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+    const allPlans = await db.select().from(plans);
+    return res.json({ success: true, data: allPlans });
+  } catch (error) {
+    console.error("[Tenants] Admin plans error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
+
+// ─── Admin: All Users ──────────────────────────────────────────────
+
+router.get("/admin/users", requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+    const allUsers = await db.select().from(users);
+    return res.json({ success: true, data: allUsers.map(u => ({ ...u, passwordHash: undefined })) });
+  } catch (error) {
+    console.error("[Tenants] Admin users error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
+
+// ─── Admin: Company Detail ─────────────────────────────────────────
+
+router.get("/admin/companies/:companyId", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+    const companyId = Number(req.params.companyId);
+    const company = (await db.select().from(companies).where(eq(companies.id, companyId)).limit(1))[0];
+    if (!company) return res.status(404).json({ success: false, error: { code: "NOT_FOUND" } });
+    const plan = company.planId ? (await db.select().from(plans).where(eq(plans.id, company.planId)).limit(1))[0] : null;
+    const members = await db.select().from(users).where(eq(users.companyId, companyId));
+    return res.json({ success: true, data: { company, plan, members: members.map(m => ({ ...m, passwordHash: undefined })) } });
+  } catch (error) {
+    console.error("[Tenants] Admin company detail error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
+
+// ─── Admin: Grant Tokens (by companyId in URL) ─────────────────────
+
+router.post("/admin/companies/:companyId/tokens", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+    const companyId = Number(req.params.companyId);
+    const { amount, source, description } = req.body;
+    if (!amount) return res.status(400).json({ success: false, error: { code: "MISSING_FIELDS" } });
+    const isExternal = source === "external";
+    await db.insert(tokenTransactions).values({
+      companyId,
+      type: "credit",
+      source: isExternal ? "external" : "admin_grant",
+      amount,
+      description: description || "Tokens atribuídos pelo administrador",
+    });
+    if (isExternal) {
+      await db.update(companies).set({ externalTokensBalance: sql`external_tokens_balance + ${amount}` }).where(eq(companies.id, companyId));
+    } else {
+      await db.update(companies).set({ tokensBalance: sql`tokens_balance + ${amount}` }).where(eq(companies.id, companyId));
+    }
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("[Tenants] Admin grant tokens (URL) error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
+
+// ─── Admin: Assign Plan (by companyId in URL) ──────────────────────
+
+router.put("/admin/companies/:companyId/plan", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+    const companyId = Number(req.params.companyId);
+    const { planId } = req.body;
+    if (!planId) return res.status(400).json({ success: false, error: { code: "MISSING_FIELDS" } });
+    await db.update(companies).set({ planId, updatedAt: new Date() }).where(eq(companies.id, companyId));
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("[Tenants] Admin assign plan (URL) error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
+
+// ─── Admin: All Token Transactions ─────────────────────────────────
+
+router.get("/admin/tokens/transactions", requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+    const transactions = await db.select().from(tokenTransactions).orderBy(desc(tokenTransactions.createdAt));
+    return res.json({ success: true, data: transactions });
+  } catch (error) {
+    console.error("[Tenants] Admin transactions error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
+
+// ─── Admin: Grant Tokens (legacy body-based) ────────────────────────
 
 router.post("/admin/grant-tokens", requireAdmin, async (req: Request, res: Response) => {
   try {

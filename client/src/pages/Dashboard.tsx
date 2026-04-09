@@ -1,6 +1,6 @@
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { trpc } from "@/lib/trpc";
+import { useQuery } from "@/hooks/useApi";
 import { Coins, Users, Puzzle, TrendingUp, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useLocation } from "wouter";
@@ -9,13 +9,25 @@ import { Skeleton } from "@/components/ui/skeleton";
 export default function Dashboard() {
   const { user } = useAuth();
   const [, setLocation] = useLocation();
-  const { data: balance, isLoading: balanceLoading } = trpc.tokens.balance.useQuery();
-  const { data: members, isLoading: membersLoading } = trpc.company.members.useQuery();
-  const { data: plan, isLoading: planLoading } = trpc.plans.current.useQuery();
-  const { data: companyMods, isLoading: modsLoading } = trpc.modules.companyModules.useQuery();
-  const { data: allModules } = trpc.modules.listAll.useQuery();
 
-  const activeModules = companyMods?.filter(m => m.isEnabled)?.length ?? 0;
+  // Tokens: GET /api/platform/tenants/tokens → { balance: { internal, external }, transactions }
+  const { data: tokensData, isLoading: balanceLoading } = useQuery<any>("/api/platform/tenants/tokens");
+  const balance = tokensData?.balance;
+
+  // Members: GET /api/platform/tenants/members
+  const { data: members, isLoading: membersLoading } = useQuery<any[]>("/api/platform/tenants/members");
+
+  // Company (includes plan): GET /api/platform/tenants/company
+  const { data: companyData, isLoading: planLoading } = useQuery<any>("/api/platform/tenants/company");
+  const plan = companyData?.plan;
+
+  // Entitlements (tenant modules): GET /api/platform/entitlements/modules
+  const { data: companyMods, isLoading: modsLoading } = useQuery<any[]>("/api/platform/entitlements/modules");
+
+  // Registry (all modules): GET /api/platform/registry/modules
+  const { data: allModules } = useQuery<any[]>("/api/platform/registry/modules");
+
+  const activeModules = companyMods?.filter(m => m.enabled)?.length ?? 0;
   const totalModules = allModules?.length ?? 0;
 
   return (
@@ -26,7 +38,7 @@ export default function Dashboard() {
           Bem-vindo, {user?.name?.split(" ")[0]}
         </h1>
         <p className="text-muted-foreground mt-1">
-          Visão geral da sua empresa{user?.company ? ` — ${user.company.name}` : ""}
+          Visão geral da sua empresa
         </p>
       </div>
 
@@ -110,8 +122,8 @@ export default function Dashboard() {
                 <p className="text-xl font-semibold">{plan.name}</p>
                 <p className="text-sm text-muted-foreground mt-1">{plan.description}</p>
                 <div className="flex gap-6 mt-3 text-sm text-muted-foreground">
-                  <span>{plan.tokensPerMonth.toLocaleString("pt-PT")} tokens/mês</span>
-                  <span>{plan.maxMembers >= 999 ? "Membros ilimitados" : `Até ${plan.maxMembers} membros`}</span>
+                  <span>{(plan.tokensPerMonth ?? 0).toLocaleString("pt-PT")} tokens/mês</span>
+                  <span>{(plan.maxMembers ?? 0) >= 999 ? "Membros ilimitados" : `Até ${plan.maxMembers} membros`}</span>
                 </div>
               </div>
               <Button variant="outline" size="sm" onClick={() => setLocation("/dashboard/company")}>

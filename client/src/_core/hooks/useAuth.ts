@@ -1,56 +1,75 @@
-import { trpc } from "@/lib/trpc";
-import { TRPCClientError } from "@trpc/client";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+interface AuthUser {
+  id: number;
+  name: string;
+  email: string;
+  platformRole: string;
+  companyRole: string;
+  companyId?: number;
+  companyName?: string;
+  createdAt?: string;
+  lastSignedIn?: string;
+  role?: string; // alias for platformRole for backward compat
+  company?: { name: string }; // backward compat
+}
 
 export function useAuth() {
-  const utils = trpc.useUtils();
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
 
-  const meQuery = trpc.auth.me.useQuery(undefined, {
-    retry: false,
-    refetchOnWindowFocus: false,
-  });
+  const fetchMe = useCallback(async () => {
+    try {
+      const res = await fetch("/api/auth/me", {
+        credentials: "include",
+      });
+      if (!res.ok) {
+        setUser(null);
+        return;
+      }
+      const data = await res.json();
+      if (data.success && data.data) {
+        const u = data.data;
+        // Normalize for backward compat with pages that use user.role or user.company.name
+        u.role = u.platformRole;
+        setUser(u);
+      } else {
+        setUser(null);
+      }
+    } catch (err) {
+      setUser(null);
+      setError(err instanceof Error ? err : new Error("Failed to fetch user"));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  const logoutMutation = trpc.auth.logout.useMutation({
-    onSuccess: () => {
-      utils.auth.me.setData(undefined, null);
-    },
-  });
+  useEffect(() => {
+    fetchMe();
+  }, [fetchMe]);
 
   const logout = useCallback(async () => {
     try {
-      await logoutMutation.mutateAsync();
-    } catch (error: unknown) {
-      if (
-        error instanceof TRPCClientError &&
-        error.data?.code === "UNAUTHORIZED"
-      ) {
-        return;
-      }
-      throw error;
+      await fetch("/api/auth/logout", {
+        method: "POST",
+        credentials: "include",
+      });
     } finally {
-      utils.auth.me.setData(undefined, null);
-      await utils.auth.me.invalidate();
+      setUser(null);
     }
-  }, [logoutMutation, utils]);
+  }, []);
 
-  const state = useMemo(() => {
-    return {
-      user: meQuery.data ?? null,
-      loading: meQuery.isLoading || logoutMutation.isPending,
-      error: meQuery.error ?? logoutMutation.error ?? null,
-      isAuthenticated: Boolean(meQuery.data),
-    };
-  }, [
-    meQuery.data,
-    meQuery.error,
-    meQuery.isLoading,
-    logoutMutation.error,
-    logoutMutation.isPending,
-  ]);
+  const state = useMemo(() => ({
+    user,
+    loading,
+    error,
+    isAuthenticated: Boolean(user),
+  }), [user, loading, error]);
 
   return {
     ...state,
-    refresh: () => meQuery.refetch(),
+    refresh: fetchMe,
     logout,
   };
 }

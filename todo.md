@@ -91,3 +91,37 @@
 - [x] Documentação de arquitetura e docker-compose.yml
 - [ ] Expandir para runbook de deployment executável (prereqs, migrações, TLS, rollback)
 - [x] Guia de onboarding de novos módulos (ARCHITECTURE.md — "Adding a New Module")
+
+### Deploy VPS (77.42.95.216)
+- [x] Adaptar docker-compose.yml para PostgreSQL local (não Supabase)
+- [x] Preparar todos os serviços com código funcional para deploy
+- [x] Copiar projeto para VPS e fazer docker compose up
+- [x] Verificar todos os containers a funcionar (10/10 healthy)
+- [x] Testar endpoints de saúde e funcionalidade
+
+### Conversão Frontend tRPC → REST (via gateway)
+- [x] Criar useApi.ts hook (useQuery, useMutation, useDynamicMutation) com paths do gateway
+- [x] Converter Dashboard.tsx para REST
+- [x] Converter Modules.tsx para REST
+- [x] Converter TeamManagement.tsx para REST
+- [x] Converter Tokens.tsx para REST
+- [x] Converter CompanyProfile.tsx para REST
+- [x] Converter SettingsPage.tsx para REST
+- [x] Converter UserProfile.tsx para REST
+- [x] Converter ModulePage.tsx para REST
+- [x] Converter AdminDashboard.tsx para REST
+- [x] Converter AdminCompanies.tsx para REST
+- [x] Converter AdminTokens.tsx para REST
+- [x] Converter AdminModules.tsx para REST
+- [x] Converter AdminPlans.tsx para REST
+- [x] Converter DashboardLayout.tsx para REST
+- [x] Remover tRPC provider do main.tsx
+- [x] Adicionar rotas admin no backend: admin/plans, admin/users, admin/companies/:id, admin/companies/:id/tokens, admin/companies/:id/plan, admin/tokens/transactions
+- [x] Adicionar rotas auth: change-password, profile GET/PUT
+- [x] Fix healthcheck shell container (localhost → 127.0.0.1)
+- [x] Rebuild e redeploy shell + platform-core no VPS
+- [x] Verificar todas as sub-páginas no VPS (10/10 OK)
+
+### Problemas conhecidos (menores)
+- [ ] Preços dos planos mostram NaN€/mês (campo price pode ser null na DB)
+- [ ] Plano Custom mostra "Até -1 membros" (maxMembers pode ser -1 ou null)

@@ -1,11 +1,11 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { trpc } from "@/lib/trpc";
+import { useQuery } from "@/hooks/useApi";
 import { Settings, Check } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function AdminPlans() {
-  const { data: plans, isLoading } = trpc.admin.plans.useQuery();
+  const { data: plans, isLoading } = useQuery<any[]>("/api/platform/tenants/admin/plans");
 
   return (
     <div className="space-y-8">
@@ -18,7 +18,7 @@ export default function AdminPlans() {
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">{[1, 2, 3, 4].map(i => <Skeleton key={i} className="h-48 w-full rounded-xl" />)}</div>
       ) : (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-          {plans?.map((p) => (
+          {plans?.map((p: any) => (
             <Card key={p.id} className="border-border/50">
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">

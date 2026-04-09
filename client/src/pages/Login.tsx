@@ -35,7 +35,7 @@ export default function Login() {
 
       toast.success("Login efetuado com sucesso");
       // Check if admin
-      if (data.user?.role === "admin") {
+      if (data.data?.user?.platformRole === "admin") {
         setLocation("/admin");
       } else {
         setLocation("/dashboard");

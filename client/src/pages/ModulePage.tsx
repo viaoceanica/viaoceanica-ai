@@ -1,7 +1,7 @@
 import { useLocation } from "wouter";
 import { Card, CardContent, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { trpc } from "@/lib/trpc";
+import { useQuery } from "@/hooks/useApi";
 import { UtensilsCrossed, Mail, Puzzle, Construction, ShieldAlert, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -22,8 +22,8 @@ export default function ModulePage() {
   const Icon = iconMap[slug] || Puzzle;
   const name = nameMap[slug] || slug;
 
-  // Check if user has access to this module
-  const { data: activeModules, isLoading } = trpc.modules.activeForUser.useQuery();
+  // Check if user has access to this module (entitlements for this tenant)
+  const { data: activeModules, isLoading } = useQuery<any[]>("/api/platform/entitlements/modules");
 
   if (isLoading) {
     return (
@@ -33,7 +33,7 @@ export default function ModulePage() {
     );
   }
 
-  const hasAccess = activeModules?.some(m => m.slug === slug);
+  const hasAccess = activeModules?.some(m => m.moduleKey === slug && m.enabled);
 
   if (!hasAccess) {
     return (

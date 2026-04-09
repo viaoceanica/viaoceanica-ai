@@ -1,13 +1,16 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { trpc } from "@/lib/trpc";
+import { useQuery } from "@/hooks/useApi";
 import { Coins, TrendingUp, ArrowUpRight, ArrowDownRight } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function Tokens() {
-  const { data: balance, isLoading: balanceLoading } = trpc.tokens.balance.useQuery();
-  const { data: transactions, isLoading: txLoading } = trpc.tokens.transactions.useQuery();
+  // GET /api/platform/tenants/tokens → { balance: { internal, external }, transactions }
+  const { data: tokensData, isLoading: balanceLoading } = useQuery<any>("/api/platform/tenants/tokens");
+  const balance = tokensData?.balance;
+  const transactions = tokensData?.transactions;
+  const txLoading = balanceLoading;
 
   return (
     <div className="space-y-8">
@@ -73,7 +76,7 @@ export default function Tokens() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {transactions.map((tx) => (
+                {transactions.map((tx: any) => (
                   <TableRow key={tx.id}>
                     <TableCell>
                       {tx.type === "credit" ? (

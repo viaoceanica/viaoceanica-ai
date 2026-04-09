@@ -1,6 +1,6 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { trpc } from "@/lib/trpc";
+import { useQuery } from "@/hooks/useApi";
 import { Puzzle, UtensilsCrossed, Mail } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -10,7 +10,7 @@ const iconMap: Record<string, React.ElementType> = {
 };
 
 export default function AdminModules() {
-  const { data: modules, isLoading } = trpc.admin.allModules.useQuery();
+  const { data: modules, isLoading } = useQuery<any[]>("/api/platform/registry/modules");
 
   return (
     <div className="space-y-8">
@@ -23,7 +23,7 @@ export default function AdminModules() {
         <div className="grid gap-4 md:grid-cols-2">{[1, 2].map(i => <Skeleton key={i} className="h-32 w-full rounded-xl" />)}</div>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
-          {modules?.map((mod) => {
+          {modules?.map((mod: any) => {
             const Icon = iconMap[mod.icon || ""] || Puzzle;
             return (
               <Card key={mod.id} className="border-border/50">
@@ -38,10 +38,10 @@ export default function AdminModules() {
                 </CardHeader>
                 <CardContent>
                   <div className="flex items-center gap-2 text-sm">
-                    <Badge variant={mod.isActive ? "default" : "secondary"} className="text-xs">
-                      {mod.isActive ? "Ativo" : "Inativo"}
+                    <Badge variant={mod.status === "active" ? "default" : "secondary"} className="text-xs">
+                      {mod.status === "active" ? "Ativo" : "Inativo"}
                     </Badge>
-                    <span className="text-muted-foreground">Slug: {mod.slug}</span>
+                    <span className="text-muted-foreground">Key: {mod.moduleKey}</span>
                   </div>
                 </CardContent>
               </Card>

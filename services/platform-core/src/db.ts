@@ -15,7 +15,7 @@ export async function getDb() {
       return null;
     }
     try {
-      const client = postgres(connectionString, { ssl: "require" });
+      const client = postgres(connectionString);
       _db = drizzle(client);
     } catch (error) {
       console.error("[Platform Core DB] Connection failed:", error);

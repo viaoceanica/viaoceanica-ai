@@ -3,17 +3,20 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { trpc } from "@/lib/trpc";
+import { useQuery, useMutation } from "@/hooks/useApi";
 import { Building2, Save, Check } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function CompanyProfile() {
-  const { data: company, isLoading, refetch } = trpc.company.get.useQuery();
-  const { data: plan } = trpc.plans.current.useQuery();
-  const { data: allPlans } = trpc.plans.list.useQuery();
-  const update = trpc.company.update.useMutation({
+  // GET /api/platform/tenants/company → { ...company, plan, memberCount }
+  const { data: companyData, isLoading, refetch } = useQuery<any>("/api/platform/tenants/company");
+  const company = companyData;
+  const plan = companyData?.plan;
+  // GET /api/platform/tenants/plans
+  const { data: allPlans } = useQuery<any[]>("/api/platform/tenants/plans");
+  const update = useMutation<any>("/api/platform/tenants/company", "PUT", {
     onSuccess: () => { refetch(); toast.success("Dados atualizados"); },
     onError: (e) => toast.error(e.message),
   });
@@ -41,7 +44,7 @@ export default function CompanyProfile() {
   }, [company]);
 
   const handleSave = () => {
-    update.mutate(form);
+    update.mutateAsync(form);
   };
 
   return (

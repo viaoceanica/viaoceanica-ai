@@ -7,38 +7,74 @@
 #                                    → billing (4020)
 #                                    → mod-restauracao (4001)
 #                                    → mod-gestao-email (4002)
-#   shell (3001) — frontend SPA (served by nginx in production)
+#   shell (3001) — frontend SPA (served by nginx container)
 #
-# External dependencies:
-#   - PostgreSQL (Supabase) — platform_db
+# Dependencies:
+#   - PostgreSQL (local container) — platform_db
 #   - Redis (local container) — session cache, rate limiting
 #
 # Usage:
 #   docker compose up -d                  # Start all services
-#   docker compose up gateway shell       # Start only gateway + shell (dev)
 #   docker compose logs -f gateway        # Follow gateway logs
+#   docker compose down                   # Stop all services
 ###############################################################################
-
-version: "3.9"
 
 x-common-env: &common-env
   NODE_ENV: production
-  JWT_SECRET: ${JWT_SECRET}
-  COOKIE_NAME: app_session_id
+  JWT_SECRET: ${JWT_SECRET:-viao-change-me-in-production-2024}
+  COOKIE_NAME: viao_session
   REDIS_URL: redis://redis:6379
 
 services:
+  # ─── PostgreSQL ──────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_DB: viaoceanica_platform
+      POSTGRES_USER: viaoceanica
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-viao_db_2024_secure}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U viaoceanica -d viaoceanica_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # ─── Redis ───────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── Platform Core ──────────────────────────────────────────────────
+  platform-core:
+    build:
+      context: ./services/platform-core
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      PLATFORM_CORE_PORT: "4000"
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4000/health"]
+      interval: 15s
       timeout: 5s
       retries: 3
 
@@ -48,8 +84,6 @@ services:
       context: ./services/gateway
       dockerfile: Dockerfile
     restart: unless-stopped
-    ports:
-      - "3000:3000"
     environment:
       <<: *common-env
       GATEWAY_PORT: "3000"
@@ -63,30 +97,11 @@ services:
       redis:
         condition: service_healthy
       platform-core:
-        condition: service_started
+        condition: service_healthy
       shell:
         condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
-  # ─── Platform Core ──────────────────────────────────────────────────
-  platform-core:
-    build:
-      context: ./services/platform-core
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    environment:
-      <<: *common-env
-      PLATFORM_CORE_PORT: "4000"
-      DATABASE_URL: ${PLATFORM_DB_URL}
-    depends_on:
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4000/health"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -100,7 +115,7 @@ services:
     environment:
       <<: *common-env
       AI_SERVICE_PORT: "4010"
-      AI_PROVIDER_API_KEY: ${AI_PROVIDER_API_KEY}
+      AI_PROVIDER_API_KEY: ${AI_PROVIDER_API_KEY:-}
       AI_PROVIDER_BASE_URL: ${AI_PROVIDER_BASE_URL:-https://api.openai.com/v1}
     depends_on:
       redis:
@@ -120,8 +135,10 @@ services:
     environment:
       <<: *common-env
       BILLING_PORT: "4020"
-      DATABASE_URL: ${BILLING_DB_URL:-${PLATFORM_DB_URL}}
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
@@ -133,14 +150,11 @@ services:
   # ─── Shell (Frontend SPA) ─────────────────────────────────────────
   shell:
     build:
-      context: ./shell
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: shell/Dockerfile
     restart: unless-stopped
-    environment:
-      VITE_API_BASE_URL: ""
-      VITE_APP_TITLE: "Via Oceânica AI"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001/"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3001/"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -154,8 +168,10 @@ services:
     environment:
       <<: *common-env
       MOD_RESTAURACAO_PORT: "4001"
-      DATABASE_URL: ${RESTAURACAO_DB_URL:-${PLATFORM_DB_URL}}
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
@@ -173,8 +189,10 @@ services:
     environment:
       <<: *common-env
       MOD_GESTAO_EMAIL_PORT: "4002"
-      DATABASE_URL: ${GESTAO_EMAIL_DB_URL:-${PLATFORM_DB_URL}}
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
@@ -183,21 +201,18 @@ services:
       timeout: 5s
       retries: 3
 
-  # ─── Nginx (Reverse Proxy — Production) ───────────────────────────
+  # ─── Nginx (Reverse Proxy) ────────────────────────────────────────
   nginx:
     image: nginx:alpine
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - "8200:80"
     volumes:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./deploy/nginx/ssl:/etc/nginx/ssl:ro
     depends_on:
       gateway:
         condition: service_healthy
-    profiles:
-      - production
 
 volumes:
+  postgres-data:
   redis-data:

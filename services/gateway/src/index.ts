@@ -177,43 +177,45 @@ app.use(async (req, res, next) => {
 
 // ─── Route Proxying ─────────────────────────────────────────────────
 
-// Platform Core API
+// Platform Core API — /api/platform/* → platform-core /api/v1/*
 app.use(
   "/api/platform",
   createProxyMiddleware({
     target: PLATFORM_CORE_URL,
     changeOrigin: true,
-    pathRewrite: { "^/api/platform": "/api/v1" },
+    pathRewrite: (_path: string) => `/api/v1${_path}`,
   } as Options)
 );
 
-// Auth routes → Platform Core
+// Auth routes → Platform Core — /api/auth/* → platform-core /api/auth/*
+// Express strips the mount path, so req.path = /register, /login, etc.
+// We need to prepend /api/auth back.
 app.use(
   "/api/auth",
   createProxyMiddleware({
     target: PLATFORM_CORE_URL,
     changeOrigin: true,
-    pathRewrite: { "^/api/auth": "/api/auth" },
+    pathRewrite: (_path: string) => `/api/auth${_path}`,
   } as Options)
 );
 
-// AI Service
+// AI Service — /api/ai/* → ai-service /api/v1/*
 app.use(
   "/api/ai",
   createProxyMiddleware({
     target: AI_SERVICE_URL,
     changeOrigin: true,
-    pathRewrite: { "^/api/ai": "/api/v1" },
+    pathRewrite: (_path: string) => `/api/v1${_path}`,
   } as Options)
 );
 
-// Billing Service
+// Billing Service — /api/billing/* → billing /api/v1/*
 app.use(
   "/api/billing",
   createProxyMiddleware({
     target: BILLING_SERVICE_URL,
     changeOrigin: true,
-    pathRewrite: { "^/api/billing": "/api/v1" },
+    pathRewrite: (_path: string) => `/api/v1${_path}`,
   } as Options)
 );
 
@@ -232,7 +234,7 @@ app.use("/api/module/:moduleKey", (req, res, next) => {
   return createProxyMiddleware({
     target: targetUrl,
     changeOrigin: true,
-    pathRewrite: { [`^/api/module/${moduleKey}`]: "/api/v1" },
+    pathRewrite: (_path: string) => `/api/v1${_path}`,
   } as Options)(req, res, next);
 });
 

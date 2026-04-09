@@ -36,11 +36,13 @@ async function createSessionToken(payload: {
     .sign(JWT_SECRET);
 }
 
+const IS_PRODUCTION = process.env.NODE_ENV === "production" && process.env.FORCE_HTTPS === "true";
+
 function setSessionCookie(res: Response, token: string) {
   res.cookie(COOKIE_NAME, token, {
     httpOnly: true,
-    secure: true,
-    sameSite: "none",
+    secure: IS_PRODUCTION,
+    sameSite: IS_PRODUCTION ? "none" : "lax",
     path: "/",
     maxAge: 365 * 24 * 60 * 60 * 1000,
   });
@@ -184,7 +186,7 @@ router.post("/login", async (req: Request, res: Response) => {
 // ─── POST /logout ───────────────────────────────────────────────────
 
 router.post("/logout", (_req: Request, res: Response) => {
-  res.clearCookie(COOKIE_NAME, { httpOnly: true, secure: true, sameSite: "none", path: "/" });
+  res.clearCookie(COOKIE_NAME, { httpOnly: true, secure: IS_PRODUCTION, sameSite: IS_PRODUCTION ? "none" : "lax", path: "/" });
   return res.json({ success: true });
 });
 
@@ -218,6 +220,133 @@ router.get("/me", async (req: Request, res: Response) => {
       lastSignedIn: user.lastSignedIn,
     },
   });
+});
+
+// ─── POST /change-password ──────────────────────────────────────────
+
+router.post("/change-password", async (req: Request, res: Response) => {
+  const userId = req.headers["x-viao-user-id"];
+  if (!userId) {
+    return res.status(401).json({ success: false, error: { code: "UNAUTHENTICATED", message: "Não autenticado" } });
+  }
+
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "Password atual e nova são obrigatórias" } });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ success: false, error: { code: "WEAK_PASSWORD", message: "A nova password deve ter pelo menos 6 caracteres" } });
+    }
+
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+
+    const result = await db.select().from(users).where(eq(users.id, Number(userId))).limit(1);
+    if (result.length === 0) {
+      return res.status(404).json({ success: false, error: { code: "USER_NOT_FOUND" } });
+    }
+
+    const user = result[0];
+    if (!user.passwordHash) {
+      return res.status(400).json({ success: false, error: { code: "NO_PASSWORD", message: "Utilizador não tem password definida" } });
+    }
+
+    const valid = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!valid) {
+      return res.status(401).json({ success: false, error: { code: "INVALID_PASSWORD", message: "Password atual incorreta" } });
+    }
+
+    const newHash = await bcrypt.hash(newPassword, 12);
+    await db.update(users).set({ passwordHash: newHash }).where(eq(users.id, Number(userId)));
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("[Auth] Change password error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
+
+// ─── PUT /profile ──────────────────────────────────────────────────
+
+router.put("/profile", async (req: Request, res: Response) => {
+  const userId = req.headers["x-viao-user-id"];
+  if (!userId) {
+    return res.status(401).json({ success: false, error: { code: "UNAUTHENTICATED", message: "Não autenticado" } });
+  }
+
+  try {
+    const { name } = req.body;
+
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+
+    const updateData: Record<string, unknown> = {};
+    if (name !== undefined) updateData.name = name;
+
+    if (Object.keys(updateData).length > 0) {
+      await db.update(users).set(updateData).where(eq(users.id, Number(userId)));
+    }
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("[Auth] Update profile error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
+
+// ─── GET /profile ──────────────────────────────────────────────────
+
+router.get("/profile", async (req: Request, res: Response) => {
+  const userId = req.headers["x-viao-user-id"];
+  if (!userId) {
+    return res.status(401).json({ success: false, error: { code: "UNAUTHENTICATED", message: "Não autenticado" } });
+  }
+
+  try {
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+
+    const result = await db.select().from(users).where(eq(users.id, Number(userId))).limit(1);
+    if (result.length === 0) {
+      return res.status(404).json({ success: false, error: { code: "USER_NOT_FOUND" } });
+    }
+
+    const user = result[0];
+    // Get company info
+    let company = null;
+    if (user.companyId) {
+      const companyResult = await db.select().from(companies).where(eq(companies.id, user.companyId)).limit(1);
+      company = companyResult[0] || null;
+    }
+
+    // Get plan info
+    let plan = null;
+    if (company?.planId) {
+      const planResult = await db.select().from(plans).where(eq(plans.id, company.planId)).limit(1);
+      plan = planResult[0] || null;
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        platformRole: user.platformRole,
+        companyId: user.companyId,
+        companyRole: user.companyRole,
+        companyName: company?.name || null,
+        companySector: company?.sector || null,
+        planName: plan?.name || null,
+        createdAt: user.createdAt,
+        lastSignedIn: user.lastSignedIn,
+      },
+    });
+  } catch (error) {
+    console.error("[Auth] Get profile error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
 });
 
 export { router as authRouter };

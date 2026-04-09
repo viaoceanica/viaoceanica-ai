@@ -1,16 +1,16 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { trpc } from "@/lib/trpc";
+import { useQuery } from "@/hooks/useApi";
 import { Coins, ArrowUpRight, ArrowDownRight } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function AdminTokens() {
-  const { data: transactions, isLoading } = trpc.admin.allTransactions.useQuery();
-  const { data: companies } = trpc.admin.companies.useQuery();
+  const { data: transactions, isLoading } = useQuery<any[]>("/api/platform/tenants/admin/tokens/transactions");
+  const { data: companies } = useQuery<any[]>("/api/platform/tenants/admin/companies");
 
   const getCompanyName = (companyId: number) => {
-    return companies?.find(c => c.id === companyId)?.name || `#${companyId}`;
+    return companies?.find((c: any) => c.id === companyId)?.name || `#${companyId}`;
   };
 
   return (
@@ -42,7 +42,7 @@ export default function AdminTokens() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {transactions.map((tx) => (
+                {transactions.map((tx: any) => (
                   <TableRow key={tx.id}>
                     <TableCell className="font-medium">{getCompanyName(tx.companyId)}</TableCell>
                     <TableCell>

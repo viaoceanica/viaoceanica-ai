@@ -5,7 +5,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
-import { trpc } from "@/lib/trpc";
+import { useQuery, useMutation } from "@/hooks/useApi";
 import {
   User,
   Mail,
@@ -24,8 +24,9 @@ import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function UserProfile() {
-  const { data: profile, isLoading, refetch } = trpc.profile.get.useQuery();
-  const updateName = trpc.profile.updateName.useMutation({
+  // GET /api/auth/profile
+  const { data: profile, isLoading, refetch } = useQuery<any>("/api/auth/profile");
+  const updateName = useMutation<{ name: string }>("/api/auth/profile", "PUT", {
     onSuccess: () => {
       refetch();
       setIsEditing(false);
@@ -130,7 +131,7 @@ export default function UserProfile() {
                         size="icon"
                         variant="ghost"
                         onClick={() => {
-                          if (editName.trim()) updateName.mutate({ name: editName.trim() });
+                          if (editName.trim()) updateName.mutateAsync({ name: editName.trim() });
                         }}
                         disabled={updateName.isPending}
                       >
@@ -228,7 +229,7 @@ export default function UserProfile() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  {profile.teams.map((team) => (
+                  {profile.teams.map((team: any) => (
                     <div key={team.id} className="flex items-center gap-3 py-2 px-3 rounded-lg bg-muted/50">
                       <div className="h-7 w-7 rounded-md bg-primary/10 flex items-center justify-center">
                         <Users className="h-3.5 w-3.5 text-primary" />
@@ -252,7 +253,7 @@ export default function UserProfile() {
             <CardContent>
               {profile?.recentActivity && profile.recentActivity.length > 0 ? (
                 <div className="space-y-1">
-                  {profile.recentActivity.map((item, idx) => (
+                  {profile.recentActivity.map((item: any, idx: number) => (
                     <div
                       key={idx}
                       className="flex items-start gap-4 py-3 px-3 rounded-lg hover:bg-muted/30 transition-colors"
