@@ -153,7 +153,8 @@ function DashboardLayoutContent({
 
   // Check if any settings sub-item is active
   const isSettingsActive = settingsSubItems.some(item => location.startsWith(item.path));
-  const [settingsOpen, setSettingsOpen] = useState(isSettingsActive);
+  // Start closed — only open when user is on a settings sub-page
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Keep collapsible open when navigating to a sub-item
   useEffect(() => {

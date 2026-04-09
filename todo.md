@@ -22,3 +22,4 @@
 - [x] Testes vitest (18 testes a passar)
 - [x] Página de perfil de utilizador (informações pessoais, atividade recente)
 - [x] Reorganizar sidebar: Dashboard como item principal, restantes (Equipa, Módulos, Tokens, Empresa, Perfil, Segurança) como sub-menus de Definições
+- [x] Bug: sub-menu Definições abre automaticamente ao aceder ao Dashboard — deve iniciar fechado
