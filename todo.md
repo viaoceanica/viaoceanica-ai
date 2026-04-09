@@ -165,3 +165,11 @@
 
 ### Auto-update sidebar on module toggle
 - [x] Sidebar auto-updates when module is activated/deactivated (no page refresh needed)
+
+### Remover Configuração do tenant do ViaContab
+- [x] Remover secção "Configuração do tenant" do page.tsx do módulo contabilidade (info vem do dashboard)
+- [x] Remover campo "Tenant" do formulário de upload (tenant vem do contexto do dashboard)
+- [x] Implementar injeção de tenant via postMessage do dashboard para iframe do ViaContab
+- [x] ViaContab escuta postMessage e usa tenantId do contexto do dashboard (fallback "demo" após 2s)
+- [x] Loading state enquanto aguarda contexto do dashboard
+- [x] Atualizar mensagens de erro de tenant para refletir injeção automática

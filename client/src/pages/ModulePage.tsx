@@ -5,6 +5,7 @@ import { useQuery } from "@/hooks/useApi";
 import { UtensilsCrossed, Mail, Puzzle, Construction, ShieldAlert, Loader2, Receipt } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useEffect, useRef, useState } from "react";
+import { useAuth } from "@/_core/hooks/useAuth";
 
 const iconMap: Record<string, React.ElementType> = {
   restauracao: UtensilsCrossed,
@@ -37,23 +38,25 @@ export default function ModulePage() {
   const name = nameMap[slug] || slug;
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeLoaded, setIframeLoaded] = useState(false);
+  const { user } = useAuth();
 
   // Check if user has access to this module
   const { data: activeModules, isLoading } = useQuery<any[]>("/api/platform/entitlements/modules");
 
   // Send tenant context to iframe via postMessage when loaded
   useEffect(() => {
-    if (iframeLoaded && iframeRef.current?.contentWindow) {
+    if (iframeLoaded && iframeRef.current?.contentWindow && user) {
       iframeRef.current.contentWindow.postMessage(
         {
           type: "viao-context",
-          // The gateway already injects x-viao-* headers on API calls,
-          // but the iframe frontend needs to know the tenant for its own API calls
+          tenantId: user.companyId ? String(user.companyId) : "demo",
+          userId: String(user.id),
+          companyName: user.companyName || "",
         },
         "*"
       );
     }
-  }, [iframeLoaded]);
+  }, [iframeLoaded, user]);
 
   if (isLoading) {
     return (

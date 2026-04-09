@@ -309,7 +309,7 @@ function invoiceQueueState(row: Invoice): "review" | "processed" | "error" {
 
 function guidanceForError(message: string) {
   const lowered = message.toLowerCase();
-  if (lowered.includes("tenant")) return "Defina um tenant válido (ex.: demo) antes de continuar.";
+  if (lowered.includes("tenant")) return "O tenant é injetado automaticamente pelo dashboard. Se este erro persistir, recarregue a página.";
   if (lowered.includes("selecione") || lowered.includes("ficheiro")) return "Adicione pelo menos um PDF/JPG/PNG e tente novamente.";
   if (lowered.includes("network") || lowered.includes("failed to fetch")) {
     return "Confirme backend ativo em /api/health e ligação entre frontend/backend.";
@@ -329,7 +329,7 @@ export default function Home() {
   const apiBase = API_BASE;
 
   const [activeTab, setActiveTab] = useState<TabKey>("upload");
-  const [tenantId, setTenantId] = useState("demo");
+  const [tenantId, setTenantId] = useState("");
   const [tenantProfile, setTenantProfile] = useState<TenantProfile>({ company_name: "", company_nif: "" });
 
   const [rows, setRows] = useState<Invoice[]>([]);
@@ -866,7 +866,7 @@ export default function Home() {
 
   const performUpload = useCallback(async () => {
     if (!tenantId.trim()) {
-      const message = "Tenant em falta";
+      const message = "Tenant em falta — aguarde contexto do dashboard";
       setUploadError(`${message}. ${guidanceForError(message)}`);
       setUploadSuccess("");
       pushToast({ type: "error", title: message, detail: guidanceForError(message) });
@@ -1072,12 +1072,32 @@ export default function Home() {
     window.localStorage.setItem(TELEMETRY_KEY, JSON.stringify(telemetry));
   }, [telemetry]);
 
+  // Listen for tenant context from parent dashboard (postMessage)
   useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type === "viao-context" && event.data.tenantId) {
+        setTenantId(event.data.tenantId);
+      }
+    };
+    window.addEventListener("message", handleMessage);
+    // Fallback: if no postMessage received within 2s, use "demo" as default
+    const fallbackTimer = window.setTimeout(() => {
+      setTenantId((prev) => prev || "demo");
+    }, 2000);
+    return () => {
+      window.removeEventListener("message", handleMessage);
+      window.clearTimeout(fallbackTimer);
+    };
+  }, []);
+
+  // Load data once tenantId is resolved
+  useEffect(() => {
+    if (!tenantId) return;
     void fetchTenantProfile();
     void refreshQueueData();
     void fetchSystemHealth();
     void fetchUploadTelemetrySummary();
-  }, [fetchTenantProfile, refreshQueueData, fetchSystemHealth, fetchUploadTelemetrySummary]);
+  }, [tenantId, fetchTenantProfile, refreshQueueData, fetchSystemHealth, fetchUploadTelemetrySummary]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -1237,6 +1257,18 @@ export default function Home() {
       ? "Atualizar fila"
       : "Focar pesquisa";
 
+  // Show loading while waiting for tenant context from parent dashboard
+  if (!tenantId) {
+    return (
+      <div className="app-shell" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "400px" }}>
+        <div style={{ textAlign: "center" }}>
+          <div className="spinner" style={{ margin: "0 auto 1rem", width: 32, height: 32, border: "3px solid #e5e7eb", borderTop: "3px solid #0d9488", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+          <p style={{ color: "#6b7280", fontSize: 14 }}>A obter contexto do dashboard...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
       <header className="top-header">
@@ -1301,16 +1333,6 @@ export default function Home() {
 
               <div className="grid-2">
                 <label className="field">
-                  <span>Tenant</span>
-                  <input
-                    value={tenantId}
-                    onChange={(event) => setTenantId(event.target.value)}
-                    placeholder="ex: demo"
-                    disabled={isUploading}
-                  />
-                </label>
-
-                <label className="field">
                   <span>Documentos (PDF/JPG/PNG/ZIP)</span>
                   <input
                     key={fileInputKey}
@@ -1350,43 +1372,7 @@ export default function Home() {
               ) : null}
             </section>
 
-            <section className="card">
-              <h2>Configuração do tenant</h2>
-              <p className="card-sub">Formulário em grupos, com disclosure progressivo para campos menos usados.</p>
 
-              <div className="grid-2">
-                <label className="field">
-                  <span>Nome da empresa</span>
-                  <input
-                    value={tenantProfile.company_name ?? ""}
-                    onChange={(event) => setTenantProfile((prev) => ({ ...prev, company_name: event.target.value }))}
-                  />
-                </label>
-                <label className="field">
-                  <span>NIF da empresa</span>
-                  <input
-                    value={tenantProfile.company_nif ?? ""}
-                    onChange={(event) => setTenantProfile((prev) => ({ ...prev, company_nif: event.target.value }))}
-                  />
-                </label>
-              </div>
-
-              <details>
-                <summary>Mostrar opções avançadas</summary>
-                <div className="inline-state neutral">
-                  Perfil influencia defaults de extração (customer_name / customer_nif) e melhora consistência.
-                </div>
-              </details>
-
-              <div className="actions-row">
-                <button className="primary-btn" onClick={() => void saveTenantProfile()} disabled={isSavingTenantProfile}>
-                  {isSavingTenantProfile ? "A guardar..." : "Guardar perfil"}
-                </button>
-                <button className="ghost-btn" onClick={() => void fetchTenantProfile()}>
-                  Recarregar perfil
-                </button>
-              </div>
-            </section>
 
             <section className="card">
               <h2>Telemetry de fricção (upload funnel)</h2>
