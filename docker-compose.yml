@@ -7,11 +7,14 @@
 #                                    → billing (4020)
 #                                    → mod-restauracao (4001)
 #                                    → mod-gestao-email (4002)
+#                                    → mod-contabilidade (4003)
 #   shell (3001) — frontend SPA (served by nginx container)
+#   contabilidade-frontend (7100) — ViaContab Next.js frontend (iframe)
 #
 # Dependencies:
 #   - PostgreSQL (local container) — platform_db
 #   - Redis (local container) — session cache, rate limiting
+#   - Qdrant (vector DB) — semantic search for contabilidade module
 #
 # Usage:
 #   docker compose up -d                  # Start all services
@@ -38,6 +41,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-viao_db_2024_secure}
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./deploy/init-contabilidade-db.sh:/docker-entrypoint-initdb.d/00-init-contabilidade.sh:ro
       - ./deploy/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U viaoceanica -d viaoceanica_platform"]
@@ -93,6 +97,7 @@ services:
       SHELL_URL: http://shell:3001
       MOD_RESTAURACAO_URL: http://mod-restauracao:4001
       MOD_GESTAO_EMAIL_URL: http://mod-gestao-email:4002
+      MOD_CONTABILIDADE_URL: http://mod-contabilidade:4003
     depends_on:
       redis:
         condition: service_healthy
@@ -201,6 +206,64 @@ services:
       timeout: 5s
       retries: 3
 
+  # ─── Qdrant (Vector DB) ────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 3 bash -c 'echo > /dev/tcp/localhost/6333' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ─── Module: Contabilidade (Backend API) ──────────────────────────
+  mod-contabilidade:
+    build:
+      context: ./modules/contabilidade
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg2://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_contabilidade
+      QDRANT_URL: http://qdrant:6333
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      NIF_PT_API_KEY: ${NIF_PT_API_KEY:-}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_BUCKET: ${R2_BUCKET:-viaoceanica}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      DEFAULT_TENANT_ID: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:4003/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ─── Module: Contabilidade (Frontend) ─────────────────────────────
+  contabilidade-frontend:
+    build:
+      context: ./modules/contabilidade/frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      SERVER_API_BASE_URL: http://mod-contabilidade:4003
+    depends_on:
+      - mod-contabilidade
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/module/contabilidade"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
   # ─── Nginx (Reverse Proxy) ────────────────────────────────────────
   nginx:
     image: nginx:alpine
@@ -216,3 +279,4 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  qdrant-data:

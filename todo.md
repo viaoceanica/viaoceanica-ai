@@ -125,3 +125,23 @@
 ### Problemas conhecidos (menores)
 - [ ] Preços dos planos mostram NaN€/mês (campo price pode ser null na DB)
 - [ ] Plano Custom mostra "Até -1 membros" (maxMembers pode ser -1 ou null)
+
+### Integração ViaContab como Módulo Contabilidade
+- [x] Copiar backend ViaContab para modules/contabilidade/ no projeto
+- [x] Adaptar backend: middleware x-viao-* headers para contexto de tenant (module_main.py wrapper)
+- [x] Refatorar rotas de /api/tenants/{tenant_id}/* para /api/v1/* (tenant via middleware)
+- [x] Adicionar /health e /ready no root (module contract)
+- [x] Configurar database para usar postgres partilhado (nova DB viaoceanica_contabilidade)
+- [x] Copiar frontend ViaContab para servir via container separado (contabilidade-frontend, iframe mount)
+- [x] Criar página ModulePage para contabilidade no shell (iframe embed com basePath)
+- [x] Adicionar mod-contabilidade + qdrant + contabilidade-frontend ao docker-compose.yml
+- [x] Gateway já suporta routing dinâmico via /api/module/:moduleKey/*
+- [x] Registar módulo contabilidade no registry (SQL direto no postgres)
+- [x] Build e deploy no VPS (3 imagens: mod-contabilidade, contabilidade-frontend, shell)
+- [x] Verificar módulo contabilidade funcional no VPS (API online, DB ready, OCR 0 ativos)
+
+### Verificação e gaps da integração ViaContab
+- [x] Confirmar module_main.py final: todas as rotas /api/v1/* com tenant via x-viao headers (47 rotas verificadas)
+- [x] Verificar /health e /ready no root do módulo contabilidade (health OK, ready OK com DB)
+- [x] Confirmar DB config: viaoceanica_contabilidade schema inicializado e usado pelo módulo (/ready confirma DB ok)
+- [x] Teste end-to-end no VPS: health OK, DB ready, API online, iframe funcional (upload/classificação requer ficheiros reais)

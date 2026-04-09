@@ -1,6 +1,7 @@
 -- Via Oceânica AI — Database Initialization
 -- This file runs once when the PostgreSQL container is first created.
 
+
 -- ─── Enums ──────────────────────────────────────────────────────────
 
 DO $$ BEGIN
@@ -209,7 +210,8 @@ ON CONFLICT DO NOTHING;
 INSERT INTO module_registry (module_key, name, description, version, route, frontend_mount_type, backend_service_url, health_endpoint, readiness_endpoint, icon, status, capabilities, tenant_restricted)
 VALUES
   ('restauracao', 'Restauração', 'Módulo de gestão para restauração — menus, reservas, inventário, assistente IA.', '1.0.0', '/module/restauracao', 'internal', 'http://mod-restauracao:4001', '/health', '/ready', 'UtensilsCrossed', 'active', '["ai","storage"]', false),
-  ('gestao-email', 'Gestão Email', 'Módulo de gestão de email — campanhas, listas, templates, automações.', '1.0.0', '/module/gestao-email', 'internal', 'http://mod-gestao-email:4002', '/health', '/ready', 'Mail', 'active', '["ai","email"]', false)
+  ('gestao-email', 'Gestão Email', 'Módulo de gestão de email — campanhas, listas, templates, automações.', '1.0.0', '/module/gestao-email', 'internal', 'http://mod-gestao-email:4002', '/health', '/ready', 'Mail', 'active', '["ai","email"]', false),
+  ('contabilidade', 'Contabilidade', 'Importação e classificação de faturas com IA — upload de documentos, extração automática, pesquisa semântica e análise de custos.', '1.0.0', '/module/contabilidade', 'iframe', 'http://mod-contabilidade:4003', '/health', '/ready', 'Receipt', 'active', '["ai","storage"]', false)
 ON CONFLICT (module_key) DO NOTHING;
 
 -- ─── Create platform admin user (password: admin123) ────────────────
