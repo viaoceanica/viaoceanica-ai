@@ -54,10 +54,10 @@
 ### Fase 3: Migrar para PostgreSQL (Supabase)
 - [x] Configurar Supabase como provider PostgreSQL (schema + drizzle config criados)
 - [x] Estrutura para bases de dados separadas por concern (env vars no docker-compose)
-- [ ] Provisionar e migrar bases de dados separadas no Supabase
+- [x] Provisionar bases de dados PostgreSQL (local no VPS em vez de Supabase — decisão ADR-002)
 - [x] Migrar schema de users, companies, teams, plans, module_registry para platform_db (PostgreSQL schema completo)
 - [x] Billing service scaffold criado
-- [ ] Implementar schema billing_db e executar migrações
+- [x] Implementar schema billing_db e executar migrações (payment_methods, billing_events, token_purchases, plan_changes)
 - [x] Estrutura preparada para schemas por módulo
 - [x] Criar schemas específicos para restauracao_db e gestao_email_db (tabelas criadas no PostgreSQL)
 - [x] Adaptar ORM/queries para PostgreSQL (Drizzle com driver pg/postgres)
@@ -69,9 +69,9 @@
 - [x] Implementar tabela raw AI usage events (ai_usage_events com tenant, module, model, tokens, cost, duration)
 - [x] Implementar tabela aggregated billing summaries (ai_usage_summaries com upsert mensal)
 - [x] Arquitetura definida para módulos chamarem AI service
-- [ ] Implementar chamadas reais dos módulos ao ai-service
+- [x] Implementar chamadas reais dos módulos ao ai-service (restauracao e gestao-email com AI helpers)
 - [x] Metering obrigatório: cada chamada AI emite raw usage event + atualiza summary
-- [ ] Dashboard de consumo AI por tenant e por módulo
+- [x] Dashboard de consumo AI por tenant e por módulo (/admin/ai-usage com cards e tabela)
 
 ### Fase 5: Docker Compose, Redis e deployment
 - [x] Criar Dockerfiles para cada serviço (shell, gateway, platform-core, ai-service, billing, cada módulo)

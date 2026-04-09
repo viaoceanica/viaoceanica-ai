@@ -16,6 +16,12 @@
 #   - Redis (local container) — session cache, rate limiting
 #   - Qdrant (vector DB) — semantic search for contabilidade module
 #
+# Secrets Management:
+#   All sensitive values are injected via environment variables from .env file.
+#   NEVER commit .env to version control. See deploy/env-reference.md for docs.
+#   Required .env keys: JWT_SECRET, POSTGRES_PASSWORD, SMTP_PASS,
+#   AI_PROVIDER_API_KEY, OPENAI_API_KEY, R2_* credentials.
+#
 # Usage:
 #   docker compose up -d                  # Start all services
 #   docker compose logs -f gateway        # Follow gateway logs
@@ -43,6 +49,14 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./deploy/init-contabilidade-db.sh:/docker-entrypoint-initdb.d/00-init-contabilidade.sh:ro
       - ./deploy/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U viaoceanica -d viaoceanica_platform"]
       interval: 10s
@@ -55,6 +69,14 @@ services:
     restart: unless-stopped
     volumes:
       - redis-data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -70,12 +92,26 @@ services:
     environment:
       <<: *common-env
       PLATFORM_CORE_PORT: "4000"
+      SMTP_HOST: ${SMTP_HOST:-mail.viaoceanica.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-viaoceanicaai@viaoceanica.com}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_FROM: ${SMTP_FROM:-viaoceanicaai@viaoceanica.com}
+      APP_BASE_URL: ${APP_BASE_URL:-http://77.42.95.216:8200}
       DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:4000/health"]
       interval: 15s
@@ -105,6 +141,14 @@ services:
         condition: service_healthy
       shell:
         condition: service_started
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
       interval: 15s
@@ -122,9 +166,20 @@ services:
       AI_SERVICE_PORT: "4010"
       AI_PROVIDER_API_KEY: ${AI_PROVIDER_API_KEY:-}
       AI_PROVIDER_BASE_URL: ${AI_PROVIDER_BASE_URL:-https://api.openai.com/v1}
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.2"
+          memory: 128M
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:4010/health"]
       interval: 15s
@@ -146,6 +201,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+        reservations:
+          cpus: "0.05"
+          memory: 32M
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:4020/health"]
       interval: 15s
@@ -158,6 +221,14 @@ services:
       context: .
       dockerfile: shell/Dockerfile
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64M
+        reservations:
+          cpus: "0.05"
+          memory: 16M
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3001/"]
       interval: 15s
@@ -179,6 +250,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:4001/health"]
       interval: 15s
@@ -200,6 +279,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:4002/health"]
       interval: 15s
@@ -212,6 +299,14 @@ services:
     restart: unless-stopped
     volumes:
       - qdrant-data:/qdrant/storage
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
     healthcheck:
       test: ["CMD-SHELL", "timeout 3 bash -c 'echo > /dev/tcp/localhost/6333' || exit 1"]
       interval: 15s
@@ -241,6 +336,14 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024M
+        reservations:
+          cpus: "0.2"
+          memory: 256M
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:4003/health')\""]
       interval: 15s
@@ -258,6 +361,14 @@ services:
       SERVER_API_BASE_URL: http://mod-contabilidade:4003
     depends_on:
       - mod-contabilidade
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+        reservations:
+          cpus: "0.05"
+          memory: 32M
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/module/contabilidade"]
       interval: 15s
@@ -275,6 +386,14 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64M
+        reservations:
+          cpus: "0.05"
+          memory: 16M
 
 volumes:
   postgres-data:

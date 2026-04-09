@@ -28,6 +28,7 @@ import AdminCompanies from "./pages/admin/AdminCompanies";
 import AdminTokens from "./pages/admin/AdminTokens";
 import AdminModules from "./pages/admin/AdminModules";
 import AdminPlans from "./pages/admin/AdminPlans";
+import AdminAIUsage from "./pages/admin/AdminAIUsage";
 
 function CompanyDashboardContent() {
   const [location] = useLocation();
@@ -79,6 +80,8 @@ function AdminContent() {
     content = <AdminModules />;
   } else if (location === "/admin/plans") {
     content = <AdminPlans />;
+  } else if (location === "/admin/ai-usage") {
+    content = <AdminAIUsage />;
   } else {
     content = <NotFound />;
   }

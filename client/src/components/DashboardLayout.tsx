@@ -46,6 +46,8 @@ import {
   Lock,
   UtensilsCrossed,
   Mail,
+  Receipt,
+  Brain,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -67,6 +69,7 @@ const settingsSubItems = [
   { icon: Building2, label: "Empresa", path: "/dashboard/company" },
   { icon: UserCircle, label: "Perfil", path: "/dashboard/profile" },
   { icon: Lock, label: "Segurança", path: "/dashboard/settings" },
+  { icon: Receipt, label: "Faturação", path: "/dashboard/billing" },
 ];
 
 const adminMenuItems = [
@@ -75,6 +78,7 @@ const adminMenuItems = [
   { icon: Coins, label: "Tokens", path: "/admin/tokens" },
   { icon: Puzzle, label: "Módulos", path: "/admin/modules" },
   { icon: Settings, label: "Planos", path: "/admin/plans" },
+  { icon: Brain, label: "Consumo AI", path: "/admin/ai-usage" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
