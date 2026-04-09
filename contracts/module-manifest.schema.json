@@ -1,0 +1,96 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://viaoceanica.com/schemas/module-manifest/v1",
+  "title": "Via Oceânica Module Manifest v1",
+  "description": "Schema for module manifest files used by the platform registry to onboard and manage modules.",
+  "type": "object",
+  "required": [
+    "module_key",
+    "name",
+    "version",
+    "description",
+    "route",
+    "frontend_mount_type",
+    "backend_service_url",
+    "status",
+    "icon"
+  ],
+  "properties": {
+    "module_key": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Unique module identifier in lowercase kebab-case"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable display name"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+",
+      "description": "Semantic version string"
+    },
+    "description": {
+      "type": "string",
+      "description": "Short description of the module purpose"
+    },
+    "route": {
+      "type": "string",
+      "pattern": "^/module/",
+      "description": "Frontend route prefix assigned to this module"
+    },
+    "frontend_mount_type": {
+      "type": "string",
+      "enum": ["iframe", "microfrontend", "internal"],
+      "description": "How the shell loads the module frontend"
+    },
+    "backend_service_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Internal Docker network URL for the module backend"
+    },
+    "health_endpoint": {
+      "type": "string",
+      "default": "/health",
+      "description": "Health check endpoint path"
+    },
+    "readiness_endpoint": {
+      "type": "string",
+      "default": "/ready",
+      "description": "Readiness check endpoint path"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["active", "maintenance", "deprecated"],
+      "description": "Current lifecycle status"
+    },
+    "icon": {
+      "type": "string",
+      "description": "Lucide icon name for sidebar display"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["ai", "storage", "notifications", "email", "payments", "analytics"]
+      },
+      "default": [],
+      "description": "Platform capabilities this module requires"
+    },
+    "min_plan": {
+      "type": ["string", "null"],
+      "description": "Minimum subscription plan required, null for all plans"
+    },
+    "tenant_restricted": {
+      "type": "boolean",
+      "default": false,
+      "description": "If true, only available to explicitly entitled tenants"
+    },
+    "config_schema": {
+      "type": "object",
+      "description": "Optional JSON Schema for tenant-specific module configuration"
+    }
+  },
+  "additionalProperties": false
+}

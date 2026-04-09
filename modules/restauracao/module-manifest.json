@@ -1,0 +1,16 @@
+{
+  "module_key": "restauracao",
+  "name": "Restauração",
+  "version": "1.0.0",
+  "description": "Módulo de gestão para o sector da restauração — menus, reservas, inventário e operações diárias.",
+  "route": "/module/restauracao",
+  "frontend_mount_type": "internal",
+  "backend_service_url": "http://mod-restauracao:4001",
+  "health_endpoint": "/health",
+  "readiness_endpoint": "/ready",
+  "status": "active",
+  "icon": "UtensilsCrossed",
+  "capabilities": ["ai", "storage"],
+  "min_plan": null,
+  "tenant_restricted": false
+}
