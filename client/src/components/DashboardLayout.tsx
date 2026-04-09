@@ -162,10 +162,17 @@ function DashboardLayoutContent({
   const isMobile = useIsMobile();
 
   // Fetch active modules for the current user (entitlements)
-  const { data: activeModules } = useQuery<any[]>(
+  const { data: activeModules, refetch: refetchActiveModules } = useQuery<any[]>(
     variant === "company" ? "/api/platform/entitlements/modules" : null,
     { enabled: variant === "company" }
   );
+
+  // Listen for module toggle events from Modules page to auto-refresh sidebar
+  useEffect(() => {
+    const handler = () => { refetchActiveModules(); };
+    window.addEventListener("modules-changed", handler);
+    return () => window.removeEventListener("modules-changed", handler);
+  }, [refetchActiveModules]);
 
   // Check if any settings sub-item is active
   const isSettingsActive = settingsSubItems.some(item => location.startsWith(item.path));

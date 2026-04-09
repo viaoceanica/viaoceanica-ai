@@ -162,3 +162,6 @@
 - [x] Atualizar globals.css do ViaContab para usar paleta Via Oceânica (teal/green primary, light bg, subtle shadows)
 - [x] Rebuild e deploy contabilidade-frontend no VPS
 - [x] Verificar novo design no VPS (Upload, Queue, Search tabs — todas OK)
+
+### Auto-update sidebar on module toggle
+- [x] Sidebar auto-updates when module is activated/deactivated (no page refresh needed)

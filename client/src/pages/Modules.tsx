@@ -68,6 +68,8 @@ export default function Modules() {
     try {
       await toggleMod.mutateAsync(`/api/platform/entitlements/modules/${moduleKey}`, { enabled: checked });
       await refetchCompanyMods();
+      // Notify sidebar to refresh its module list
+      window.dispatchEvent(new CustomEvent("modules-changed"));
       if (checked) {
         // After activating, open permission dialog
         setActiveModuleForPerm({ moduleKey, name: moduleName });
@@ -102,6 +104,8 @@ export default function Modules() {
       toast.success("Permissões atualizadas");
       setPermDialogOpen(false);
       refetchCompanyMods();
+      // Notify sidebar to refresh its module list
+      window.dispatchEvent(new CustomEvent("modules-changed"));
     } catch (e: any) {
       toast.error(e.message);
     }
