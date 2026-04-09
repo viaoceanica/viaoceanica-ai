@@ -8,6 +8,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
@@ -16,6 +21,9 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarMenuSub,
+  SidebarMenuSubButton,
+  SidebarMenuSubItem,
   SidebarProvider,
   SidebarTrigger,
   useSidebar,
@@ -33,20 +41,22 @@ import {
   PanelLeft,
   Shield,
   UserCircle,
+  ChevronRight,
+  Lock,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
-import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
+import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { Button } from "./ui/button";
 
-const companyMenuItems = [
-  { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
+// Sub-items inside "Definições"
+const settingsSubItems = [
   { icon: Users, label: "Equipa", path: "/dashboard/team" },
   { icon: Puzzle, label: "Módulos", path: "/dashboard/modules" },
   { icon: Coins, label: "Tokens", path: "/dashboard/tokens" },
   { icon: Building2, label: "Empresa", path: "/dashboard/company" },
   { icon: UserCircle, label: "Perfil", path: "/dashboard/profile" },
-  { icon: Settings, label: "Definições", path: "/dashboard/settings" },
+  { icon: Lock, label: "Segurança", path: "/dashboard/settings" },
 ];
 
 const adminMenuItems = [
@@ -108,15 +118,12 @@ export default function DashboardLayout({
     );
   }
 
-  const menuItems = variant === "admin" ? adminMenuItems : companyMenuItems;
-
   return (
     <SidebarProvider
       style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
     >
       <DashboardLayoutContent
         setSidebarWidth={setSidebarWidth}
-        menuItems={menuItems}
         variant={variant}
       >
         {children}
@@ -128,14 +135,12 @@ export default function DashboardLayout({
 type DashboardLayoutContentProps = {
   children: React.ReactNode;
   setSidebarWidth: (width: number) => void;
-  menuItems: typeof companyMenuItems;
   variant: "company" | "admin";
 };
 
 function DashboardLayoutContent({
   children,
   setSidebarWidth,
-  menuItems,
   variant,
 }: DashboardLayoutContentProps) {
   const { user, logout } = useAuth();
@@ -144,8 +149,27 @@ function DashboardLayoutContent({
   const isCollapsed = state === "collapsed";
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
-  const activeMenuItem = menuItems.find(item => location.startsWith(item.path) && item.path !== (variant === "admin" ? "/admin" : "/dashboard")) || menuItems[0];
   const isMobile = useIsMobile();
+
+  // Check if any settings sub-item is active
+  const isSettingsActive = settingsSubItems.some(item => location.startsWith(item.path));
+  const [settingsOpen, setSettingsOpen] = useState(isSettingsActive);
+
+  // Keep collapsible open when navigating to a sub-item
+  useEffect(() => {
+    if (isSettingsActive) setSettingsOpen(true);
+  }, [isSettingsActive]);
+
+  // Determine active label for mobile header
+  const getActiveLabel = () => {
+    if (variant === "admin") {
+      const item = adminMenuItems.find(i => location.startsWith(i.path) && i.path !== "/admin") || adminMenuItems[0];
+      return item?.label ?? "Menu";
+    }
+    if (location === "/dashboard") return "Dashboard";
+    const sub = settingsSubItems.find(i => location.startsWith(i.path));
+    return sub?.label ?? "Dashboard";
+  };
 
   useEffect(() => {
     if (isCollapsed) setIsResizing(false);
@@ -198,24 +222,83 @@ function DashboardLayoutContent({
           </SidebarHeader>
 
           <SidebarContent className="gap-0">
-            <SidebarMenu className="px-2 py-1">
-              {menuItems.map(item => {
-                const isActive = location === item.path || (item.path !== (variant === "admin" ? "/admin" : "/dashboard") && location.startsWith(item.path));
-                return (
-                  <SidebarMenuItem key={item.path}>
-                    <SidebarMenuButton
-                      isActive={isActive}
-                      onClick={() => setLocation(item.path)}
-                      tooltip={item.label}
-                      className="h-10 transition-all font-normal"
-                    >
-                      <item.icon className={`h-4 w-4 ${isActive ? "text-primary" : ""}`} />
-                      <span>{item.label}</span>
-                    </SidebarMenuButton>
+            {variant === "admin" ? (
+              /* ─── Admin: flat menu ─── */
+              <SidebarMenu className="px-2 py-1">
+                {adminMenuItems.map(item => {
+                  const isActive = location === item.path || (item.path !== "/admin" && location.startsWith(item.path));
+                  return (
+                    <SidebarMenuItem key={item.path}>
+                      <SidebarMenuButton
+                        isActive={isActive}
+                        onClick={() => setLocation(item.path)}
+                        tooltip={item.label}
+                        className="h-10 transition-all font-normal"
+                      >
+                        <item.icon className={`h-4 w-4 ${isActive ? "text-primary" : ""}`} />
+                        <span>{item.label}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  );
+                })}
+              </SidebarMenu>
+            ) : (
+              /* ─── Company: Dashboard + Definições (collapsible) ─── */
+              <SidebarMenu className="px-2 py-1">
+                {/* Dashboard — main item */}
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    isActive={location === "/dashboard"}
+                    onClick={() => setLocation("/dashboard")}
+                    tooltip="Dashboard"
+                    className="h-10 transition-all font-normal"
+                  >
+                    <LayoutDashboard className={`h-4 w-4 ${location === "/dashboard" ? "text-primary" : ""}`} />
+                    <span>Dashboard</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+
+                {/* Definições — collapsible with sub-items */}
+                <Collapsible
+                  open={settingsOpen}
+                  onOpenChange={setSettingsOpen}
+                  className="group/collapsible"
+                >
+                  <SidebarMenuItem>
+                    <CollapsibleTrigger asChild>
+                      <SidebarMenuButton
+                        tooltip="Definições"
+                        className="h-10 transition-all font-normal"
+                        isActive={isSettingsActive}
+                      >
+                        <Settings className={`h-4 w-4 ${isSettingsActive ? "text-primary" : ""}`} />
+                        <span>Definições</span>
+                        <ChevronRight className="ml-auto h-4 w-4 transition-transform duration-200 group-data-[state=open]/collapsible:rotate-90" />
+                      </SidebarMenuButton>
+                    </CollapsibleTrigger>
+                    <CollapsibleContent>
+                      <SidebarMenuSub>
+                        {settingsSubItems.map(sub => {
+                          const isSubActive = location.startsWith(sub.path);
+                          return (
+                            <SidebarMenuSubItem key={sub.path}>
+                              <SidebarMenuSubButton
+                                isActive={isSubActive}
+                                onClick={() => setLocation(sub.path)}
+                                className="transition-all"
+                              >
+                                <sub.icon className={`h-3.5 w-3.5 ${isSubActive ? "text-primary" : ""}`} />
+                                <span>{sub.label}</span>
+                              </SidebarMenuSubButton>
+                            </SidebarMenuSubItem>
+                          );
+                        })}
+                      </SidebarMenuSub>
+                    </CollapsibleContent>
                   </SidebarMenuItem>
-                );
-              })}
-            </SidebarMenu>
+                </Collapsible>
+              </SidebarMenu>
+            )}
 
             {/* Switch between admin/company */}
             {user?.role === "admin" && (
@@ -287,7 +370,7 @@ function DashboardLayoutContent({
             <div className="flex items-center gap-2">
               <SidebarTrigger className="h-9 w-9 rounded-lg bg-background" />
               <span className="tracking-tight text-foreground">
-                {activeMenuItem?.label ?? "Menu"}
+                {getActiveLabel()}
               </span>
             </div>
           </div>
