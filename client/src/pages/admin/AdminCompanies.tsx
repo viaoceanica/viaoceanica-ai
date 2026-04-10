@@ -8,10 +8,43 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { trpc } from "@/lib/trpc";
-import { Building2, Coins, Eye, Trash2, Puzzle } from "lucide-react";
-import { useState } from "react";
+import { Building2, Coins, Eye, Trash2, Puzzle, Plus, Pencil, Search } from "lucide-react";
+import { useState, useMemo } from "react";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
+
+type CompanyForm = {
+  name: string;
+  sector: string;
+  email: string;
+  phone: string;
+  address: string;
+  website: string;
+  nif: string;
+};
+
+const emptyForm: CompanyForm = {
+  name: "",
+  sector: "Tecnologia",
+  email: "",
+  phone: "",
+  address: "",
+  website: "",
+  nif: "",
+};
+
+const sectorOptions = [
+  "Tecnologia",
+  "Restauração",
+  "Comércio",
+  "Serviços",
+  "Saúde",
+  "Educação",
+  "Construção",
+  "Turismo",
+  "Indústria",
+  "Outro",
+];
 
 export default function AdminCompanies() {
   const utils = trpc.useUtils();
@@ -19,6 +52,29 @@ export default function AdminCompanies() {
   const { data: plans } = trpc.admin.plans.useQuery();
   const { data: allModules } = trpc.admin.allModules.useQuery();
 
+  // Search
+  const [search, setSearch] = useState("");
+  const filteredCompanies = useMemo(() => {
+    if (!companies) return [];
+    if (!search.trim()) return companies;
+    const q = search.toLowerCase();
+    return companies.filter((c: any) =>
+      c.name?.toLowerCase().includes(q) ||
+      c.sector?.toLowerCase().includes(q) ||
+      c.email?.toLowerCase().includes(q) ||
+      c.nif?.toLowerCase().includes(q)
+    );
+  }, [companies, search]);
+
+  // Mutations
+  const createCompanyMut = trpc.admin.createCompany.useMutation({
+    onSuccess: () => { utils.admin.companies.invalidate(); utils.admin.tenantBilling.invalidate(); toast.success("Empresa criada com sucesso"); },
+    onError: (e) => toast.error(e.message),
+  });
+  const updateCompanyMut = trpc.admin.updateCompany.useMutation({
+    onSuccess: () => { utils.admin.companies.invalidate(); utils.admin.tenantBilling.invalidate(); toast.success("Empresa atualizada"); },
+    onError: (e) => toast.error(e.message),
+  });
   const grantTokensMut = trpc.admin.grantTokens.useMutation({
     onSuccess: () => { utils.admin.companies.invalidate(); utils.admin.tenantBilling.invalidate(); toast.success("Tokens atribuídos"); },
     onError: (e) => toast.error(e.message),
@@ -35,6 +91,55 @@ export default function AdminCompanies() {
     onSuccess: () => { toast.success("Módulo atualizado"); },
     onError: (e) => toast.error(e.message),
   });
+
+  // Create/Edit company dialog
+  const [formDialog, setFormDialog] = useState<{ open: boolean; editId: number | null }>({ open: false, editId: null });
+  const [form, setForm] = useState<CompanyForm>(emptyForm);
+
+  const openCreate = () => {
+    setForm(emptyForm);
+    setFormDialog({ open: true, editId: null });
+  };
+
+  const openEdit = (c: any) => {
+    setForm({
+      name: c.name || "",
+      sector: c.sector || "Tecnologia",
+      email: c.email || "",
+      phone: c.phone || "",
+      address: c.address || "",
+      website: c.website || "",
+      nif: c.nif || "",
+    });
+    setFormDialog({ open: true, editId: c.id });
+  };
+
+  const handleSave = async () => {
+    if (!form.name.trim()) { toast.error("Nome é obrigatório"); return; }
+    if (formDialog.editId) {
+      await updateCompanyMut.mutateAsync({
+        companyId: formDialog.editId,
+        name: form.name,
+        sector: form.sector || undefined,
+        email: form.email || undefined,
+        phone: form.phone || undefined,
+        address: form.address || undefined,
+        website: form.website || undefined,
+        nif: form.nif || undefined,
+      });
+    } else {
+      await createCompanyMut.mutateAsync({
+        name: form.name,
+        sector: form.sector || undefined,
+        email: form.email || undefined,
+        phone: form.phone || undefined,
+        address: form.address || undefined,
+        website: form.website || undefined,
+        nif: form.nif || undefined,
+      });
+    }
+    setFormDialog({ open: false, editId: null });
+  };
 
   // Grant tokens dialog
   const [grantDialog, setGrantDialog] = useState<{ open: boolean; companyId: number; companyName: string }>({ open: false, companyId: 0, companyName: "" });
@@ -58,15 +163,33 @@ export default function AdminCompanies() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Empresas</h1>
-        <p className="text-muted-foreground mt-1">Gerir todas as empresas registadas na plataforma</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Empresas</h1>
+          <p className="text-muted-foreground mt-1">Gerir todas as empresas registadas na plataforma</p>
+        </div>
+        <Button onClick={openCreate}>
+          <Plus className="h-4 w-4 mr-2" /> Nova Empresa
+        </Button>
       </div>
 
       <Card className="border-border/50">
         <CardHeader>
-          <CardTitle className="text-lg">Lista de empresas</CardTitle>
-          <CardDescription>{companies?.length ?? 0} empresas registadas</CardDescription>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-lg">Lista de empresas</CardTitle>
+              <CardDescription>{filteredCompanies.length} de {companies?.length ?? 0} empresas</CardDescription>
+            </div>
+            <div className="relative w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Pesquisar empresa..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-9"
+              />
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
           {isLoading ? (
@@ -77,6 +200,7 @@ export default function AdminCompanies() {
                 <TableRow>
                   <TableHead>Empresa</TableHead>
                   <TableHead>Sector</TableHead>
+                  <TableHead>NIF</TableHead>
                   <TableHead>Tokens Int.</TableHead>
                   <TableHead>Tokens Ext.</TableHead>
                   <TableHead>Plano</TableHead>
@@ -85,12 +209,18 @@ export default function AdminCompanies() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {companies?.map((c: any) => {
+                {filteredCompanies.map((c: any) => {
                   const companyPlan = plans?.find((p: any) => p.id === c.planId);
                   return (
                     <TableRow key={c.id}>
-                      <TableCell className="font-medium">{c.name}</TableCell>
+                      <TableCell>
+                        <div>
+                          <span className="font-medium">{c.name}</span>
+                          {c.email && <p className="text-xs text-muted-foreground">{c.email}</p>}
+                        </div>
+                      </TableCell>
                       <TableCell className="text-muted-foreground">{c.sector || "—"}</TableCell>
+                      <TableCell className="text-muted-foreground text-sm">{c.nif || "—"}</TableCell>
                       <TableCell>{(c.tokensBalance ?? 0).toLocaleString("pt-PT")}</TableCell>
                       <TableCell>{(c.externalTokensBalance ?? 0).toLocaleString("pt-PT")}</TableCell>
                       <TableCell>
@@ -103,16 +233,19 @@ export default function AdminCompanies() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-1">
-                          <Button variant="ghost" size="sm" onClick={() => setDetailDialog({ open: true, companyId: c.id })}>
+                          <Button variant="ghost" size="sm" onClick={() => setDetailDialog({ open: true, companyId: c.id })} title="Ver detalhes">
                             <Eye className="h-3 w-3 mr-1" /> Ver
                           </Button>
-                          <Button variant="ghost" size="sm" onClick={() => setGrantDialog({ open: true, companyId: c.id, companyName: c.name })}>
+                          <Button variant="ghost" size="sm" onClick={() => openEdit(c)} title="Editar empresa">
+                            <Pencil className="h-3 w-3 mr-1" /> Editar
+                          </Button>
+                          <Button variant="ghost" size="sm" onClick={() => setGrantDialog({ open: true, companyId: c.id, companyName: c.name })} title="Atribuir tokens">
                             <Coins className="h-3 w-3 mr-1" /> Tokens
                           </Button>
-                          <Button variant="ghost" size="sm" onClick={() => setPlanDialog({ open: true, companyId: c.id, companyName: c.name })}>
+                          <Button variant="ghost" size="sm" onClick={() => { setPlanDialog({ open: true, companyId: c.id, companyName: c.name }); setSelectedPlan(c.planId?.toString() || ""); }} title="Atribuir plano">
                             Plano
                           </Button>
-                          <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={() => setDeleteDialog({ open: true, companyId: c.id, companyName: c.name })}>
+                          <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={() => setDeleteDialog({ open: true, companyId: c.id, companyName: c.name })} title="Eliminar empresa">
                             <Trash2 className="h-3 w-3" />
                           </Button>
                         </div>
@@ -120,10 +253,23 @@ export default function AdminCompanies() {
                     </TableRow>
                   );
                 })}
-                {(!companies || companies.length === 0) && (
+                {filteredCompanies.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
-                      Nenhuma empresa registada
+                    <TableCell colSpan={8} className="text-center py-12 text-muted-foreground">
+                      {search ? (
+                        <div>
+                          <Search className="h-8 w-8 mx-auto mb-2 opacity-30" />
+                          <p>Nenhuma empresa encontrada para "{search}"</p>
+                        </div>
+                      ) : (
+                        <div>
+                          <Building2 className="h-8 w-8 mx-auto mb-2 opacity-30" />
+                          <p>Nenhuma empresa registada</p>
+                          <Button variant="outline" className="mt-3" onClick={openCreate}>
+                            <Plus className="h-4 w-4 mr-2" /> Criar primeira empresa
+                          </Button>
+                        </div>
+                      )}
                     </TableCell>
                   </TableRow>
                 )}
@@ -133,7 +279,68 @@ export default function AdminCompanies() {
         </CardContent>
       </Card>
 
-      {/* Grant tokens dialog */}
+      {/* ─── Create/Edit Company Dialog ─────────────────────────────── */}
+      <Dialog open={formDialog.open} onOpenChange={(open) => setFormDialog(p => ({ ...p, open }))}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{formDialog.editId ? "Editar Empresa" : "Nova Empresa"}</DialogTitle>
+            <DialogDescription>
+              {formDialog.editId ? "Atualizar os dados da empresa" : "Registar uma nova empresa na plataforma"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4 max-h-[60vh] overflow-y-auto">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Nome *</Label>
+                <Input placeholder="Nome da empresa" value={form.name} onChange={(e) => setForm(p => ({ ...p, name: e.target.value }))} />
+              </div>
+              <div className="space-y-2">
+                <Label>NIF</Label>
+                <Input placeholder="123456789" value={form.nif} onChange={(e) => setForm(p => ({ ...p, nif: e.target.value }))} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Sector</Label>
+                <Select value={form.sector} onValueChange={(v) => setForm(p => ({ ...p, sector: v }))}>
+                  <SelectTrigger><SelectValue placeholder="Selecionar sector" /></SelectTrigger>
+                  <SelectContent>
+                    {sectorOptions.map(s => (
+                      <SelectItem key={s} value={s}>{s}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Email</Label>
+                <Input type="email" placeholder="empresa@exemplo.pt" value={form.email} onChange={(e) => setForm(p => ({ ...p, email: e.target.value }))} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Telefone</Label>
+                <Input placeholder="+351 912 345 678" value={form.phone} onChange={(e) => setForm(p => ({ ...p, phone: e.target.value }))} />
+              </div>
+              <div className="space-y-2">
+                <Label>Website</Label>
+                <Input placeholder="https://exemplo.pt" value={form.website} onChange={(e) => setForm(p => ({ ...p, website: e.target.value }))} />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Morada</Label>
+              <Input placeholder="Rua Exemplo, 123, Lisboa" value={form.address} onChange={(e) => setForm(p => ({ ...p, address: e.target.value }))} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setFormDialog(p => ({ ...p, open: false }))}>Cancelar</Button>
+            <Button onClick={handleSave} disabled={createCompanyMut.isPending || updateCompanyMut.isPending}>
+              {formDialog.editId ? "Guardar" : "Criar"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ─── Grant Tokens Dialog ────────────────────────────────────── */}
       <Dialog open={grantDialog.open} onOpenChange={(open) => setGrantDialog(p => ({ ...p, open }))}>
         <DialogContent>
           <DialogHeader>
@@ -178,7 +385,7 @@ export default function AdminCompanies() {
         </DialogContent>
       </Dialog>
 
-      {/* Assign plan dialog */}
+      {/* ─── Assign Plan Dialog ─────────────────────────────────────── */}
       <Dialog open={planDialog.open} onOpenChange={(open) => setPlanDialog(p => ({ ...p, open }))}>
         <DialogContent>
           <DialogHeader>
@@ -192,7 +399,7 @@ export default function AdminCompanies() {
                 <SelectTrigger><SelectValue placeholder="Selecionar plano" /></SelectTrigger>
                 <SelectContent>
                   {plans?.map((p: any) => (
-                    <SelectItem key={p.id} value={p.id.toString()}>{p.name}</SelectItem>
+                    <SelectItem key={p.id} value={p.id.toString()}>{p.name} — {p.price ? `${p.price}€/mês` : "Grátis"}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -215,39 +422,53 @@ export default function AdminCompanies() {
         </DialogContent>
       </Dialog>
 
-      {/* Company detail dialog */}
+      {/* ─── Company Detail Dialog ──────────────────────────────────── */}
       <Dialog open={detailDialog.open} onOpenChange={(open) => setDetailDialog(p => ({ ...p, open }))}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{companyDetail?.company?.name || "Detalhes"}</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              <Building2 className="h-5 w-5" />
+              {companyDetail?.company?.name || "Detalhes"}
+            </DialogTitle>
             <DialogDescription>Informações detalhadas da empresa</DialogDescription>
           </DialogHeader>
           {companyDetail ? (
-            <div className="space-y-4 py-2 max-h-[60vh] overflow-y-auto">
+            <div className="space-y-5 py-2 max-h-[60vh] overflow-y-auto">
+              {/* Company info grid */}
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div><span className="text-muted-foreground">Sector:</span> {companyDetail.company?.sector || "—"}</div>
                 <div><span className="text-muted-foreground">Email:</span> {companyDetail.company?.email || "—"}</div>
+                <div><span className="text-muted-foreground">Telefone:</span> {(companyDetail.company as any)?.phone || "—"}</div>
+                <div><span className="text-muted-foreground">NIF:</span> {(companyDetail.company as any)?.nif || "—"}</div>
                 <div><span className="text-muted-foreground">Plano:</span> {companyDetail.plan?.name || "Sem plano"}</div>
                 <div><span className="text-muted-foreground">Tokens int.:</span> {(companyDetail.company?.tokensBalance ?? 0).toLocaleString("pt-PT")}</div>
                 <div><span className="text-muted-foreground">Tokens ext.:</span> {(companyDetail.company?.externalTokensBalance ?? 0).toLocaleString("pt-PT")}</div>
+                <div><span className="text-muted-foreground">Website:</span> {(companyDetail.company as any)?.website || "—"}</div>
               </div>
 
               {/* Members */}
               <div>
                 <h4 className="text-sm font-medium mb-2">Membros ({companyDetail.members?.length ?? 0})</h4>
-                <div className="space-y-1">
-                  {companyDetail.members?.map((m: any) => (
-                    <div key={m.id} className="flex items-center justify-between text-sm py-1 px-2 rounded bg-muted/50">
-                      <span>{m.name || m.email}</span>
-                      <Badge variant="secondary" className="text-xs">{m.companyRole}</Badge>
-                    </div>
-                  ))}
-                </div>
+                {companyDetail.members && companyDetail.members.length > 0 ? (
+                  <div className="space-y-1">
+                    {companyDetail.members.map((m: any) => (
+                      <div key={m.id} className="flex items-center justify-between text-sm py-1.5 px-3 rounded bg-muted/50">
+                        <div>
+                          <span className="font-medium">{m.name || "Sem nome"}</span>
+                          <span className="text-muted-foreground ml-2 text-xs">{m.email}</span>
+                        </div>
+                        <Badge variant="secondary" className="text-xs">{m.companyRole}</Badge>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">Nenhum membro registado</p>
+                )}
               </div>
 
               {/* Modules */}
               <div>
-                <h4 className="text-sm font-medium mb-2">Módulos ({companyDetail.modules?.length ?? 0})</h4>
+                <h4 className="text-sm font-medium mb-2">Módulos</h4>
                 <div className="space-y-2">
                   {allModules?.map((mod: any) => {
                     const cm = companyDetail.modules?.find((m: any) => m.moduleId === mod.id);
@@ -295,13 +516,13 @@ export default function AdminCompanies() {
         </DialogContent>
       </Dialog>
 
-      {/* Delete confirmation dialog */}
+      {/* ─── Delete Confirmation Dialog ─────────────────────────────── */}
       <Dialog open={deleteDialog.open} onOpenChange={(open) => setDeleteDialog(p => ({ ...p, open }))}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Eliminar empresa</DialogTitle>
             <DialogDescription>
-              Tem a certeza que deseja eliminar <strong>{deleteDialog.companyName}</strong>? Esta ação é irreversível e irá remover todos os dados associados.
+              Tem a certeza que deseja eliminar <strong>{deleteDialog.companyName}</strong>? Esta ação é irreversível e irá remover todos os dados associados (membros, módulos, transações).
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

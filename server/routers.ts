@@ -367,8 +367,30 @@ export const appRouter = router({
       }),
 
     // ─── Company Management ──────────────────────────────────────────
+    createCompany: adminProcedure
+      .input(z.object({
+        name: z.string().min(1),
+        sector: z.string().optional(),
+        email: z.string().optional(),
+        phone: z.string().optional(),
+        address: z.string().optional(),
+        website: z.string().optional(),
+        nif: z.string().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        return db.createCompany(input);
+      }),
     updateCompany: adminProcedure
-      .input(z.object({ companyId: z.number(), name: z.string().optional(), sector: z.string().optional(), email: z.string().optional(), phone: z.string().optional() }))
+      .input(z.object({
+        companyId: z.number(),
+        name: z.string().optional(),
+        sector: z.string().optional(),
+        email: z.string().optional(),
+        phone: z.string().optional(),
+        address: z.string().optional(),
+        website: z.string().optional(),
+        nif: z.string().optional(),
+      }))
       .mutation(async ({ input }) => {
         const { companyId, ...data } = input;
         await db.updateCompany(companyId, data);

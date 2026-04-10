@@ -232,3 +232,13 @@
 - [x] Frontend: Admin settings page with changeable admin password
 - [x] Seed default admin credentials (admin / Password321!)
 - [x] Tests for admin auth and module CRUD (39 tests passing)
+
+### Admin CRUD for Modules and Empresas
+- [x] Backend: add createCompany, updateCompany, deleteCompany tRPC procedures
+- [x] Backend: verify module CRUD procedures work end-to-end (create, update, delete)
+- [x] Frontend: AdminCompanies — add create company dialog with form fields
+- [x] Frontend: AdminCompanies — add edit company dialog with pre-filled form
+- [x] Frontend: AdminCompanies — add delete company confirmation dialog
+- [x] Frontend: AdminModules — verify create/edit/delete module dialogs work end-to-end
+- [x] Tests: add/update tests for company CRUD and module CRUD (46 tests passing)
+- [x] Browser verification of all CRUD flows

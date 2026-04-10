@@ -38,6 +38,11 @@ vi.mock("./db", () => {
     getAllCompanies: vi.fn(() => Promise.resolve([...mockCompanies])),
     getCompanyById: vi.fn((id: number) => Promise.resolve(mockCompanies.find(c => c.id === id))),
     updateCompany: vi.fn(() => Promise.resolve()),
+    createCompany: vi.fn((data: any) => {
+      const newCompany = { id: 99, ...data, tokensBalance: 0, externalTokensBalance: 0, createdAt: new Date(), updatedAt: new Date() };
+      mockCompanies.push(newCompany);
+      return Promise.resolve(newCompany);
+    }),
     deleteCompany: vi.fn(() => Promise.resolve()),
     getAllPlans: vi.fn(() => Promise.resolve([...mockPlans])),
     getPlanById: vi.fn((id: number) => Promise.resolve(mockPlans.find(p => p.id === id))),
@@ -221,6 +226,79 @@ describe("admin.companies", () => {
     expect(result.length).toBeGreaterThanOrEqual(2);
     expect(result[0]).toHaveProperty("id");
     expect(result[0]).toHaveProperty("name");
+  });
+});
+
+describe("admin.createCompany", () => {
+  it("creates a new company with all fields", async () => {
+    const ctx = createAdminContext();
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.admin.createCompany({
+      name: "Nova Empresa Lda.",
+      sector: "Tecnologia",
+      email: "nova@empresa.pt",
+      phone: "+351 912 345 678",
+      address: "Rua Teste, 123",
+      website: "https://empresa.pt",
+      nif: "123456789",
+    });
+    expect(result).toHaveProperty("id");
+    expect(result?.name).toBe("Nova Empresa Lda.");
+    expect(result?.sector).toBe("Tecnologia");
+  });
+
+  it("requires company name", async () => {
+    const ctx = createAdminContext();
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.admin.createCompany({ name: "" })).rejects.toThrow();
+  });
+
+  it("creates company with only required fields", async () => {
+    const ctx = createAdminContext();
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.admin.createCompany({ name: "Minimal Corp" });
+    expect(result).toHaveProperty("id");
+    expect(result?.name).toBe("Minimal Corp");
+  });
+});
+
+describe("admin.updateCompany", () => {
+  it("updates company fields", async () => {
+    const ctx = createAdminContext();
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.admin.updateCompany({
+      companyId: 1,
+      name: "Via Oceânica Updated",
+      sector: "Serviços",
+      email: "updated@viaoceanica.pt",
+      nif: "999888777",
+    });
+    expect(result).toBeDefined();
+  });
+
+  it("updates only specified fields", async () => {
+    const ctx = createAdminContext();
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.admin.updateCompany({
+      companyId: 1,
+      phone: "+351 999 000 111",
+    });
+    expect(result).toBeDefined();
+  });
+});
+
+describe("admin.deleteCompany", () => {
+  it("deletes a company", async () => {
+    const ctx = createAdminContext();
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.admin.deleteCompany({ companyId: 2 });
+    expect(result).toEqual({ success: true });
+  });
+
+  it("rejects non-admin users", async () => {
+    const ctx = createNonAdminContext();
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.admin.deleteCompany({ companyId: 1 })).rejects.toThrow();
   });
 });
 
