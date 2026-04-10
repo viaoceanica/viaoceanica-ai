@@ -251,3 +251,11 @@
 
 ### Bug Fix: React error #31 on admin login (production)
 - [x] Fix React error #31 (object rendered as React child) in admin login flow — toast.error(data.error) was passing {code,message} object; fixed to extract .message; also updated geral@viaoceanica.com to admin role and Password321! hash on VPS
+
+### Enhanced Admin Module Management (per module spec)
+- [x] Module name auto-generates module_key (slugified), service URLs, container names per spec
+- [x] Module form shows all spec-aligned fields: name, description, icon, mount type, backend tech, frontend tech, port, status
+- [x] Auto-generated fields displayed as read-only previews: module_key, backend URL, frontend URL, container names, env vars
+- [x] Module creation generates a summary of integration steps needed (gateway env, nginx config, docker-compose block)
+- [x] Backend: enhanced createModule/updateModule with auto-derived fields
+- [x] Frontend: redesigned AdminModules form with spec-aligned workflow
