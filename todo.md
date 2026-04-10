@@ -277,3 +277,20 @@
 - [x] ZIP includes: Dockerfile, module-manifest.json, docker-compose snippet, nginx config, backend boilerplate, frontend boilerplate
 - [x] Frontend: "Descarregar scaffold" button on AdminModules page (in config view and after creation)
 - [x] Tests for scaffold generation (included in plans CRUD test file — 60 total tests passing)
+
+### OpenClaw Module Agents
+- [x] Create contabilidade agent on VPS with SOUL.md (SNC, IVA, Portuguese accounting expertise)
+- [x] Create restauracao agent on VPS with SOUL.md (menus, HACCP, food cost, reservas)
+- [x] Create gestao-email agent on VPS with SOUL.md (email marketing, RGPD, campaigns)
+- [x] Create platform agent on VPS with SOUL.md (general platform assistant)
+- [x] Set agent identities (name + emoji) for all 4 agents
+- [x] Test each agent responds with domain-specific knowledge (all 4 verified in Portuguese)
+
+### Scaffold Template Enhancement (AI-aware + docker-compose)
+- [x] Add docker-compose.yml to scaffold output (backend + frontend + volumes + networks + health checks)
+- [x] Add OpenClaw agent setup script to scaffold (creates agent workspace + SOUL.md template)
+- [x] Add AI service integration boilerplate to backend scaffold (ai_client.py for Python, ai-client.ts for Node.js)
+- [x] Add .env.example with all required environment variables (AI_SERVICE_URL, AI_AGENT_ID, DATABASE_URL, etc.)
+- [x] Add README section on AI assistant integration and OpenClaw agent configuration
+- [x] Update VPS platform-core scaffold.ts to match new template (rebuilt + restarted)
+- [x] Test scaffold output — 9 new tests verifying docker-compose, SOUL.md, ai-client, .env (69 total passing)

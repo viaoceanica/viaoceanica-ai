@@ -283,3 +283,176 @@ describe("admin.generateScaffold", () => {
     ).rejects.toThrow();
   });
 });
+
+describe("scaffold ZIP contents (AI-aware + docker-compose)", () => {
+  // Helper to extract file list from ZIP buffer
+  async function getZipFileList(base64: string): Promise<string[]> {
+    const AdmZip = (await import("adm-zip")).default;
+    const buffer = Buffer.from(base64, "base64");
+    const zip = new AdmZip(buffer);
+    return zip.getEntries().map(e => e.entryName);
+  }
+
+  async function getZipFileContent(base64: string, path: string): Promise<string> {
+    const AdmZip = (await import("adm-zip")).default;
+    const buffer = Buffer.from(base64, "base64");
+    const zip = new AdmZip(buffer);
+    const entry = zip.getEntry(path);
+    return entry ? entry.getData().toString("utf-8") : "";
+  }
+
+  it("includes docker-compose.yml in scaffold", async () => {
+    const caller = appRouter.createCaller(createAdminContext());
+    const result = await caller.admin.generateScaffold({
+      slug: "test-dc",
+      name: "Docker Compose Test",
+      mountType: "api_only",
+      backendLanguage: "python",
+      databaseMode: "shared",
+      capabilities: [],
+      port: 4070,
+    });
+    const files = await getZipFileList(result.base64);
+    expect(files).toContain("modules/test-dc/docker-compose.yml");
+  });
+
+  it("docker-compose.yml contains correct service name and port", async () => {
+    const caller = appRouter.createCaller(createAdminContext());
+    const result = await caller.admin.generateScaffold({
+      slug: "test-dc",
+      name: "Docker Compose Test",
+      mountType: "api_only",
+      backendLanguage: "python",
+      databaseMode: "shared",
+      capabilities: [],
+      port: 4070,
+    });
+    const content = await getZipFileContent(result.base64, "modules/test-dc/docker-compose.yml");
+    expect(content).toContain("mod-test-dc");
+    expect(content).toContain("4070");
+    expect(content).toContain("host.docker.internal:host-gateway");
+    expect(content).toContain("AI_SERVICE_URL");
+    expect(content).toContain("AI_AGENT_ID");
+  });
+
+  it("includes OpenClaw agent SOUL.md and setup script", async () => {
+    const caller = appRouter.createCaller(createAdminContext());
+    const result = await caller.admin.generateScaffold({
+      slug: "test-agent",
+      name: "Agent Test Module",
+      mountType: "internal",
+      backendLanguage: "nodejs",
+      databaseMode: "shared",
+      capabilities: ["ai"],
+      port: 4080,
+    });
+    const files = await getZipFileList(result.base64);
+    expect(files).toContain("modules/test-agent/agent/SOUL.md");
+    expect(files).toContain("modules/test-agent/agent/setup-agent.sh");
+  });
+
+  it("SOUL.md contains module name and Portuguese language", async () => {
+    const caller = appRouter.createCaller(createAdminContext());
+    const result = await caller.admin.generateScaffold({
+      slug: "test-soul",
+      name: "Soul Test Module",
+      description: "Módulo de teste",
+      mountType: "internal",
+      backendLanguage: "python",
+      databaseMode: "shared",
+      capabilities: [],
+      port: 4090,
+    });
+    const content = await getZipFileContent(result.base64, "modules/test-soul/agent/SOUL.md");
+    expect(content).toContain("Soul Test Module");
+    expect(content).toContain("português europeu");
+    expect(content).toContain("Via Oceânica");
+  });
+
+  it("includes ai_client.py for Python modules", async () => {
+    const caller = appRouter.createCaller(createAdminContext());
+    const result = await caller.admin.generateScaffold({
+      slug: "test-py-ai",
+      name: "Python AI Test",
+      mountType: "api_only",
+      backendLanguage: "python",
+      databaseMode: "shared",
+      capabilities: ["ai"],
+      port: 4091,
+    });
+    const files = await getZipFileList(result.base64);
+    expect(files).toContain("modules/test-py-ai/ai_client.py");
+    const content = await getZipFileContent(result.base64, "modules/test-py-ai/ai_client.py");
+    expect(content).toContain("ask_assistant");
+    expect(content).toContain("OpenClaw");
+  });
+
+  it("includes ai-client.ts for Node.js modules", async () => {
+    const caller = appRouter.createCaller(createAdminContext());
+    const result = await caller.admin.generateScaffold({
+      slug: "test-node-ai",
+      name: "Node AI Test",
+      mountType: "api_only",
+      backendLanguage: "nodejs",
+      databaseMode: "shared",
+      capabilities: [],
+      port: 4092,
+    });
+    const files = await getZipFileList(result.base64);
+    expect(files).toContain("modules/test-node-ai/src/ai-client.ts");
+    const content = await getZipFileContent(result.base64, "modules/test-node-ai/src/ai-client.ts");
+    expect(content).toContain("askAssistant");
+    expect(content).toContain("OpenClaw");
+  });
+
+  it("includes .env.example with AI variables", async () => {
+    const caller = appRouter.createCaller(createAdminContext());
+    const result = await caller.admin.generateScaffold({
+      slug: "test-env",
+      name: "Env Test",
+      mountType: "api_only",
+      backendLanguage: "python",
+      databaseMode: "shared",
+      capabilities: [],
+      port: 4093,
+    });
+    const content = await getZipFileContent(result.base64, "modules/test-env/.env.example");
+    expect(content).toContain("AI_SERVICE_URL");
+    expect(content).toContain("AI_AGENT_ID=test-env");
+    expect(content).toContain("DATABASE_URL");
+  });
+
+  it("iframe mount includes frontend service in docker-compose.yml", async () => {
+    const caller = appRouter.createCaller(createAdminContext());
+    const result = await caller.admin.generateScaffold({
+      slug: "test-iframe",
+      name: "Iframe Test",
+      mountType: "iframe",
+      backendLanguage: "nodejs",
+      databaseMode: "separate",
+      capabilities: [],
+      port: 4094,
+    });
+    const content = await getZipFileContent(result.base64, "modules/test-iframe/docker-compose.yml");
+    expect(content).toContain("test-iframe-frontend");
+    expect(content).toContain("FRONTEND_PORT");
+  });
+
+  it("README includes AI assistant documentation", async () => {
+    const caller = appRouter.createCaller(createAdminContext());
+    const result = await caller.admin.generateScaffold({
+      slug: "test-readme",
+      name: "Readme Test",
+      mountType: "api_only",
+      backendLanguage: "python",
+      databaseMode: "shared",
+      capabilities: [],
+      port: 4095,
+    });
+    const content = await getZipFileContent(result.base64, "modules/test-readme/README.md");
+    expect(content).toContain("AI Assistant Integration");
+    expect(content).toContain("OpenClaw");
+    expect(content).toContain("setup-agent.sh");
+    expect(content).toContain("docker compose up");
+  });
+});
