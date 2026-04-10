@@ -7,6 +7,7 @@ import * as db from "./db";
 import bcrypt from "bcryptjs";
 import { nanoid } from "nanoid";
 import { generateScaffoldZip, type ScaffoldConfig } from "./scaffold";
+import { invokeLLM } from "./_core/llm";
 
 export const appRouter = router({
   system: systemRouter,
@@ -255,6 +256,52 @@ export const appRouter = router({
     companyModulesDetailed: protectedProcedure.query(async ({ ctx }) => {
       if (!ctx.user.companyId) return [];
       return db.getCompanyModulesWithDetails(ctx.user.companyId);
+    }),
+  }),
+
+  // ─── AI Agent Chat ───────────────────────────────────────────────
+  ai: router({
+    chat: protectedProcedure
+      .input(z.object({
+        message: z.string().min(1),
+        moduleKey: z.string().default("platform"),
+        history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string() })).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        // Map moduleKey to agent system prompt
+        const agentPrompts: Record<string, string> = {
+          contabilidade: "Tu és o assistente de contabilidade da Via Oceânica. Especialista em SNC, IVA, IRS, IRC, e contabilidade portuguesa. Responde sempre em português de Portugal.",
+          restauracao: "Tu és o assistente de restauração da Via Oceânica. Especialista em food cost, HACCP, gestão de menus, e operações de restaurantes em Portugal. Responde sempre em português de Portugal.",
+          "gestao-email": "Tu és o assistente de gestão de email da Via Oceânica. Especialista em email marketing, campanhas, RGPD, e deliverability. Responde sempre em português de Portugal.",
+          platform: "Tu és o assistente geral da Via Oceânica. Ajudas os utilizadores com questões sobre a plataforma, módulos, e funcionalidades. Responde sempre em português de Portugal.",
+        };
+        const systemPrompt = agentPrompts[input.moduleKey] || agentPrompts.platform;
+        const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+          { role: "system", content: systemPrompt },
+        ];
+        if (input.history) {
+          for (const h of input.history.slice(-10)) {
+            messages.push({ role: h.role, content: h.content });
+          }
+        }
+        messages.push({ role: "user", content: input.message });
+        const response = await invokeLLM({ messages });
+        const reply = response.choices?.[0]?.message?.content || "Desculpe, não consegui gerar uma resposta.";
+        return {
+          reply,
+          agent: input.moduleKey,
+          module: input.moduleKey,
+        };
+      }),
+    quota: protectedProcedure.query(async ({ ctx }) => {
+      if (!ctx.user.companyId) return { used: 0, limit: 0, unlimited: true, percentage: 0 };
+      const company = await db.getCompanyById(ctx.user.companyId);
+      if (!company?.planId) return { used: 0, limit: 0, unlimited: true, percentage: 0 };
+      const plan = await db.getPlanById(company.planId);
+      const maxTokens = plan?.tokensPerMonth || 0;
+      if (maxTokens === 0) return { used: 0, limit: 0, unlimited: true, percentage: 0 };
+      // For now return basic quota info
+      return { used: 0, limit: maxTokens, unlimited: false, percentage: 0 };
     }),
   }),
 

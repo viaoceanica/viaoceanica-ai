@@ -294,3 +294,25 @@
 - [x] Add README section on AI assistant integration and OpenClaw agent configuration
 - [x] Update VPS platform-core scaffold.ts to match new template (rebuilt + restarted)
 - [x] Test scaffold output — 9 new tests verifying docker-compose, SOUL.md, ai-client, .env (69 total passing)
+
+### Agent Chat Endpoint (ai-service)
+- [x] Add POST /api/v1/agent/chat endpoint to ai-service
+- [x] Route to correct OpenClaw agent based on moduleKey parameter
+- [x] Session persistence per tenant+user (session_id = tenantId-userId-moduleKey)
+- [x] Return structured response with reply, usage, model
+- [x] Metering: record AI usage event for each agent chat call
+- [x] Rebuild and deploy ai-service on VPS
+
+### Floating Chat Widget (shell frontend)
+- [x] Create useAgentChat hook (manages messages, sends to /api/ai/agent/chat, handles loading)
+- [x] Create ModuleAssistant floating chat component (FAB button + expandable chat panel)
+- [x] Integrate into DashboardLayout (appears on all dashboard pages)
+- [x] Pass current moduleKey context to agent chat endpoint
+- [x] Style to match Via Oceânica design (teal accent, dark panel)
+
+### Token Usage Limits per Plan
+- [x] ai-service checks tenant's plan maxTokens before processing request
+- [x] Query current month's token usage from ai_usage_summaries
+- [x] Return 429 with clear message when quota exceeded
+- [ ] Frontend: show remaining tokens in chat widget header (deferred — quota endpoint available)
+- [ ] Frontend: show quota exceeded message when 429 received (deferred — backend returns 429)
