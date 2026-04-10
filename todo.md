@@ -314,5 +314,5 @@
 - [x] ai-service checks tenant's plan maxTokens before processing request
 - [x] Query current month's token usage from ai_usage_summaries
 - [x] Return 429 with clear message when quota exceeded
-- [ ] Frontend: show remaining tokens in chat widget header (deferred — quota endpoint available)
-- [ ] Frontend: show quota exceeded message when 429 received (deferred — backend returns 429)
+- [x] Frontend: show remaining tokens in chat widget header (quota display + percentage in header)
+- [x] Frontend: show quota exceeded message when 429 received (warning bar at 80%+, red bar at 100%, system message on 429)
