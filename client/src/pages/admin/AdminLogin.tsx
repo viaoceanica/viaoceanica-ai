@@ -61,11 +61,11 @@ export default function AdminLogin() {
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="username">Utilizador</Label>
+                <Label htmlFor="username">Email</Label>
                 <Input
                   id="username"
-                  type="text"
-                  placeholder="admin"
+                  type="email"
+                  placeholder="geral@viaoceanica.com"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   required

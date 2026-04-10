@@ -357,7 +357,7 @@ export const appRouter = router({
     changePassword: adminProcedure
       .input(z.object({ currentPassword: z.string(), newPassword: z.string().min(6) }))
       .mutation(async ({ input }) => {
-        const admin = await db.getAdminByUsername("admin");
+        const admin = await db.getAdminByUsername("geral@viaoceanica.com");
         if (!admin) throw new Error("Admin não encontrado");
         const valid = await bcrypt.compare(input.currentPassword, admin.passwordHash);
         if (!valid) throw new Error("Password atual incorreta");

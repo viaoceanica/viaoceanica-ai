@@ -242,3 +242,9 @@
 - [x] Frontend: AdminModules — verify create/edit/delete module dialogs work end-to-end
 - [x] Tests: add/update tests for company CRUD and module CRUD (46 tests passing)
 - [x] Browser verification of all CRUD flows
+
+### Admin Credentials Update
+- [x] Update admin username from "admin" to "geral@viaoceanica.com"
+- [x] Update admin password hash in DB for Password321!
+- [x] Update login form placeholder to show email format
+- [x] Ensure no other users can access admin panel (single admin only)

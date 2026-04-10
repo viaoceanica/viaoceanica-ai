@@ -25,10 +25,14 @@ export function registerOAuthRoutes(app: Express) {
         return;
       }
       // Find or create a system admin user to issue a session
-      let adminUser = await db.getUserByEmail(`admin@viaoceanica.system`);
+      let adminUser = await db.getUserByEmail(username);
+      if (!adminUser) {
+        // Also check for legacy admin email
+        adminUser = await db.getUserByEmail("admin@viaoceanica.system");
+      }
       if (!adminUser) {
         adminUser = await db.createUser({
-          email: "admin@viaoceanica.system",
+          email: username,
           name: "Administrador",
           passwordHash: adminCred.passwordHash,
           companyRole: "owner",
