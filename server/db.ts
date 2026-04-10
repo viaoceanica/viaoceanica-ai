@@ -534,7 +534,7 @@ export async function getTenantBillingSummary() {
 
 // ─── Plans CRUD ─────────────────────────────────────────────────────
 
-export async function createPlan(data: { name: string; description?: string; tokensPerMonth?: number; maxMembers?: number; price?: number }) {
+export async function createPlan(data: { name: string; description?: string; tokensPerMonth?: number; maxMembers?: number; price?: number; modulesAccess?: string }) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   const result = await db.insert(plans).values({
@@ -543,15 +543,35 @@ export async function createPlan(data: { name: string; description?: string; tok
     tokensPerMonth: data.tokensPerMonth || 0,
     maxMembers: data.maxMembers || 3,
     price: data.price || 0,
+    modulesAccess: data.modulesAccess || null,
   });
   const id = result[0].insertId;
   return getPlanById(id);
 }
 
-export async function updatePlan(id: number, data: Partial<{ name: string; description: string | null; tokensPerMonth: number; maxMembers: number; price: number; isActive: boolean }>) {
+export async function updatePlan(id: number, data: Partial<{ name: string; description: string | null; tokensPerMonth: number; maxMembers: number; price: number; isActive: boolean; modulesAccess: string | null }>) {
   const db = await getDb();
   if (!db) return;
   await db.update(plans).set(data).where(eq(plans.id, id));
+}
+
+export async function deletePlan(id: number) {
+  const db = await getDb();
+  if (!db) return;
+  // Unlink companies from this plan
+  await db.update(companies).set({ planId: null }).where(eq(companies.planId, id));
+  await db.delete(plans).where(eq(plans.id, id));
+}
+
+export async function getPlansWithCompanyCounts() {
+  const db = await getDb();
+  if (!db) return [];
+  const allPlans = await db.select().from(plans);
+  const allCompanies = await db.select().from(companies);
+  return allPlans.map(p => ({
+    ...p,
+    companyCount: allCompanies.filter(c => c.planId === p.id).length,
+  }));
 }
 
 // ─── Company CRUD (admin) ───────────────────────────────────────────

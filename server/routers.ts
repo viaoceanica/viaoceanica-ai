@@ -6,6 +6,7 @@ import { z } from "zod";
 import * as db from "./db";
 import bcrypt from "bcryptjs";
 import { nanoid } from "nanoid";
+import { generateScaffoldZip, type ScaffoldConfig } from "./scaffold";
 
 export const appRouter = router({
   system: systemRouter,
@@ -321,6 +322,43 @@ export const appRouter = router({
     plans: adminProcedure.query(async () => {
       return db.getAllPlans();
     }),
+    plansWithCounts: adminProcedure.query(async () => {
+      return db.getPlansWithCompanyCounts();
+    }),
+    createPlan: adminProcedure
+      .input(z.object({
+        name: z.string().min(1),
+        description: z.string().optional(),
+        tokensPerMonth: z.number().int().min(0).default(0),
+        maxMembers: z.number().int().default(3),
+        price: z.number().int().min(0).default(0),
+        modulesAccess: z.string().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        return db.createPlan(input);
+      }),
+    updatePlan: adminProcedure
+      .input(z.object({
+        id: z.number(),
+        name: z.string().optional(),
+        description: z.string().nullable().optional(),
+        tokensPerMonth: z.number().int().min(0).optional(),
+        maxMembers: z.number().int().optional(),
+        price: z.number().int().min(0).optional(),
+        isActive: z.boolean().optional(),
+        modulesAccess: z.string().nullable().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const { id, ...data } = input;
+        await db.updatePlan(id, data as any);
+        return db.getPlanById(id);
+      }),
+    deletePlan: adminProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ input }) => {
+        await db.deletePlan(input.id);
+        return { success: true };
+      }),
     assignPlan: adminProcedure
       .input(z.object({ companyId: z.number(), planId: z.number() }))
       .mutation(async ({ input }) => {
@@ -401,6 +439,36 @@ export const appRouter = router({
       .mutation(async ({ input }) => {
         await db.deleteCompany(input.companyId);
         return { success: true };
+      }),
+
+    // ─── Scaffold ZIP Export ────────────────────────────────────────
+    generateScaffold: adminProcedure
+      .input(z.object({
+        slug: z.string().min(1),
+        name: z.string().min(1),
+        description: z.string().default(""),
+        icon: z.string().default("Puzzle"),
+        mountType: z.string().default("iframe"),
+        backendLanguage: z.string().default("python"),
+        databaseMode: z.string().default("shared"),
+        capabilities: z.array(z.string()).default([]),
+        port: z.number().int().default(4004),
+      }))
+      .mutation(async ({ input }) => {
+        const cfg: ScaffoldConfig = {
+          slug: input.slug,
+          name: input.name,
+          description: input.description,
+          icon: input.icon,
+          mountType: input.mountType,
+          backendLanguage: input.backendLanguage,
+          databaseMode: input.databaseMode,
+          capabilities: input.capabilities,
+          port: input.port,
+        };
+        const zipBuffer = await generateScaffoldZip(cfg);
+        const base64 = zipBuffer.toString("base64");
+        return { base64, filename: `module-${input.slug}-scaffold.zip` };
       }),
 
     // ─── Toggle module for company ───────────────────────────────────

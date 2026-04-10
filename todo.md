@@ -259,3 +259,21 @@
 - [x] Module creation generates a summary of integration steps needed (gateway env, nginx config, docker-compose block)
 - [x] Backend: enhanced createModule/updateModule with auto-derived fields
 - [x] Frontend: redesigned AdminModules form with spec-aligned workflow
+
+### Deploy Latest Admin Code to VPS
+- [x] Rebuild shell container on VPS with latest admin panel (tRPC-based AdminModules, AdminCompanies, etc.)
+- [x] Rebuild platform-core on VPS with latest admin tRPC procedures (Plans CRUD + scaffold endpoint)
+- [x] Verify admin panel works on VPS production (login, dashboard, companies, modules, billing, settings)
+
+### Plans (Planos) CRUD in Admin Panel
+- [x] Backend: create plans tRPC procedures (list, create, update, delete) with all fields (name, slug, monthlyPrice, annualPrice, maxMembers, maxTokens, features, moduleAccess, isActive)
+- [x] Backend: DB helpers for plans CRUD (insert, update, delete, list with company counts)
+- [x] Frontend: AdminPlans page with full CRUD — list plans in table/cards, create/edit/delete dialogs
+- [x] Frontend: Plan form with pricing fields, member/token limits, feature list, module access toggles
+- [x] Tests for plans CRUD procedures (14 tests — 9 plans CRUD + 5 scaffold)
+
+### Module Scaffold ZIP Export
+- [x] Backend: tRPC procedure to generate module scaffold ZIP from module config
+- [x] ZIP includes: Dockerfile, module-manifest.json, docker-compose snippet, nginx config, backend boilerplate, frontend boilerplate
+- [x] Frontend: "Descarregar scaffold" button on AdminModules page (in config view and after creation)
+- [x] Tests for scaffold generation (included in plans CRUD test file — 60 total tests passing)

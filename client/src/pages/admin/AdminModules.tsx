@@ -15,7 +15,7 @@ import {
   FileCode, Database, Settings, CheckCircle2, Circle, ClipboardList,
   Layers, BarChart3, ShieldCheck, Bell, CreditCard, Briefcase,
   FileText, Users, Zap, Wrench, BookOpen, Camera, Music, Map, Calendar,
-  MessageSquare, ShoppingCart, Truck, Heart, Star
+  MessageSquare, ShoppingCart, Truck, Heart, Star, Download
 } from "lucide-react";
 import { useState, useMemo, useCallback, useEffect } from "react";
 import { toast } from "sonner";
@@ -487,6 +487,40 @@ export default function AdminModules() {
     onSuccess: () => { utils.admin.allModules.invalidate(); toast.success("Módulo eliminado"); },
     onError: (e) => toast.error(e.message),
   });
+  const scaffoldMut = trpc.admin.generateScaffold.useMutation({
+    onSuccess: (data) => {
+      // Convert base64 to blob and trigger download
+      const byteChars = atob(data.base64);
+      const byteNumbers = new Array(byteChars.length);
+      for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: "application/zip" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = data.filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast.success("Scaffold ZIP transferido");
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
+  const handleDownloadScaffold = (moduleForm: ModuleForm) => {
+    scaffoldMut.mutate({
+      slug: moduleForm.slug,
+      name: moduleForm.name,
+      description: moduleForm.description,
+      icon: moduleForm.icon,
+      mountType: moduleForm.mountType,
+      backendLanguage: moduleForm.backendLanguage,
+      databaseMode: moduleForm.databaseMode,
+      capabilities: moduleForm.capabilities,
+      port: moduleForm.port,
+    });
+  };
 
   const [formDialog, setFormDialog] = useState<{ open: boolean; editId: number | null }>({ open: false, editId: null });
   const [form, setForm] = useState<ModuleForm>(defaultForm);
@@ -902,6 +936,16 @@ export default function AdminModules() {
 
           <DialogFooter className="mt-4">
             <Button variant="outline" onClick={() => setFormDialog(p => ({ ...p, open: false }))}>Cancelar</Button>
+            {form.slug && (
+              <Button
+                variant="outline"
+                onClick={() => handleDownloadScaffold(form)}
+                disabled={scaffoldMut.isPending}
+              >
+                <Download className="h-4 w-4 mr-2" />
+                {scaffoldMut.isPending ? "A gerar..." : "Scaffold ZIP"}
+              </Button>
+            )}
             <Button onClick={handleSave} disabled={createMut.isPending || updateMut.isPending}>
               {createMut.isPending || updateMut.isPending ? "A guardar..." : formDialog.editId ? "Guardar" : "Criar Módulo"}
             </Button>
@@ -945,6 +989,16 @@ export default function AdminModules() {
             </div>
           )}
           <DialogFooter>
+            {detailDialog.module && (
+              <Button
+                variant="outline"
+                onClick={() => handleDownloadScaffold(detailDialog.module)}
+                disabled={scaffoldMut.isPending}
+              >
+                <Download className="h-4 w-4 mr-2" />
+                {scaffoldMut.isPending ? "A gerar..." : "Transferir Scaffold ZIP"}
+              </Button>
+            )}
             <Button variant="outline" onClick={() => setDetailDialog(p => ({ ...p, open: false }))}>Fechar</Button>
           </DialogFooter>
         </DialogContent>
