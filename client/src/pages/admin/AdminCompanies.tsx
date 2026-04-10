@@ -6,40 +6,55 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useQuery, useDynamicMutation } from "@/hooks/useApi";
-import { Building2, Coins, Eye } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { trpc } from "@/lib/trpc";
+import { Building2, Coins, Eye, Trash2, Puzzle } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function AdminCompanies() {
-  const { data: companies, isLoading, refetch } = useQuery<any[]>("/api/platform/tenants/admin/companies");
-  const { data: plans } = useQuery<any[]>("/api/platform/tenants/admin/plans");
+  const utils = trpc.useUtils();
+  const { data: companies, isLoading } = trpc.admin.companies.useQuery();
+  const { data: plans } = trpc.admin.plans.useQuery();
+  const { data: allModules } = trpc.admin.allModules.useQuery();
 
-  const grantTokensMut = useDynamicMutation("POST", {
-    onSuccess: () => { refetch(); toast.success("Tokens atribuídos"); },
+  const grantTokensMut = trpc.admin.grantTokens.useMutation({
+    onSuccess: () => { utils.admin.companies.invalidate(); utils.admin.tenantBilling.invalidate(); toast.success("Tokens atribuídos"); },
     onError: (e) => toast.error(e.message),
   });
-  const assignPlanMut = useDynamicMutation("PUT", {
-    onSuccess: () => { refetch(); toast.success("Plano atribuído"); },
+  const assignPlanMut = trpc.admin.assignPlan.useMutation({
+    onSuccess: () => { utils.admin.companies.invalidate(); toast.success("Plano atribuído"); },
+    onError: (e) => toast.error(e.message),
+  });
+  const deleteCompanyMut = trpc.admin.deleteCompany.useMutation({
+    onSuccess: () => { utils.admin.companies.invalidate(); utils.admin.tenantBilling.invalidate(); toast.success("Empresa eliminada"); },
+    onError: (e) => toast.error(e.message),
+  });
+  const toggleModuleMut = trpc.admin.toggleCompanyModule.useMutation({
+    onSuccess: () => { toast.success("Módulo atualizado"); },
     onError: (e) => toast.error(e.message),
   });
 
+  // Grant tokens dialog
   const [grantDialog, setGrantDialog] = useState<{ open: boolean; companyId: number; companyName: string }>({ open: false, companyId: 0, companyName: "" });
   const [grantAmount, setGrantAmount] = useState("");
   const [grantSource, setGrantSource] = useState<"internal" | "external">("internal");
   const [grantDesc, setGrantDesc] = useState("");
 
+  // Plan dialog
   const [planDialog, setPlanDialog] = useState<{ open: boolean; companyId: number; companyName: string }>({ open: false, companyId: 0, companyName: "" });
   const [selectedPlan, setSelectedPlan] = useState("");
 
+  // Detail dialog
   const [detailDialog, setDetailDialog] = useState<{ open: boolean; companyId: number }>({ open: false, companyId: 0 });
-  const { data: companyDetail } = useQuery<any>(
-    detailDialog.open && detailDialog.companyId > 0
-      ? `/api/platform/tenants/admin/companies/${detailDialog.companyId}`
-      : null,
+  const { data: companyDetail } = trpc.admin.companyDetails.useQuery(
+    { companyId: detailDialog.companyId },
     { enabled: detailDialog.open && detailDialog.companyId > 0 }
   );
+
+  // Delete confirmation
+  const [deleteDialog, setDeleteDialog] = useState<{ open: boolean; companyId: number; companyName: string }>({ open: false, companyId: 0, companyName: "" });
 
   return (
     <div className="space-y-8">
@@ -88,28 +103,17 @@ export default function AdminCompanies() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-1">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setDetailDialog({ open: true, companyId: c.id })}
-                          >
-                            <Eye className="h-3 w-3 mr-1" />
-                            Ver
+                          <Button variant="ghost" size="sm" onClick={() => setDetailDialog({ open: true, companyId: c.id })}>
+                            <Eye className="h-3 w-3 mr-1" /> Ver
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setGrantDialog({ open: true, companyId: c.id, companyName: c.name })}
-                          >
-                            <Coins className="h-3 w-3 mr-1" />
-                            Tokens
+                          <Button variant="ghost" size="sm" onClick={() => setGrantDialog({ open: true, companyId: c.id, companyName: c.name })}>
+                            <Coins className="h-3 w-3 mr-1" /> Tokens
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setPlanDialog({ open: true, companyId: c.id, companyName: c.name })}
-                          >
+                          <Button variant="ghost" size="sm" onClick={() => setPlanDialog({ open: true, companyId: c.id, companyName: c.name })}>
                             Plano
+                          </Button>
+                          <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={() => setDeleteDialog({ open: true, companyId: c.id, companyName: c.name })}>
+                            <Trash2 className="h-3 w-3" />
                           </Button>
                         </div>
                       </TableCell>
@@ -134,7 +138,7 @@ export default function AdminCompanies() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Atribuir tokens</DialogTitle>
-            <DialogDescription>Atribuir tokens gratuitos a {grantDialog.companyName}</DialogDescription>
+            <DialogDescription>Atribuir tokens a {grantDialog.companyName}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
@@ -162,12 +166,8 @@ export default function AdminCompanies() {
               onClick={async () => {
                 const amount = parseInt(grantAmount);
                 if (!amount || amount <= 0) { toast.error("Quantidade inválida"); return; }
-                await grantTokensMut.mutateAsync(
-                  `/api/platform/tenants/admin/companies/${grantDialog.companyId}/tokens`,
-                  { amount, source: grantSource, description: grantDesc || undefined }
-                );
-                setGrantAmount("");
-                setGrantDesc("");
+                await grantTokensMut.mutateAsync({ companyId: grantDialog.companyId, amount, source: grantSource, description: grantDesc || undefined });
+                setGrantAmount(""); setGrantDesc("");
                 setGrantDialog(p => ({ ...p, open: false }));
               }}
               disabled={grantTokensMut.isPending}
@@ -203,10 +203,7 @@ export default function AdminCompanies() {
             <Button
               onClick={async () => {
                 if (!selectedPlan) { toast.error("Selecione um plano"); return; }
-                await assignPlanMut.mutateAsync(
-                  `/api/platform/tenants/admin/companies/${planDialog.companyId}/plan`,
-                  { planId: parseInt(selectedPlan) }
-                );
+                await assignPlanMut.mutateAsync({ companyId: planDialog.companyId, planId: parseInt(selectedPlan) });
                 setSelectedPlan("");
                 setPlanDialog(p => ({ ...p, open: false }));
               }}
@@ -234,6 +231,8 @@ export default function AdminCompanies() {
                 <div><span className="text-muted-foreground">Tokens int.:</span> {(companyDetail.company?.tokensBalance ?? 0).toLocaleString("pt-PT")}</div>
                 <div><span className="text-muted-foreground">Tokens ext.:</span> {(companyDetail.company?.externalTokensBalance ?? 0).toLocaleString("pt-PT")}</div>
               </div>
+
+              {/* Members */}
               <div>
                 <h4 className="text-sm font-medium mb-2">Membros ({companyDetail.members?.length ?? 0})</h4>
                 <div className="space-y-1">
@@ -245,10 +244,79 @@ export default function AdminCompanies() {
                   ))}
                 </div>
               </div>
+
+              {/* Modules */}
+              <div>
+                <h4 className="text-sm font-medium mb-2">Módulos ({companyDetail.modules?.length ?? 0})</h4>
+                <div className="space-y-2">
+                  {allModules?.map((mod: any) => {
+                    const cm = companyDetail.modules?.find((m: any) => m.moduleId === mod.id);
+                    const isEnabled = cm?.isEnabled ?? false;
+                    return (
+                      <div key={mod.id} className="flex items-center justify-between text-sm py-2 px-3 rounded border border-border/50">
+                        <div className="flex items-center gap-2">
+                          <Puzzle className="h-4 w-4 text-muted-foreground" />
+                          <span>{mod.name}</span>
+                          <span className="text-xs text-muted-foreground">({mod.slug})</span>
+                        </div>
+                        <Switch
+                          checked={isEnabled}
+                          onCheckedChange={async (checked) => {
+                            await toggleModuleMut.mutateAsync({ companyId: detailDialog.companyId, moduleId: mod.id, isEnabled: checked });
+                            utils.admin.companyDetails.invalidate({ companyId: detailDialog.companyId });
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Recent transactions */}
+              {companyDetail.transactions && companyDetail.transactions.length > 0 && (
+                <div>
+                  <h4 className="text-sm font-medium mb-2">Últimas transações</h4>
+                  <div className="space-y-1">
+                    {companyDetail.transactions.slice(0, 5).map((t: any) => (
+                      <div key={t.id} className="flex items-center justify-between text-sm py-1 px-2 rounded bg-muted/50">
+                        <span className="text-muted-foreground">{t.description || t.source}</span>
+                        <span className={t.type === "credit" ? "text-green-600" : "text-red-600"}>
+                          {t.type === "credit" ? "+" : "-"}{t.amount.toLocaleString("pt-PT")}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
             <Skeleton className="h-32 w-full" />
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete confirmation dialog */}
+      <Dialog open={deleteDialog.open} onOpenChange={(open) => setDeleteDialog(p => ({ ...p, open }))}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Eliminar empresa</DialogTitle>
+            <DialogDescription>
+              Tem a certeza que deseja eliminar <strong>{deleteDialog.companyName}</strong>? Esta ação é irreversível e irá remover todos os dados associados.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteDialog(p => ({ ...p, open: false }))}>Cancelar</Button>
+            <Button
+              variant="destructive"
+              onClick={async () => {
+                await deleteCompanyMut.mutateAsync({ companyId: deleteDialog.companyId });
+                setDeleteDialog(p => ({ ...p, open: false }));
+              }}
+              disabled={deleteCompanyMut.isPending}
+            >
+              Eliminar
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

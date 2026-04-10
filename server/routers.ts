@@ -282,9 +282,19 @@ export const appRouter = router({
         const company = await db.getCompanyById(input.companyId);
         const members = await db.getCompanyMembers(input.companyId);
         const companyMods = await db.getCompanyModules(input.companyId);
+        const allMods = await db.getAllModules();
         const transactions = await db.getTokenTransactionsByCompany(input.companyId);
         const plan = company?.planId ? await db.getPlanById(company.planId) : null;
-        return { company, members: members.map(m => ({ ...m, passwordHash: undefined })), modules: companyMods, transactions, plan };
+        return {
+          company,
+          members: members.map(m => ({ ...m, passwordHash: undefined })),
+          modules: companyMods.map(cm => {
+            const mod = allMods.find(m => m.id === cm.moduleId);
+            return { ...cm, slug: mod?.slug, name: mod?.name, icon: mod?.icon };
+          }),
+          transactions,
+          plan,
+        };
       }),
     grantTokens: adminProcedure
       .input(z.object({ companyId: z.number(), amount: z.number().positive(), source: z.enum(["internal", "external"]).default("internal"), description: z.string().optional() }))
@@ -315,6 +325,67 @@ export const appRouter = router({
       .input(z.object({ companyId: z.number(), planId: z.number() }))
       .mutation(async ({ input }) => {
         await db.updateCompany(input.companyId, { planId: input.planId });
+        return { success: true };
+      }),
+
+    // ─── Module CRUD ─────────────────────────────────────────────────
+    createModule: adminProcedure
+      .input(z.object({ slug: z.string().min(1), name: z.string().min(1), description: z.string().optional(), icon: z.string().optional(), mountType: z.string().optional(), backendUrl: z.string().optional(), frontendUrl: z.string().optional(), status: z.string().optional() }))
+      .mutation(async ({ input }) => {
+        return db.createModule(input);
+      }),
+    updateModule: adminProcedure
+      .input(z.object({ id: z.number(), slug: z.string().optional(), name: z.string().optional(), description: z.string().optional(), icon: z.string().optional(), isActive: z.boolean().optional(), mountType: z.string().optional(), backendUrl: z.string().optional(), frontendUrl: z.string().optional(), status: z.string().optional() }))
+      .mutation(async ({ input }) => {
+        const { id, ...data } = input;
+        await db.updateModule(id, data as any);
+        return db.getModuleById(id);
+      }),
+    deleteModule: adminProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ input }) => {
+        await db.deleteModule(input.id);
+        return { success: true };
+      }),
+
+    // ─── Billing Summary ─────────────────────────────────────────────
+    tenantBilling: adminProcedure.query(async () => {
+      return db.getTenantBillingSummary();
+    }),
+
+    // ─── Admin Password Change ───────────────────────────────────────
+    changePassword: adminProcedure
+      .input(z.object({ currentPassword: z.string(), newPassword: z.string().min(6) }))
+      .mutation(async ({ input }) => {
+        const admin = await db.getAdminByUsername("admin");
+        if (!admin) throw new Error("Admin não encontrado");
+        const valid = await bcrypt.compare(input.currentPassword, admin.passwordHash);
+        if (!valid) throw new Error("Password atual incorreta");
+        const newHash = await bcrypt.hash(input.newPassword, 12);
+        await db.updateAdminPassword(admin.id, newHash);
+        return { success: true };
+      }),
+
+    // ─── Company Management ──────────────────────────────────────────
+    updateCompany: adminProcedure
+      .input(z.object({ companyId: z.number(), name: z.string().optional(), sector: z.string().optional(), email: z.string().optional(), phone: z.string().optional() }))
+      .mutation(async ({ input }) => {
+        const { companyId, ...data } = input;
+        await db.updateCompany(companyId, data);
+        return db.getCompanyById(companyId);
+      }),
+    deleteCompany: adminProcedure
+      .input(z.object({ companyId: z.number() }))
+      .mutation(async ({ input }) => {
+        await db.deleteCompany(input.companyId);
+        return { success: true };
+      }),
+
+    // ─── Toggle module for company ───────────────────────────────────
+    toggleCompanyModule: adminProcedure
+      .input(z.object({ companyId: z.number(), moduleId: z.number(), isEnabled: z.boolean() }))
+      .mutation(async ({ input }) => {
+        await db.setCompanyModule({ companyId: input.companyId, moduleId: input.moduleId, isEnabled: input.isEnabled });
         return { success: true };
       }),
   }),

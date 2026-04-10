@@ -79,6 +79,8 @@ const adminMenuItems = [
   { icon: Puzzle, label: "Módulos", path: "/admin/modules" },
   { icon: Settings, label: "Planos", path: "/admin/plans" },
   { icon: Brain, label: "Consumo AI", path: "/admin/ai-usage" },
+  { icon: Receipt, label: "Faturação", path: "/admin/billing" },
+  { icon: Lock, label: "Definições", path: "/admin/settings" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";

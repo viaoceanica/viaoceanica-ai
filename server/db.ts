@@ -8,12 +8,14 @@ import {
   InsertInvitation, invitations,
   plans,
   modules,
+  InsertModule,
   companyModules,
   InsertCompanyModule,
   modulePermissions,
   InsertModulePermission,
   tokenTransactions,
   InsertTokenTransaction,
+  adminCredentials,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
@@ -433,4 +435,146 @@ export async function getUserRecentActivity(userId: number, companyId?: number) 
   // Sort by date descending and limit to 15
   activity.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   return activity.slice(0, 15);
+}
+
+// ─── Admin Credentials ──────────────────────────────────────────────
+
+export async function getAdminByUsername(username: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(adminCredentials).where(eq(adminCredentials.username, username)).limit(1);
+  return result.length > 0 ? result[0] : undefined;
+}
+
+export async function updateAdminPassword(id: number, passwordHash: string) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(adminCredentials).set({ passwordHash }).where(eq(adminCredentials.id, id));
+}
+
+// ─── Module CRUD ────────────────────────────────────────────────────
+
+export async function createModule(data: { slug: string; name: string; description?: string; icon?: string; mountType?: string; backendUrl?: string; frontendUrl?: string; status?: string }) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const result = await db.insert(modules).values({
+    slug: data.slug,
+    name: data.name,
+    mountType: data.mountType || "iframe",
+    backendUrl: data.backendUrl || null,
+    frontendUrl: data.frontendUrl || null,
+    status: data.status || "active",
+    description: data.description || null,
+    icon: data.icon || null,
+  });
+  const id = result[0].insertId;
+  return getModuleById(id);
+}
+
+export async function getModuleById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(modules).where(eq(modules.id, id)).limit(1);
+  return result.length > 0 ? result[0] : undefined;
+}
+
+export async function updateModule(id: number, data: Partial<{ slug: string; name: string; description: string | null; icon: string | null; isActive: boolean; mountType: string | null; backendUrl: string | null; frontendUrl: string | null; status: string | null }>) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(modules).set(data).where(eq(modules.id, id));
+}
+
+export async function deleteModule(id: number) {
+  const db = await getDb();
+  if (!db) return;
+  // Remove related company_modules and permissions first
+  const cms = await db.select().from(companyModules).where(eq(companyModules.moduleId, id));
+  for (const cm of cms) {
+    await db.delete(modulePermissions).where(eq(modulePermissions.companyModuleId, cm.id));
+  }
+  await db.delete(companyModules).where(eq(companyModules.moduleId, id));
+  await db.delete(modules).where(eq(modules.id, id));
+}
+
+// ─── Billing / Tenant Summary ───────────────────────────────────────
+
+export async function getTenantBillingSummary() {
+  const db = await getDb();
+  if (!db) return [];
+  const allCompanies = await db.select().from(companies);
+  const allPlans = await db.select().from(plans);
+  const allTxns = await db.select().from(tokenTransactions).orderBy(desc(tokenTransactions.createdAt));
+  const allUsers = await db.select().from(users);
+  const allCMs = await db.select().from(companyModules);
+  
+  return allCompanies.map(c => {
+    const plan = allPlans.find(p => p.id === c.planId);
+    const txns = allTxns.filter(t => t.companyId === c.id);
+    const memberCount = allUsers.filter(u => u.companyId === c.id).length;
+    const activeModules = allCMs.filter(cm => cm.companyId === c.id && cm.isEnabled).length;
+    const totalCredits = txns.filter(t => t.type === "credit").reduce((sum, t) => sum + t.amount, 0);
+    const totalDebits = txns.filter(t => t.type === "debit").reduce((sum, t) => sum + t.amount, 0);
+    return {
+      companyId: c.id,
+      companyName: c.name,
+      sector: c.sector,
+      planName: plan?.name || "Sem plano",
+      planPrice: plan?.price || 0,
+      tokensBalance: c.tokensBalance,
+      externalTokensBalance: c.externalTokensBalance,
+      totalCredits,
+      totalDebits,
+      memberCount,
+      activeModules,
+      createdAt: c.createdAt,
+      recentTransactions: txns.slice(0, 5),
+    };
+  });
+}
+
+// ─── Plans CRUD ─────────────────────────────────────────────────────
+
+export async function createPlan(data: { name: string; description?: string; tokensPerMonth?: number; maxMembers?: number; price?: number }) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const result = await db.insert(plans).values({
+    name: data.name,
+    description: data.description || null,
+    tokensPerMonth: data.tokensPerMonth || 0,
+    maxMembers: data.maxMembers || 3,
+    price: data.price || 0,
+  });
+  const id = result[0].insertId;
+  return getPlanById(id);
+}
+
+export async function updatePlan(id: number, data: Partial<{ name: string; description: string | null; tokensPerMonth: number; maxMembers: number; price: number; isActive: boolean }>) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(plans).set(data).where(eq(plans.id, id));
+}
+
+// ─── Company CRUD (admin) ───────────────────────────────────────────
+
+export async function deleteCompany(id: number) {
+  const db = await getDb();
+  if (!db) return;
+  // Remove related data
+  const cms = await db.select().from(companyModules).where(eq(companyModules.companyId, id));
+  for (const cm of cms) {
+    await db.delete(modulePermissions).where(eq(modulePermissions.companyModuleId, cm.id));
+  }
+  await db.delete(companyModules).where(eq(companyModules.companyId, id));
+  await db.delete(tokenTransactions).where(eq(tokenTransactions.companyId, id));
+  await db.delete(invitations).where(eq(invitations.companyId, id));
+  // Remove teams and team members
+  const companyTeams = await db.select().from(teams).where(eq(teams.companyId, id));
+  for (const t of companyTeams) {
+    await db.delete(teamMembers).where(eq(teamMembers.teamId, t.id));
+  }
+  await db.delete(teams).where(eq(teams.companyId, id));
+  // Unlink users
+  await db.update(users).set({ companyId: null, companyRole: "member" }).where(eq(users.companyId, id));
+  // Delete company
+  await db.delete(companies).where(eq(companies.id, id));
 }

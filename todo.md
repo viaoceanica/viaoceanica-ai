@@ -205,7 +205,9 @@
 - [x] Corrigir extraction_model de gpt-5.4-mini para gpt-4o-mini
 - [x] Configurar credenciais R2 (Cloudflare) para storage de ficheiros
 - [x] Adicionar OPENAI_API_KEY ao mod-contabilidade no docker-compose
-- [ ] Reiniciar mod-contabilidade e verificar processamento de faturas com IA
+- [x] Reiniciar mod-contabilidade (timeout aumentado para 180s, upload via /ingest)
+- [x] Validar processamento end-to-end de fatura no ViaContab (7 faturas reais processadas com sucesso)
+- [x] Confirmar fluxo de upload fallback /ingest funciona no browser (R2 bypassed, /ingest direto)
 
 ### ViaContab UI Cleanup
 - [x] Remover secção Telemetria de fricção (upload funnel) da página principal
@@ -216,3 +218,17 @@
 - [x] Remover card "Falhas de importação" do tab Queue (manter código para futuro)
 - [x] Remover card "Revisão e bloqueios" do tab Queue (manter código para futuro)
 - [x] Deploy e verificar no browser
+
+### Admin Panel (Standalone Auth + Management)
+- [x] Admin credentials table in DB (admin_credentials: username, passwordHash, changeable)
+- [x] Backend: admin login endpoint (POST /api/admin/login with username/password → session cookie)
+- [x] Backend: admin change password endpoint (admin.changePassword)
+- [x] Backend: module CRUD (admin.createModule, admin.updateModule, admin.deleteModule)
+- [x] Backend: tenant billing summary (admin.tenantBilling — tokens, plan, transactions per company)
+- [x] Frontend: Admin login page (/admin-login) with standalone username/password form
+- [x] Frontend: Enhanced admin dashboard with overview metrics
+- [x] Frontend: Admin clients/companies page with billing info per tenant
+- [x] Frontend: Admin modules page with ability to add/edit/remove modules
+- [x] Frontend: Admin settings page with changeable admin password
+- [x] Seed default admin credentials (admin / Password321!)
+- [x] Tests for admin auth and module CRUD (39 tests passing)

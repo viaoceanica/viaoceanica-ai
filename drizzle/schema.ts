@@ -104,6 +104,10 @@ export const modules = mysqlTable("modules", {
   name: varchar("name", { length: 255 }).notNull(),
   description: text("description"),
   icon: varchar("icon", { length: 100 }),
+  mountType: varchar("mountType", { length: 50 }).default("iframe"),
+  backendUrl: varchar("backendUrl", { length: 500 }),
+  frontendUrl: varchar("frontendUrl", { length: 500 }),
+  status: varchar("status", { length: 50 }).default("active"),
   isActive: boolean("isActive").default(true).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
@@ -149,3 +153,15 @@ export const tokenTransactions = mysqlTable("token_transactions", {
 
 export type TokenTransaction = typeof tokenTransactions.$inferSelect;
 export type InsertTokenTransaction = typeof tokenTransactions.$inferInsert;
+
+// ─── Admin Credentials (standalone admin auth) ──────────────────────
+export const adminCredentials = mysqlTable("admin_credentials", {
+  id: int("id").autoincrement().primaryKey(),
+  username: varchar("username", { length: 100 }).notNull().unique(),
+  passwordHash: varchar("passwordHash", { length: 255 }).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type AdminCredential = typeof adminCredentials.$inferSelect;
+export type InsertAdminCredential = typeof adminCredentials.$inferInsert;
