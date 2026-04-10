@@ -248,3 +248,6 @@
 - [x] Update admin password hash in DB for Password321!
 - [x] Update login form placeholder to show email format
 - [x] Ensure no other users can access admin panel (single admin only)
+
+### Bug Fix: React error #31 on admin login (production)
+- [x] Fix React error #31 (object rendered as React child) in admin login flow — toast.error(data.error) was passing {code,message} object; fixed to extract .message; also updated geral@viaoceanica.com to admin role and Password321! hash on VPS

@@ -29,7 +29,7 @@ export default function Login() {
       const data = await res.json();
 
       if (!res.ok) {
-        toast.error(data.error || "Erro no login");
+        toast.error(typeof data.error === "string" ? data.error : data.error?.message || "Erro no login");
         return;
       }
 

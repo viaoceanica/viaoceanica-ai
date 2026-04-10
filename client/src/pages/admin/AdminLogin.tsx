@@ -29,7 +29,7 @@ export default function AdminLogin() {
       const data = await res.json();
 
       if (!res.ok) {
-        toast.error(data.error || "Credenciais inválidas");
+        toast.error(typeof data.error === "string" ? data.error : data.error?.message || "Credenciais inválidas");
         return;
       }
 
