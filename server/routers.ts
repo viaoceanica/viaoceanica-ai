@@ -518,6 +518,44 @@ export const appRouter = router({
         return { base64, filename: `module-${input.slug}-scaffold.zip` };
       }),
 
+    // ─── AI Usage Analytics ──────────────────────────────────────────
+    aiUsage: adminProcedure.query(async () => {
+      // Returns current month summary per tenant
+      const allCompanies = await db.getAllCompanies();
+      // Simulated data structure matching VPS ai-service /api/v1/usage/admin
+      return {
+        period: "current_month",
+        period_start: new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split("T")[0],
+        tenants: allCompanies.map(c => ({
+          tenant_id: c.id,
+          company_name: c.name,
+          total_requests: 0,
+          total_tokens: 0,
+          total_cost_usd: 0,
+        })),
+      };
+    }),
+    aiUsageDaily: adminProcedure.query(async () => {
+      // Returns daily breakdown for current month
+      return {
+        period_start: new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split("T")[0],
+        days: [] as Array<{ day: string; total_requests: number; total_tokens: number; prompt_tokens: number; completion_tokens: number; total_cost_usd: number; active_tenants: number }>,
+      };
+    }),
+    aiUsageModules: adminProcedure.query(async () => {
+      // Returns module breakdown for current month
+      return {
+        period_start: new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split("T")[0],
+        modules: [] as Array<{ module_key: string; total_requests: number; total_tokens: number; prompt_tokens: number; completion_tokens: number; total_cost_usd: number; unique_tenants: number }>,
+      };
+    }),
+    aiUsageRecent: adminProcedure.query(async () => {
+      // Returns recent AI usage events
+      return {
+        events: [] as Array<{ id: number; tenant_id: number; company_name: string; user_name: string | null; module_key: string; model: string; prompt_tokens: number; completion_tokens: number; total_tokens: number; estimated_cost_usd: number; status: string; duration_ms: number; created_at: string }>,
+      };
+    }),
+
     // ─── Toggle module for company ───────────────────────────────────
     toggleCompanyModule: adminProcedure
       .input(z.object({ companyId: z.number(), moduleId: z.number(), isEnabled: z.boolean() }))

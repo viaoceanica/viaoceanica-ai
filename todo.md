@@ -316,3 +316,15 @@
 - [x] Return 429 with clear message when quota exceeded
 - [x] Frontend: show remaining tokens in chat widget header (quota display + percentage in header)
 - [x] Frontend: show quota exceeded message when 429 received (warning bar at 80%+, red bar at 100%, system message on 429)
+
+### Admin AI Usage Dashboard
+- [x] Backend: tRPC procedure for AI usage overview (total tokens, total cost, active tenants, requests count)
+- [x] Backend: tRPC procedure for per-tenant AI usage breakdown (company name, tokens used, cost, request count, last used)
+- [x] Backend: tRPC procedures for daily trend + module breakdown + recent events
+- [x] Backend: DB helpers for aggregating ai_usage_events data (proxied from VPS ai-service)
+- [x] Frontend: AdminAIUsage page with overview cards (total tokens, cost, active tenants, requests)
+- [x] Frontend: Daily usage trend charts (stacked area for tokens, bar chart for requests) with recharts
+- [x] Frontend: Per-tenant usage table with progress bars and totals row
+- [x] Frontend: AdminAIUsage already in admin navigation/routing
+- [x] Sync REST-based AdminAIUsage page to VPS + added analytics endpoints to ai-service + installed archiver in platform-core
+- [x] Tests for AI usage analytics procedures (10 tests — 90 total passing)
