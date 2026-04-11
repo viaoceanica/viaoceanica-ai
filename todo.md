@@ -328,3 +328,20 @@
 - [x] Frontend: AdminAIUsage already in admin navigation/routing
 - [x] Sync REST-based AdminAIUsage page to VPS + added analytics endpoints to ai-service + installed archiver in platform-core
 - [x] Tests for AI usage analytics procedures (10 tests — 90 total passing)
+
+### AI Agent Guardrails (domain-restricted responses)
+- [x] Update contabilidade SOUL.md with strict domain guardrails (only accounting/tax/finance topics)
+- [x] Update restauracao SOUL.md with strict domain guardrails (only restaurant/food/hospitality topics)
+- [x] Update gestao-email SOUL.md with strict domain guardrails (only email marketing/campaigns topics)
+- [x] Update platform SOUL.md with strict domain guardrails (only Via Oceânica platform usage topics)
+- [x] Add system-level guardrail injection in ai-service agent chat endpoint (defense in depth)
+- [x] Test that agents refuse off-topic questions politely
+
+### Chat File Export with 48h Auto-Cleanup
+- [x] Create exported_files table in PostgreSQL (id, file_key, filename, mime_type, tenant_id, user_id, created_at, expires_at)
+- [x] Add file generation logic in ai-service (detect export intent, generate file content, upload to storage)
+- [x] Add GET /api/v1/agent/files/:fileId download endpoint with presigned URL redirect
+- [x] Add cleanup cron job to delete expired files (>48 hours) from storage and database
+- [x] Return download URL in agent chat response when file is generated
+- [x] Frontend: detect file URLs in chat messages and render as download links/buttons
+- [x] Tests for file export and cleanup logic (verified via VPS integration tests)
