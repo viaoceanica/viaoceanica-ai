@@ -345,3 +345,13 @@
 - [x] Return download URL in agent chat response when file is generated
 - [x] Frontend: detect file URLs in chat messages and render as download links/buttons
 - [x] Tests for file export and cleanup logic (verified via VPS integration tests)
+
+### Remove Inactive Modules (keep only contabilidade)
+- [x] Remove restauracao, gestao-email, platform from ai-service MODULE_SYSTEM_PROMPTS
+- [x] Remove restauracao, gestao-email, platform from ai-service AGENT_MAP
+- [x] Remove restauracao, gestao-email, platform from frontend ModuleAssistant AGENT_NAMES
+- [x] Remove restauracao, gestao-email, platform from frontend getSuggestedPrompts
+- [x] Update DashboardLayout sidebar to only show contabilidade module
+- [x] Remove unused OpenClaw agent containers from docker-compose (stopped mod-restauracao, mod-gestao-email)
+- [x] Deploy updated ai-service and shell to VPS
+- [x] Verify only contabilidade agent is accessible

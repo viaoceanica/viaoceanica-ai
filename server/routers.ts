@@ -264,18 +264,15 @@ export const appRouter = router({
     chat: protectedProcedure
       .input(z.object({
         message: z.string().min(1),
-        moduleKey: z.string().default("platform"),
+        moduleKey: z.string().default("contabilidade"),
         history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string() })).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         // Map moduleKey to agent system prompt
         const agentPrompts: Record<string, string> = {
           contabilidade: "Tu és o assistente de contabilidade da Via Oceânica. Especialista em SNC, IVA, IRS, IRC, e contabilidade portuguesa. Responde sempre em português de Portugal.",
-          restauracao: "Tu és o assistente de restauração da Via Oceânica. Especialista em food cost, HACCP, gestão de menus, e operações de restaurantes em Portugal. Responde sempre em português de Portugal.",
-          "gestao-email": "Tu és o assistente de gestão de email da Via Oceânica. Especialista em email marketing, campanhas, RGPD, e deliverability. Responde sempre em português de Portugal.",
-          platform: "Tu és o assistente geral da Via Oceânica. Ajudas os utilizadores com questões sobre a plataforma, módulos, e funcionalidades. Responde sempre em português de Portugal.",
         };
-        const systemPrompt = agentPrompts[input.moduleKey] || agentPrompts.platform;
+        const systemPrompt = agentPrompts[input.moduleKey] || agentPrompts.contabilidade;
         const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
           { role: "system", content: systemPrompt },
         ];

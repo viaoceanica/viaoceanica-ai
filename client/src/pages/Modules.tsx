@@ -13,14 +13,13 @@ import {
 } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { useQuery, useDynamicMutation, apiFetch } from "@/hooks/useApi";
-import { UtensilsCrossed, Mail, Puzzle, Users, UserCircle, Shield } from "lucide-react";
+import { Receipt, Puzzle, Users, UserCircle, Shield } from "lucide-react";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useState, useEffect } from "react";
 
 const iconMap: Record<string, React.ElementType> = {
-  UtensilsCrossed,
-  Mail,
+  Receipt,
 };
 
 type PermissionEntry = { teamId?: number; userId?: number };

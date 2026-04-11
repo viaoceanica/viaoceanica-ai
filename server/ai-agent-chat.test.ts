@@ -11,10 +11,6 @@ vi.mock("./_core/llm", () => ({
     let reply = "Resposta genérica do assistente.";
     if (systemMsg.includes("contabilidade")) {
       reply = `Resposta de contabilidade sobre: ${userMsg}`;
-    } else if (systemMsg.includes("restauração")) {
-      reply = `Resposta de restauração sobre: ${userMsg}`;
-    } else if (systemMsg.includes("email")) {
-      reply = `Resposta de gestão de email sobre: ${userMsg}`;
     }
     return {
       choices: [{ message: { content: reply } }],
@@ -127,43 +123,23 @@ describe("ai.chat", () => {
     expect(result.module).toBe("contabilidade");
   });
 
-  it("should route to restauracao agent", async () => {
-    const ctx = createAuthContext();
-    const result = await caller(ctx).ai.chat({
-      message: "Qual o food cost ideal?",
-      moduleKey: "restauracao",
-    });
-    expect(result.reply).toContain("restauração");
-    expect(result.agent).toBe("restauracao");
-  });
-
-  it("should route to gestao-email agent", async () => {
-    const ctx = createAuthContext();
-    const result = await caller(ctx).ai.chat({
-      message: "Como melhorar a taxa de abertura?",
-      moduleKey: "gestao-email",
-    });
-    expect(result.reply).toContain("email");
-    expect(result.agent).toBe("gestao-email");
-  });
-
-  it("should default to platform agent when moduleKey is unknown", async () => {
+  it("should default to contabilidade when moduleKey is unknown", async () => {
     const ctx = createAuthContext();
     const result = await caller(ctx).ai.chat({
       message: "Olá",
       moduleKey: "unknown-module",
     });
-    // Falls back to platform prompt (generic)
-    expect(result.reply).toBeDefined();
+    // Falls back to contabilidade prompt (the only active module)
+    expect(result.reply).toContain("contabilidade");
     expect(result.agent).toBe("unknown-module");
   });
 
-  it("should default to platform when no moduleKey provided", async () => {
+  it("should default to contabilidade when no moduleKey provided", async () => {
     const ctx = createAuthContext();
     const result = await caller(ctx).ai.chat({
       message: "Olá",
     });
-    expect(result.agent).toBe("platform");
+    expect(result.agent).toBe("contabilidade");
   });
 
   it("should include conversation history in LLM call", async () => {
@@ -195,7 +171,7 @@ describe("ai.chat", () => {
     }));
     await caller(ctx).ai.chat({
       message: "Último",
-      moduleKey: "platform",
+      moduleKey: "contabilidade",
       history: longHistory,
     });
     const lastCall = (invokeLLM as any).mock.calls.at(-1)[0];

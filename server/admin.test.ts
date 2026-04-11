@@ -6,7 +6,6 @@ import type { TrpcContext } from "./_core/context";
 vi.mock("./db", () => {
   const mockModules = [
     { id: 1, slug: "contabilidade", name: "Contabilidade", description: "Módulo de contabilidade", icon: "Receipt", mountType: "iframe", backendUrl: "http://mod-contabilidade:8000", frontendUrl: "http://mod-contabilidade-fe:3000", status: "active", isActive: true, createdAt: new Date() },
-    { id: 2, slug: "restauracao", name: "Restauração", description: "Módulo de restauração", icon: "UtensilsCrossed", mountType: "iframe", backendUrl: "http://mod-restauracao:3000", frontendUrl: null, status: "active", isActive: true, createdAt: new Date() },
   ];
 
   const mockCompanies = [
@@ -121,7 +120,7 @@ describe("admin.allModules", () => {
     const caller = appRouter.createCaller(ctx);
     const result = await caller.admin.allModules();
     expect(Array.isArray(result)).toBe(true);
-    expect(result.length).toBeGreaterThanOrEqual(2);
+    expect(result.length).toBeGreaterThanOrEqual(1);
     expect(result[0]).toHaveProperty("slug");
     expect(result[0]).toHaveProperty("name");
   });

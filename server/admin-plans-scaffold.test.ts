@@ -155,10 +155,10 @@ describe("admin.plans CRUD", () => {
       tokensPerMonth: 5000,
       maxMembers: 5,
       price: 2900,
-      modulesAccess: '["contabilidade","restauracao"]',
+      modulesAccess: '["contabilidade"]',
     });
     expect(newPlan.name).toBe("Custom");
-    expect(newPlan.modulesAccess).toBe('["contabilidade","restauracao"]');
+    expect(newPlan.modulesAccess).toBe('["contabilidade"]');
   });
 
   it("updates an existing plan", async () => {

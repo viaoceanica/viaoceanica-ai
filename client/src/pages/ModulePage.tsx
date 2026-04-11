@@ -2,20 +2,16 @@ import { useLocation } from "wouter";
 import { Card, CardContent, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useQuery } from "@/hooks/useApi";
-import { UtensilsCrossed, Mail, Puzzle, Construction, ShieldAlert, Loader2, Receipt } from "lucide-react";
+import { Puzzle, Construction, ShieldAlert, Loader2, Receipt } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/_core/hooks/useAuth";
 
 const iconMap: Record<string, React.ElementType> = {
-  restauracao: UtensilsCrossed,
-  "gestao-email": Mail,
   contabilidade: Receipt,
 };
 
 const nameMap: Record<string, string> = {
-  restauracao: "Restauração",
-  "gestao-email": "Gestão Email",
   contabilidade: "Contabilidade",
 };
 
