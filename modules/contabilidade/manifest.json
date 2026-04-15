@@ -1,0 +1,16 @@
+{
+  "module_key": "contabilidade",
+  "name": "Contabilidade",
+  "version": "1.0.0",
+  "description": "Importação e classificação de faturas com IA — upload de documentos, extração automática de dados, pesquisa semântica e análise de custos",
+  "route": "/module/contabilidade",
+  "frontend_mount_type": "iframe",
+  "backend_service_url": "http://mod-contabilidade:4003",
+  "health_endpoint": "/health",
+  "readiness_endpoint": "/ready",
+  "status": "active",
+  "icon": "receipt",
+  "capabilities": ["ai", "storage"],
+  "min_plan": null,
+  "tenant_restricted": false
+}

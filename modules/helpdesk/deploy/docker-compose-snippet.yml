@@ -1,0 +1,50 @@
+# ─── Add to the MAIN docker-compose.yml ─────────────────────────
+# Copy this block into the "services:" section of the platform's
+# docker-compose.yml at /opt/viaoceanica-ai/docker-compose.yml
+
+  mod-helpdesk:
+    build:
+      context: ./modules/helpdesk
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      MOD_HELPDESK_PORT: "4001"
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_helpdesk
+      AI_SERVICE_URL: http://host.docker.internal:18789/v1
+      AI_AGENT_ID: helpdesk
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  helpdesk-frontend:
+    build:
+      context: ./modules/helpdesk/frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      SERVER_API_BASE_URL: http://mod-helpdesk:4001
+    depends_on:
+      - mod-helpdesk
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+# ─── Add to gateway environment: ──────────────────────────────────
+# MOD_HELPDESK_URL: http://mod-helpdesk:4001

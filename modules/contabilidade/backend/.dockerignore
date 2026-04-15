@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+.deps
+.venv
+.pytest_cache
+tests
+Dockerfile

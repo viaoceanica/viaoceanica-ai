@@ -1,0 +1,23 @@
+{
+  "module_key": "helpdesk",
+  "name": "Helpdesk",
+  "version": "1.0.0",
+  "description": "",
+  "route": "/module/helpdesk",
+  "frontend_mount_type": "iframe",
+  "backend_service_url": "http://mod-helpdesk:4001",
+  "health_endpoint": "/health",
+  "readiness_endpoint": "/ready",
+  "status": "active",
+  "icon": "BookOpen",
+  "capabilities": [
+    "ai",
+    "storage",
+    "notifications",
+    "email",
+    "analytics"
+  ],
+  "ai_agent_id": "helpdesk",
+  "min_plan": null,
+  "tenant_restricted": false
+}

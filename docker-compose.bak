@@ -1,0 +1,401 @@
+###############################################################################
+# Via Oceânica AI Platform — Docker Compose
+#
+# Architecture:
+#   nginx (80/443) → gateway (3000) → platform-core (4000)
+#                                    → ai-service (4010)
+#                                    → billing (4020)
+#                                    → mod-restauracao (4001)
+#                                    → mod-gestao-email (4002)
+#                                    → mod-contabilidade (4003)
+#   shell (3001) — frontend SPA (served by nginx container)
+#   contabilidade-frontend (7100) — ViaContab Next.js frontend (iframe)
+#
+# Dependencies:
+#   - PostgreSQL (local container) — platform_db
+#   - Redis (local container) — session cache, rate limiting
+#   - Qdrant (vector DB) — semantic search for contabilidade module
+#
+# Secrets Management:
+#   All sensitive values are injected via environment variables from .env file.
+#   NEVER commit .env to version control. See deploy/env-reference.md for docs.
+#   Required .env keys: JWT_SECRET, POSTGRES_PASSWORD, SMTP_PASS,
+#   AI_PROVIDER_API_KEY, OPENAI_API_KEY, R2_* credentials.
+#
+# Usage:
+#   docker compose up -d                  # Start all services
+#   docker compose logs -f gateway        # Follow gateway logs
+#   docker compose down                   # Stop all services
+###############################################################################
+
+x-common-env: &common-env
+  NODE_ENV: production
+  JWT_SECRET: ${JWT_SECRET:-viao-change-me-in-production-2024}
+  COOKIE_NAME: viao_session
+  REDIS_URL: redis://redis:6379
+
+services:
+  # ─── PostgreSQL ──────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_DB: viaoceanica_platform
+      POSTGRES_USER: viaoceanica
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-viao_db_2024_secure}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/init-contabilidade-db.sh:/docker-entrypoint-initdb.d/00-init-contabilidade.sh:ro
+      - ./deploy/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U viaoceanica -d viaoceanica_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis ───────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── Platform Core ──────────────────────────────────────────────────
+  platform-core:
+    build:
+      context: ./services/platform-core
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      PLATFORM_CORE_PORT: "4000"
+      SMTP_HOST: ${SMTP_HOST:-mail.viaoceanica.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-viaoceanicaai@viaoceanica.com}
+      SMTP_PASS: "SYN_%FK!S)H{YVGV"
+      SMTP_FROM: ${SMTP_FROM:-viaoceanicaai@viaoceanica.com}
+      APP_BASE_URL: ${APP_BASE_URL:-http://77.42.95.216:8200}
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ─── Gateway ─────────────────────────────────────────────────────────
+  gateway:
+    build:
+      context: ./services/gateway
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      GATEWAY_PORT: "3000"
+      PLATFORM_CORE_URL: http://platform-core:4000
+      AI_SERVICE_URL: http://ai-service:4010
+      BILLING_SERVICE_URL: http://billing:4020
+      SHELL_URL: http://shell:3001
+      MOD_RESTAURACAO_URL: http://mod-restauracao:4001
+      MOD_GESTAO_EMAIL_URL: http://mod-gestao-email:4002
+      MOD_CONTABILIDADE_URL: http://mod-contabilidade:4003
+    depends_on:
+      redis:
+        condition: service_healthy
+      platform-core:
+        condition: service_healthy
+      shell:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ─── AI Service ────────────────────────────────────────────────────
+  ai-service:
+    build:
+      context: ./services/ai-service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      AI_SERVICE_PORT: "4010"
+      AI_PROVIDER_API_KEY: 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
+      AI_PROVIDER_BASE_URL: ${AI_PROVIDER_BASE_URL:-https://api.openai.com/v1}
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.2"
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4010/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ─── Billing Service ──────────────────────────────────────────────
+  billing:
+    build:
+      context: ./services/billing
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      BILLING_PORT: "4020"
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+        reservations:
+          cpus: "0.05"
+          memory: 32M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4020/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ─── Shell (Frontend SPA) ─────────────────────────────────────────
+  shell:
+    build:
+      context: .
+      dockerfile: shell/Dockerfile
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64M
+        reservations:
+          cpus: "0.05"
+          memory: 16M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3001/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ─── Module: Restauração ──────────────────────────────────────────
+  mod-restauracao:
+    build:
+      context: ./modules/restauracao
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      MOD_RESTAURACAO_PORT: "4001"
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ─── Module: Gestão Email ─────────────────────────────────────────
+  mod-gestao-email:
+    build:
+      context: ./modules/gestao-email
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      MOD_GESTAO_EMAIL_PORT: "4002"
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4002/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ─── Qdrant (Vector DB) ────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    volumes:
+      - qdrant-data:/qdrant/storage
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 3 bash -c 'echo > /dev/tcp/localhost/6333' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ─── Module: Contabilidade (Backend API) ──────────────────────────
+  mod-contabilidade:
+    build:
+      context: ./modules/contabilidade
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg2://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_contabilidade
+      QDRANT_URL: http://qdrant:6333
+      OPENAI_API_KEY: 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
+      NIF_PT_API_KEY: ${NIF_PT_API_KEY:-}
+      R2_ACCOUNT_ID: fe5ebe6feef4f417587cad5f5557ff03
+      R2_ACCESS_KEY_ID: fe0b581079c9242dd889535c43ea7630
+      R2_SECRET_ACCESS_KEY: 4631168c8f0f7a5fc4b16d11eb1b9fd4efc7a0074c117c053bb0960cc5217e36
+      R2_BUCKET: ${R2_BUCKET:-viaoceanica}
+      R2_ENDPOINT: https://fe5ebe6feef4f417587cad5f5557ff03.r2.cloudflarestorage.com
+      DEFAULT_TENANT_ID: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024M
+        reservations:
+          cpus: "0.2"
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:4003/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ─── Module: Contabilidade (Frontend) ─────────────────────────────
+  contabilidade-frontend:
+    build:
+      context: ./modules/contabilidade/frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      SERVER_API_BASE_URL: http://mod-contabilidade:4003
+    depends_on:
+      - mod-contabilidade
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+        reservations:
+          cpus: "0.05"
+          memory: 32M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/module/contabilidade"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ─── Nginx (Reverse Proxy) ────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "8200:80"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      gateway:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64M
+        reservations:
+          cpus: "0.05"
+          memory: 16M
+
+volumes:
+  postgres-data:
+  redis-data:
+  qdrant-data:

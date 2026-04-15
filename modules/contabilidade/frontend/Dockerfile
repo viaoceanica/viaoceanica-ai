@@ -1,0 +1,19 @@
+FROM node:20-alpine
+
+ARG NEXT_PUBLIC_API_BASE_URL
+ARG SERVER_API_BASE_URL=http://mod-contabilidade:4003
+ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
+ENV SERVER_API_BASE_URL=${SERVER_API_BASE_URL}
+ENV NEXT_TELEMETRY_DISABLED=1
+
+WORKDIR /app
+
+COPY package.json package-lock.json* ./
+RUN npm ci
+
+COPY . .
+
+RUN npm run build
+
+EXPOSE 3000
+CMD ["npm", "run", "start"]

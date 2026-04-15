@@ -1,0 +1,16 @@
+{
+  "module_key": "gestao-email",
+  "name": "Gestão Email",
+  "version": "1.0.0",
+  "description": "Módulo de gestão de campanhas de email — templates, listas, automações e analytics.",
+  "route": "/module/gestao-email",
+  "frontend_mount_type": "internal",
+  "backend_service_url": "http://mod-gestao-email:4002",
+  "health_endpoint": "/health",
+  "readiness_endpoint": "/ready",
+  "status": "active",
+  "icon": "Mail",
+  "capabilities": ["ai", "email"],
+  "min_plan": null,
+  "tenant_restricted": false
+}
