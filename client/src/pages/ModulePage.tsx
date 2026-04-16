@@ -6,7 +6,6 @@ import { Puzzle, Construction, ShieldAlert, Loader2, Receipt, BookOpen } from "l
 import { Button } from "@/components/ui/button";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { Settings } from "lucide-react";
 
 const iconMap: Record<string, React.ElementType> = {
   contabilidade: Receipt,
@@ -40,7 +39,6 @@ export default function ModulePage() {
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const { user } = useAuth();
   const canAdminModule = (user?.companyRole === "owner" || user?.companyRole === "admin") && (slug === "contabilidade" || slug === "helpdesk");
-  const adminTarget = `/dashboard/module/${slug}/admin`;
 
   // Check if user has access to this module
   const { data: activeModules, isLoading } = useQuery<any[]>("/api/platform/entitlements/modules");
@@ -132,14 +130,23 @@ export default function ModulePage() {
             <p className="text-muted-foreground mt-0.5">Módulo de IA</p>
           </div>
           <Badge variant="default" className="ml-2">Ativo</Badge>
-          {canAdminModule && (
-            <Button variant="outline" size="sm" className="ml-auto" onClick={() => setLocation(adminTarget)}>
-              <Settings className="h-4 w-4 mr-2" /> Administração
+          {canAdminModule && iframeSrc && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-auto"
+              onClick={() => {
+                iframeRef.current?.contentWindow?.postMessage({ type: "viao-open-helpdesk-admin" }, "*");
+                const target = document.getElementById("module-iframe-container");
+                target?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }}
+            >
+              Administração
             </Button>
           )}
         </div>
 
-        <div className="relative w-full rounded-lg border bg-card overflow-hidden" style={{ minHeight: "calc(100vh - 200px)" }}>
+        <div id="module-iframe-container" className="relative w-full rounded-lg border bg-card overflow-hidden" style={{ minHeight: "calc(100vh - 200px)" }}>
           {!iframeLoaded && (
             <div className="absolute inset-0 flex items-center justify-center bg-background/80 z-10">
               <div className="flex flex-col items-center gap-3">

@@ -42,7 +42,7 @@ type TicketStatusResponse = {
 
 type AdminSummaryResponse = {
   success: boolean;
-  data: {
+  data?: {
     summary?: Record<string, number>;
   };
 };
@@ -104,8 +104,16 @@ export default function Home() {
   useEffect(() => {
     const handleContextMessage = (event: MessageEvent) => {
       const payload = event.data;
-      if (!payload || payload.type !== "viao-context") return;
-      if (payload.tenantId) setTenantId(String(payload.tenantId));
+      if (!payload) return;
+      if (payload.type === "viao-context") {
+        if (payload.tenantId) setTenantId(String(payload.tenantId));
+        return;
+      }
+
+      if (payload.type === "viao-open-helpdesk-admin") {
+        const adminSection = document.getElementById("helpdesk-admin-section");
+        adminSection?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
     };
 
     window.addEventListener("message", handleContextMessage);
@@ -328,7 +336,7 @@ export default function Home() {
             </div>
           </div>
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            {Object.entries(adminSummary?.data.summary ?? {}).map(([key, value]) => (
+            {Object.entries(adminSummary?.data?.summary ?? {}).map(([key, value]) => (
               <div key={key} className={`${mutedCardClass} p-3.5`}>
                 <div className="text-lg font-semibold text-viao-text">{value}</div>
                 <div className="mt-1 text-xs text-viao-muted">{key}</div>
@@ -362,7 +370,7 @@ export default function Home() {
 
 
 
-      <section className="mb-3 grid gap-3 xl:grid-cols-[360px_minmax(0,1fr)]">
+      <section id="helpdesk-admin-section" className="mb-3 grid gap-3 xl:grid-cols-[360px_minmax(0,1fr)]">
         <article className={cardClass}>
           <div className="mb-4">
             <div className="text-xs font-semibold uppercase tracking-[0.12em] text-viao-accent">Administração</div>
