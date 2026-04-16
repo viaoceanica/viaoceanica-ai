@@ -57,6 +57,18 @@ class Ticket(Base):
     conversations: Mapped[list["TicketConversation"]] = relationship(back_populates="ticket", cascade="all, delete-orphan")
 
 
+
+
+class AdminCatalogEntry(Base):
+    __tablename__ = "helpdesk_admin_catalog"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True)
+    resource_type: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+
 class TicketConversation(Base):
     __tablename__ = "helpdesk_ticket_conversations"
 
@@ -107,6 +119,50 @@ TicketPriority = Literal["low", "medium", "high", "urgent"]
 ConversationKind = Literal["reply", "note", "event"]
 ConversationVisibility = Literal["public", "internal"]
 
+ADMIN_RESOURCES = {
+    "clients": {
+        "label": "Clients",
+        "fields": [
+            {"key": "name", "label": "Name", "required": True},
+            {"key": "code", "label": "Code", "required": True},
+            {"key": "email", "label": "Email", "required": False},
+            {"key": "phone", "label": "Phone", "required": False},
+        ],
+    },
+    "slas": {
+        "label": "SLAs",
+        "fields": [
+            {"key": "name", "label": "Name", "required": True},
+            {"key": "responseTime", "label": "Response time", "required": True},
+            {"key": "resolutionTime", "label": "Resolution time", "required": True},
+        ],
+    },
+    "technicians": {
+        "label": "Technicians",
+        "fields": [
+            {"key": "name", "label": "Name", "required": True},
+            {"key": "email", "label": "Email", "required": True},
+            {"key": "specialty", "label": "Specialty", "required": False},
+        ],
+    },
+    "urgency": {
+        "label": "Urgency",
+        "fields": [
+            {"key": "name", "label": "Name", "required": True},
+            {"key": "priority", "label": "Priority", "required": True},
+            {"key": "color", "label": "Color", "required": False},
+        ],
+    },
+    "states": {
+        "label": "States",
+        "fields": [
+            {"key": "name", "label": "Name", "required": True},
+            {"key": "category", "label": "Category", "required": True},
+            {"key": "isFinal", "label": "Final state", "required": False},
+        ],
+    },
+}
+
 
 class TicketCreate(BaseModel):
     requester_name: str = Field(min_length=1, max_length=255)
@@ -133,6 +189,41 @@ class ConversationCreate(BaseModel):
     body: str = Field(min_length=1)
     visibility: ConversationVisibility = "public"
 
+
+
+
+class AdminCatalogPayload(BaseModel):
+    values: dict[str, str]
+
+
+def serialize_admin_entry(item: AdminCatalogEntry) -> dict:
+    return {
+        "id": item.id,
+        "tenant_id": item.tenant_id,
+        "resource_type": item.resource_type,
+        **(item.payload or {}),
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+    }
+
+
+def get_admin_resource(resource_type: str) -> dict:
+    resource = ADMIN_RESOURCES.get(resource_type)
+    if resource is None:
+        raise HTTPException(status_code=404, detail="Recurso administrativo não encontrado")
+    return resource
+
+
+def validate_admin_payload(resource_type: str, values: dict) -> dict:
+    resource = get_admin_resource(resource_type)
+    normalized = {}
+    for field in resource["fields"]:
+        value = values.get(field["key"], "") if values else ""
+        value = "" if value is None else str(value).strip()
+        if field.get("required") and not value:
+            raise HTTPException(status_code=400, detail=f"Campo obrigatório: {field['label']}")
+        normalized[field["key"]] = value
+    return normalized
 
 def serialize_conversation(item: TicketConversation) -> dict:
     return {
@@ -519,3 +610,86 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=PORT)
+
+
+@app.get("/api/v1/admin/catalog")
+async def list_admin_resources(request: Request):
+    require_tenant_admin(request.state.tenant_id)
+    return {
+        "success": True,
+        "data": {
+            key: {
+                "label": value["label"],
+                "fields": value["fields"],
+            }
+            for key, value in ADMIN_RESOURCES.items()
+        },
+    }
+
+
+@app.get("/api/v1/admin/catalog/{resource_type}")
+async def list_admin_catalog_entries(request: Request, resource_type: str):
+    require_tenant_admin(request.state.tenant_id)
+    resource = get_admin_resource(resource_type)
+    with get_db_session() as session:
+        items = session.scalars(
+            select(AdminCatalogEntry)
+            .where(
+                AdminCatalogEntry.tenant_id == request.state.tenant_id,
+                AdminCatalogEntry.resource_type == resource_type,
+            )
+            .order_by(AdminCatalogEntry.updated_at.desc())
+        ).all()
+        return {
+            "success": True,
+            "data": {
+                "resource": resource_type,
+                "label": resource["label"],
+                "fields": resource["fields"],
+                "items": [serialize_admin_entry(item) for item in items],
+            },
+        }
+
+
+@app.post("/api/v1/admin/catalog/{resource_type}")
+async def create_admin_catalog_entry(request: Request, resource_type: str, payload: AdminCatalogPayload):
+    require_tenant_admin(request.state.tenant_id)
+    validate_admin_payload(resource_type, payload.values)
+    with get_db_session() as session:
+        item = AdminCatalogEntry(
+            id=str(uuid4()),
+            tenant_id=request.state.tenant_id,
+            resource_type=resource_type,
+            payload=validate_admin_payload(resource_type, payload.values),
+        )
+        session.add(item)
+        session.commit()
+        session.refresh(item)
+        return {"success": True, "data": serialize_admin_entry(item)}
+
+
+@app.put("/api/v1/admin/catalog/{resource_type}/{entry_id}")
+async def update_admin_catalog_entry(request: Request, resource_type: str, entry_id: str, payload: AdminCatalogPayload):
+    require_tenant_admin(request.state.tenant_id)
+    with get_db_session() as session:
+        item = session.get(AdminCatalogEntry, entry_id)
+        if item is None or item.tenant_id != request.state.tenant_id or item.resource_type != resource_type:
+            raise HTTPException(status_code=404, detail="Registo não encontrado")
+        item.payload = validate_admin_payload(resource_type, payload.values)
+        item.updated_at = datetime.utcnow()
+        session.add(item)
+        session.commit()
+        session.refresh(item)
+        return {"success": True, "data": serialize_admin_entry(item)}
+
+
+@app.delete("/api/v1/admin/catalog/{resource_type}/{entry_id}")
+async def delete_admin_catalog_entry(request: Request, resource_type: str, entry_id: str):
+    require_tenant_admin(request.state.tenant_id)
+    with get_db_session() as session:
+        item = session.get(AdminCatalogEntry, entry_id)
+        if item is None or item.tenant_id != request.state.tenant_id or item.resource_type != resource_type:
+            raise HTTPException(status_code=404, detail="Registo não encontrado")
+        session.delete(item)
+        session.commit()
+        return {"success": True, "data": {"id": entry_id}}
