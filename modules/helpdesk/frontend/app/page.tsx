@@ -1,83 +1,18 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-
-type Ticket = {
-  id: string;
-  tenant_id: string;
-  requester_name: string;
-  requester_email: string;
-  subject: string;
-  description: string;
-  status: string;
-  priority: string;
-  category?: string | null;
-  assignee_name?: string | null;
-};
-
-type Conversation = {
-  id: string;
-  ticket_id: string;
-  tenant_id: string;
-  kind: string;
-  author_name: string;
-  author_email?: string | null;
-  body: string;
-  visibility: string;
-  created_at?: string | null;
-};
-
-type TicketDetail = Ticket & {
-  conversations?: Conversation[];
-};
-
-type TicketStatusResponse = {
-  success: boolean;
-  data: {
-    module: string;
-    tenant_id: string;
-    message: string;
-  };
-};
-
-type AdminSummaryResponse = {
-  success: boolean;
-  data?: {
-    summary?: Record<string, number>;
-  };
-};
-
-type AdminResourceField = {
-  key: string;
-  label: string;
-  required?: boolean;
-};
-
-type AdminCatalogItem = {
-  id: string;
-  [key: string]: string;
-};
-
-type AdminCatalogResource = {
-  label: string;
-  fields: AdminResourceField[];
-  items?: AdminCatalogItem[];
-};
-
-const API_BASE = "/module/helpdesk/api-proxy";
-
-const emptyForm = {
-  requester_name: "",
-  requester_email: "",
-  subject: "",
-  description: "",
-  priority: "medium",
-  category: "general",
-};
-
-const cardClass = "rounded-xl border border-viao-line bg-white p-5 shadow-viao";
-const mutedCardClass = "rounded-xl border border-viao-line bg-viao-panelSoft p-4 shadow-viao";
-const fieldClass = "h-10 w-full rounded-[8px] border border-viao-line bg-white px-3.5 text-sm text-viao-text outline-none transition focus:border-viao-accent/70 focus:ring-4 focus:ring-viao-accent/10 placeholder:text-slate-400";
+import {
+  getApiBase,
+  AdminSummaryResponse,
+  cardClass,
+  emptyForm,
+  fieldClass,
+  mutedCardClass,
+  priorityPill,
+  Ticket,
+  TicketDetail,
+  TicketStatusResponse,
+} from "./lib";
 
 export default function Home() {
   const [tenantId, setTenantId] = useState("");
@@ -92,10 +27,6 @@ export default function Home() {
   const [replyBody, setReplyBody] = useState("");
   const [noteBody, setNoteBody] = useState("");
   const [error, setError] = useState("");
-  const [adminCatalog, setAdminCatalog] = useState<Record<string, AdminCatalogResource>>({});
-  const [activeAdminResource, setActiveAdminResource] = useState("clients");
-  const [editingAdminId, setEditingAdminId] = useState<string | null>(null);
-  const [adminForm, setAdminForm] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isPostingReply, setIsPostingReply] = useState(false);
   const [isPostingNote, setIsPostingNote] = useState(false);
@@ -104,16 +35,8 @@ export default function Home() {
   useEffect(() => {
     const handleContextMessage = (event: MessageEvent) => {
       const payload = event.data;
-      if (!payload) return;
-      if (payload.type === "viao-context") {
-        if (payload.tenantId) setTenantId(String(payload.tenantId));
-        return;
-      }
-
-      if (payload.type === "viao-open-helpdesk-admin") {
-        const adminSection = document.getElementById("helpdesk-admin-section");
-        adminSection?.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
+      if (!payload || payload.type !== "viao-context") return;
+      if (payload.tenantId) setTenantId(String(payload.tenantId));
     };
 
     window.addEventListener("message", handleContextMessage);
@@ -139,38 +62,23 @@ export default function Home() {
 
   async function loadData(activeTenantId: string) {
     const tenantHeaders = { "x-tenant-id": activeTenantId };
-    const [statusRes, ticketsRes, adminRes, catalogRes] = await Promise.all([
-      fetch(`${API_BASE}/api/status`, { headers: tenantHeaders }),
-      fetch(`${API_BASE}/api/tickets`, { headers: tenantHeaders }),
-      fetch(`${API_BASE}/api/tenants/${activeTenantId}/admin/summary`, { headers: tenantHeaders }),
-      fetch(`${API_BASE}/api/admin/catalog`, { headers: tenantHeaders }),
+    const [statusRes, ticketsRes, adminRes] = await Promise.all([
+      fetch(`${getApiBase()}/api/status`, { headers: tenantHeaders }),
+      fetch(`${getApiBase()}/api/tickets`, { headers: tenantHeaders }),
+      fetch(`${getApiBase()}/api/tenants/${activeTenantId}/admin/summary`, { headers: tenantHeaders }),
     ]);
 
     const statusJson = (await statusRes.json()) as TicketStatusResponse;
     const ticketsJson = (await ticketsRes.json()) as { success: boolean; data: Ticket[] };
     const adminJson = (await adminRes.json()) as AdminSummaryResponse;
-    const catalogJson = (await catalogRes.json()) as { success: boolean; data: Record<string, AdminCatalogResource> };
 
     setStatus(statusJson);
     setTickets(Array.isArray(ticketsJson.data) ? ticketsJson.data : []);
     setAdminSummary(adminRes.ok ? adminJson : null);
-    if (catalogRes.ok && catalogJson.data) {
-      const resourceEntries = await Promise.all(
-        Object.keys(catalogJson.data).map(async (resourceKey) => {
-          const response = await fetch(`${API_BASE}/api/admin/catalog/${resourceKey}`, { headers: tenantHeaders });
-          const payload = await response.json();
-          return [resourceKey, { ...catalogJson.data[resourceKey], items: payload?.data?.items || [] }] as const;
-        })
-      );
-      const nextCatalog = Object.fromEntries(resourceEntries);
-      setAdminCatalog(nextCatalog);
-      const defaultResource = Object.keys(nextCatalog)[0] || "clients";
-      setActiveAdminResource((prev) => (nextCatalog[prev] ? prev : defaultResource));
-    }
   }
 
   async function loadTicketDetail(ticketId: string, activeTenantId: string) {
-    const response = await fetch(`${API_BASE}/api/tickets/${ticketId}`, {
+    const response = await fetch(`${getApiBase()}/api/tickets/${ticketId}`, {
       headers: { "x-tenant-id": activeTenantId },
     });
     const payload = await response.json();
@@ -183,19 +91,13 @@ export default function Home() {
     loadData(tenantId).catch((err) => setError(err instanceof Error ? err.message : "Erro ao carregar helpdesk"));
   }, [tenantId, tenantReady]);
 
-  useEffect(() => {
-    if (adminCatalog[activeAdminResource]) {
-      resetAdminForm(activeAdminResource, adminCatalog);
-    }
-  }, [activeAdminResource, adminCatalog]);
-
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
     if (!tenantReady) return;
     setIsSubmitting(true);
     setError("");
     try {
-      const response = await fetch(`${API_BASE}/api/tickets`, {
+      const response = await fetch(`${getApiBase()}/api/tickets`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -223,7 +125,7 @@ export default function Home() {
     else setIsPostingNote(true);
     setError("");
     try {
-      const response = await fetch(`${API_BASE}/api/tickets/${selectedTicket.id}/conversations`, {
+      const response = await fetch(`${getApiBase()}/api/tickets/${selectedTicket.id}/conversations`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -248,46 +150,6 @@ export default function Home() {
       if (kind === "reply") setIsPostingReply(false);
       else setIsPostingNote(false);
     }
-  }
-
-
-
-  function resetAdminForm(resourceKey = activeAdminResource, nextCatalog = adminCatalog) {
-    const resource = nextCatalog[resourceKey];
-    if (!resource) return;
-    const values = Object.fromEntries(resource.fields.map((field) => [field.key, ""]));
-    setEditingAdminId(null);
-    setAdminForm(values);
-  }
-
-  async function submitAdminCatalog() {
-    if (!tenantReady) return;
-    const resource = adminCatalog[activeAdminResource];
-    if (!resource) return;
-    const response = await fetch(`${API_BASE}/api/admin/catalog/${activeAdminResource}${editingAdminId ? `/${editingAdminId}` : ""}`, {
-      method: editingAdminId ? "PUT" : "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-tenant-id": tenantId,
-      },
-      body: JSON.stringify({ values: adminForm }),
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload?.detail || "Falha ao guardar registo administrativo");
-    await loadData(tenantId);
-    resetAdminForm(activeAdminResource);
-  }
-
-  async function deleteAdminCatalogItem(resourceKey: string, itemId: string) {
-    if (!tenantReady) return;
-    const response = await fetch(`${API_BASE}/api/admin/catalog/${resourceKey}/${itemId}`, {
-      method: "DELETE",
-      headers: { "x-tenant-id": tenantId },
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload?.detail || "Falha ao apagar registo administrativo");
-    await loadData(tenantId);
-    if (editingAdminId === itemId) resetAdminForm(resourceKey);
   }
 
   const filteredTickets = useMemo(() => {
@@ -364,105 +226,6 @@ export default function Home() {
               <option value="high">Alta</option>
               <option value="urgent">Urgente</option>
             </select>
-          </div>
-        </article>
-      </section>
-
-
-
-      <section id="helpdesk-admin-section" className="mb-3 grid gap-3 xl:grid-cols-[360px_minmax(0,1fr)]">
-        <article className={cardClass}>
-          <div className="mb-4">
-            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-viao-accent">Administração</div>
-            <h2 className="mt-1 text-base font-semibold text-viao-text">Catálogos do helpdesk</h2>
-          </div>
-          <div className="grid gap-2">
-            {Object.entries(adminCatalog).map(([resourceKey, resource]) => (
-              <button
-                key={resourceKey}
-                onClick={() => setActiveAdminResource(resourceKey)}
-                className={`rounded-lg border px-3 py-2 text-left text-sm transition ${activeAdminResource === resourceKey ? "border-viao-accent bg-viao-accentLight text-viao-accent2" : "border-viao-line bg-white text-viao-text hover:border-viao-accent/40"}`}
-              >
-                {resource.label}
-              </button>
-            ))}
-          </div>
-
-          {adminCatalog[activeAdminResource] ? (
-            <div className="mt-4 space-y-3 rounded-lg border border-viao-line bg-viao-panelSoft p-3">
-              <div className="text-sm font-semibold text-viao-text">{adminCatalog[activeAdminResource].label}</div>
-              {adminCatalog[activeAdminResource].fields.map((field) => (
-                <input
-                  key={field.key}
-                  className={fieldClass}
-                  placeholder={field.label}
-                  value={adminForm[field.key] || ""}
-                  onChange={(e) => setAdminForm((prev) => ({ ...prev, [field.key]: e.target.value }))}
-                />
-              ))}
-              <div className="flex gap-2">
-                <button
-                  onClick={() => submitAdminCatalog().catch((err) => setError(err instanceof Error ? err.message : "Erro ao guardar catálogo"))}
-                  className="h-10 rounded-[8px] bg-viao-accent px-4 text-sm font-semibold text-white transition hover:bg-viao-accent2"
-                >
-                  {editingAdminId ? "Guardar" : "Criar"}
-                </button>
-                <button
-                  onClick={() => resetAdminForm(activeAdminResource)}
-                  className="h-10 rounded-[8px] border border-viao-line bg-white px-4 text-sm font-semibold text-viao-text transition hover:border-viao-accent/40"
-                >
-                  Limpar
-                </button>
-              </div>
-            </div>
-          ) : null}
-        </article>
-
-        <article className={cardClass}>
-          <div className="mb-4 flex items-center justify-between gap-4">
-            <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-viao-accent">CRUD</div>
-              <h2 className="mt-1 text-base font-semibold text-viao-text">{adminCatalog[activeAdminResource]?.label || "Catálogo"}</h2>
-            </div>
-            <div className="rounded-full border border-viao-accent/20 bg-viao-accentLight px-3 py-1.5 text-xs text-viao-accent2">
-              {adminCatalog[activeAdminResource]?.items?.length || 0}
-            </div>
-          </div>
-          <div className="space-y-3">
-            {(adminCatalog[activeAdminResource]?.items || []).map((item) => (
-              <div key={item.id} className="rounded-lg border border-viao-line bg-white p-3">
-                <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                  {adminCatalog[activeAdminResource].fields.map((field) => (
-                    <div key={field.key}>
-                      <div className="text-[11px] uppercase tracking-[0.08em] text-viao-muted">{field.label}</div>
-                      <div className="text-sm text-viao-text">{item[field.key] || "-"}</div>
-                    </div>
-                  ))}
-                </div>
-                <div className="mt-3 flex gap-2">
-                  <button
-                    onClick={() => {
-                      setEditingAdminId(item.id);
-                      setAdminForm(Object.fromEntries(adminCatalog[activeAdminResource].fields.map((field) => [field.key, item[field.key] || ""])));
-                    }}
-                    className="h-9 rounded-[8px] border border-viao-line bg-white px-3 text-sm font-semibold text-viao-text transition hover:border-viao-accent/40"
-                  >
-                    Editar
-                  </button>
-                  <button
-                    onClick={() => deleteAdminCatalogItem(activeAdminResource, item.id).catch((err) => setError(err instanceof Error ? err.message : "Erro ao apagar catálogo"))}
-                    className="h-9 rounded-[8px] bg-slate-900 px-3 text-sm font-semibold text-white transition hover:bg-slate-800"
-                  >
-                    Apagar
-                  </button>
-                </div>
-              </div>
-            ))}
-            {(adminCatalog[activeAdminResource]?.items || []).length === 0 ? (
-              <div className="rounded-xl border border-dashed border-viao-line bg-viao-panelSoft px-4 py-6 text-center text-sm text-viao-muted">
-                Sem registos neste catálogo.
-              </div>
-            ) : null}
           </div>
         </article>
       </section>
@@ -606,19 +369,5 @@ export default function Home() {
         </div>
       </button>
     );
-  }
-}
-
-function priorityPill(priority: string): string {
-  const base = "rounded-full border px-3 py-1 text-[11px]";
-  switch (priority) {
-    case "urgent":
-      return `${base} border-red-200 bg-red-50 text-red-700`;
-    case "high":
-      return `${base} border-amber-200 bg-amber-50 text-amber-700`;
-    case "medium":
-      return `${base} border-viao-accent/20 bg-viao-accentLight text-viao-accent2`;
-    default:
-      return `${base} border-slate-200 bg-slate-100 text-slate-600`;
   }
 }
