@@ -121,44 +121,46 @@ ConversationVisibility = Literal["public", "internal"]
 
 ADMIN_RESOURCES = {
     "clients": {
-        "label": "Clients",
+        "label": "Clientes",
         "fields": [
-            {"key": "name", "label": "Name", "required": True},
-            {"key": "code", "label": "Code", "required": True},
+            {"key": "name", "label": "Nome do cliente", "required": True},
+            {"key": "company_name", "label": "Nome da empresa", "required": False},
+            {"key": "code", "label": "Código", "required": True},
             {"key": "email", "label": "Email", "required": False},
-            {"key": "phone", "label": "Phone", "required": False},
+            {"key": "phone", "label": "Telefone", "required": False},
+            {"key": "address", "label": "Morada", "required": False},
         ],
     },
     "slas": {
         "label": "SLAs",
         "fields": [
-            {"key": "name", "label": "Name", "required": True},
-            {"key": "responseTime", "label": "Response time", "required": True},
-            {"key": "resolutionTime", "label": "Resolution time", "required": True},
+            {"key": "name", "label": "Nome", "required": True},
+            {"key": "responseTime", "label": "Tempo de resposta", "required": True},
+            {"key": "resolutionTime", "label": "Tempo de resolução", "required": True},
         ],
     },
     "technicians": {
-        "label": "Technicians",
+        "label": "Técnicos",
         "fields": [
-            {"key": "name", "label": "Name", "required": True},
+            {"key": "name", "label": "Nome", "required": True},
             {"key": "email", "label": "Email", "required": True},
-            {"key": "specialty", "label": "Specialty", "required": False},
+            {"key": "specialty", "label": "Especialidade", "required": False},
         ],
     },
     "urgency": {
-        "label": "Urgency",
+        "label": "Urgência",
         "fields": [
-            {"key": "name", "label": "Name", "required": True},
-            {"key": "priority", "label": "Priority", "required": True},
-            {"key": "color", "label": "Color", "required": False},
+            {"key": "name", "label": "Nome", "required": True},
+            {"key": "priority", "label": "Prioridade", "required": True},
+            {"key": "color", "label": "Cor", "required": False},
         ],
     },
     "states": {
-        "label": "States",
+        "label": "Estados",
         "fields": [
-            {"key": "name", "label": "Name", "required": True},
-            {"key": "category", "label": "Category", "required": True},
-            {"key": "isFinal", "label": "Final state", "required": False},
+            {"key": "name", "label": "Nome", "required": True},
+            {"key": "category", "label": "Categoria", "required": True},
+            {"key": "isFinal", "label": "Estado final", "required": False},
         ],
     },
 }
@@ -308,10 +310,11 @@ def require_tenant_admin(tenant_id: str) -> ModuleContext:
     if "admin" in platform_roles:
         return ctx
 
-    if ctx.company_role not in {"owner", "admin"}:
-        raise HTTPException(status_code=403, detail="Acesso reservado a administradores da empresa")
+    company_roles = {role.strip() for role in (ctx.company_role or "").split(",") if role.strip()}
+    if company_roles.intersection({"owner", "admin"}):
+        return ctx
 
-    return ctx
+    raise HTTPException(status_code=403, detail="Acesso reservado a administradores da empresa")
 
 
 @app.middleware("http")

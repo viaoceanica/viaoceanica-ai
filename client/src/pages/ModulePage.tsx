@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { useQuery } from "@/hooks/useApi";
 import { Puzzle, Construction, ShieldAlert, Loader2, Receipt, BookOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/_core/hooks/useAuth";
 
 const iconMap: Record<string, React.ElementType> = {
@@ -38,7 +38,8 @@ export default function ModulePage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const { user } = useAuth();
-  const canAdminModule = (user?.companyRole === "owner" || user?.companyRole === "admin") && (slug === "contabilidade" || slug === "helpdesk");
+  const canAdminModule = user?.companyRole === "owner" || user?.companyRole === "admin";
+  const [helpdeskView, setHelpdeskView] = useState<"main" | "admin">("main");
 
   // Check if user has access to this module
   const { data: activeModules, isLoading } = useQuery<any[]>("/api/platform/entitlements/modules");
@@ -117,6 +118,10 @@ export default function ModulePage() {
 
   // Check if this module has an iframe frontend
   const iframeSrc = iframeModules[slug];
+  const resolvedIframeSrc = useMemo(() => {
+    if (slug !== "helpdesk") return iframeSrc;
+    return helpdeskView === "admin" ? "/module/helpdesk/admin" : "/module/helpdesk/";
+  }, [slug, iframeSrc, helpdeskView]);
 
   if (iframeSrc) {
     return (
@@ -131,18 +136,30 @@ export default function ModulePage() {
           </div>
           <Badge variant="default" className="ml-2">Ativo</Badge>
           {canAdminModule && iframeSrc && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-auto"
-              onClick={() => {
+            <div className="ml-auto flex gap-2">
+              {slug === "helpdesk" && helpdeskView === "admin" ? (
+                <Button variant="ghost" size="sm" onClick={() => {
+                  setIframeLoaded(false);
+                  setHelpdeskView("main");
+                }}>
+                  Voltar ao helpdesk
+                </Button>
+              ) : null}
+              <Button variant="outline" size="sm" onClick={() => {
+                if (slug === "helpdesk") {
+                  setIframeLoaded(false);
+                  setHelpdeskView((prev) => (prev === "admin" ? "main" : "admin"));
+                  const target = document.getElementById("module-iframe-container");
+                  target?.scrollIntoView({ behavior: "smooth", block: "start" });
+                  return;
+                }
                 iframeRef.current?.contentWindow?.postMessage({ type: "viao-open-helpdesk-admin" }, "*");
                 const target = document.getElementById("module-iframe-container");
                 target?.scrollIntoView({ behavior: "smooth", block: "start" });
-              }}
-            >
-              Administração
-            </Button>
+              }}>
+                {slug === "helpdesk" && helpdeskView === "admin" ? "Ver interface" : "Administração"}
+              </Button>
+            </div>
           )}
         </div>
 
@@ -157,7 +174,7 @@ export default function ModulePage() {
           )}
           <iframe
             ref={iframeRef}
-            src={iframeSrc}
+            src={resolvedIframeSrc}
             className="w-full border-0"
             style={{ height: "calc(100vh - 200px)", minHeight: "600px" }}
             onLoad={() => setIframeLoaded(true)}
