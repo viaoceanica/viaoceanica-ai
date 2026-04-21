@@ -2,22 +2,18 @@ import { useLocation } from "wouter";
 import { Card, CardContent, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useQuery } from "@/hooks/useApi";
-import { UtensilsCrossed, Mail, Puzzle, Construction, ShieldAlert, Loader2, Receipt, BookOpen } from "lucide-react";
+import { Puzzle, Construction, ShieldAlert, Loader2, Receipt, BookOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Settings } from "lucide-react";
 
 const iconMap: Record<string, React.ElementType> = {
-  restauracao: UtensilsCrossed,
-  "gestao-email": Mail,
   contabilidade: Receipt,
   helpdesk: BookOpen,
 };
 
 const nameMap: Record<string, string> = {
-  restauracao: "Restauração",
-  "gestao-email": "Gestão Email",
   contabilidade: "Contabilidade",
   helpdesk: "Helpdesk",
 };
@@ -43,7 +39,8 @@ export default function ModulePage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const { user } = useAuth();
-  const canAdminModule = user?.companyRole === "owner" || user?.companyRole === "admin";
+  const canAdminModule = (user?.companyRole === "owner" || user?.companyRole === "admin") && (slug === "contabilidade" || slug === "helpdesk");
+  const adminTarget = `/dashboard/module/${slug}/admin`;
 
   // Check if user has access to this module
   const { data: activeModules, isLoading } = useQuery<any[]>("/api/platform/entitlements/modules");
@@ -136,7 +133,7 @@ export default function ModulePage() {
           </div>
           <Badge variant="default" className="ml-2">Ativo</Badge>
           {canAdminModule && (
-            <Button variant="outline" size="sm" className="ml-auto" onClick={() => setLocation(`/dashboard/module/${slug}/admin`)}>
+            <Button variant="outline" size="sm" className="ml-auto" onClick={() => setLocation(adminTarget)}>
               <Settings className="h-4 w-4 mr-2" /> Administração
             </Button>
           )}

@@ -23,7 +23,6 @@ from botocore.config import Config as BotocoreConfig
 from botocore.exceptions import ClientError
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, UploadFile
-from openai import OpenAI
 from starlette.datastructures import Headers
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, or_, text
@@ -32,6 +31,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from .config import get_settings
 from .database import engine, get_session, SessionLocal
 from .embeddings import search_invoice_embeddings, upsert_invoice_embedding
+from .llm_client import complete_prompt
 from .models import Base, CatalogAlias, CatalogItem, FailedImport, Invoice, InvoiceCorrection, InvoiceImportEvent, InvoiceLineItem, InvoiceTemplate, StorageUploadQueue, VendorProfile, TenantProfile
 from .processing import (
     _lookup_vendor_name_from_nif,
@@ -1817,14 +1817,13 @@ def build_chat_answer(question: str, contexts: list[str]) -> str:
         f"Pergunta: {question}\nResposta:"
     )
     try:
-        client = OpenAI(api_key=settings.openai_api_key)
-        response = client.responses.create(
-            model=settings.extraction_model,
-            input=prompt,
+        response = complete_prompt(
+            model=settings.chat_model,
+            prompt=prompt,
             max_output_tokens=500,
+            temperature=0.1,
         )
-        answer = getattr(response, "output_text", "") or ""
-        return answer.strip() or "Não encontrei uma resposta com os dados disponíveis."
+        return response.text.strip() or "Não encontrei uma resposta com os dados disponíveis."
     except Exception as exc:
         logger.warning("Falha ao gerar resposta: %s", exc)
         return "Não consegui gerar uma resposta com os dados disponíveis."

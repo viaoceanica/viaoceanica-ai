@@ -217,7 +217,7 @@ export default function Home() {
 
   return (
     <main className="mx-auto w-full max-w-7xl bg-viao-bg px-4 py-5 text-viao-text sm:px-6 lg:px-8">
-      <section className={`${cardClass} mb-4`}>
+      <section id="admin" className={`${cardClass} mb-4`}>
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <div className="text-xs font-semibold uppercase tracking-[0.12em] text-viao-accent">Módulo</div>

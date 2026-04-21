@@ -9,8 +9,10 @@ from typing import Optional
 
 logger = logging.getLogger("helpdesk.ai")
 
-AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://host.docker.internal:18789/v1")
+AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://host.docker.internal:4000/v1")
+AI_SERVICE_API_KEY = os.getenv("AI_SERVICE_API_KEY", "")
 AI_AGENT_ID = os.getenv("AI_AGENT_ID", "helpdesk")
+AI_MODEL = os.getenv("AI_MODEL", "helpdesk-chat")
 
 
 async def ask_assistant(
@@ -18,7 +20,7 @@ async def ask_assistant(
     session_id: str,
     agent_id: Optional[str] = None,
     context: Optional[dict] = None,
-    model: str = "openclaw",
+    model: Optional[str] = None,
 ) -> dict:
     """
     Send a message to the module's OpenClaw AI agent.
@@ -34,6 +36,7 @@ async def ask_assistant(
         dict with 'reply' (str) and 'usage' (dict)
     """
     agent = agent_id or AI_AGENT_ID
+    selected_model = model or AI_MODEL
 
     system_prompt = f"Estás a responder como assistente do módulo {agent}."
     if context:
@@ -44,7 +47,7 @@ async def ask_assistant(
             response = await client.post(
                 f"{AI_SERVICE_URL}/chat/completions",
                 json={
-                    "model": model,
+                    "model": selected_model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": message},
@@ -54,6 +57,7 @@ async def ask_assistant(
                 headers={
                     "Content-Type": "application/json",
                     "X-OpenClaw-Agent": agent,
+                    **({"Authorization": f"Bearer {AI_SERVICE_API_KEY}"} if AI_SERVICE_API_KEY else {}),
                 },
             )
             response.raise_for_status()
@@ -63,7 +67,7 @@ async def ask_assistant(
             return {
                 "reply": choice.get("message", {}).get("content", ""),
                 "usage": data.get("usage", {}),
-                "model": data.get("model", model),
+                "model": data.get("model", selected_model),
             }
 
     except httpx.HTTPStatusError as e:

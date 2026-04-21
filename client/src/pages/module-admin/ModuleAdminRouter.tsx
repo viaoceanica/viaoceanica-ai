@@ -7,6 +7,7 @@ import ContabilidadeAdminBlockers from "@/pages/module-admin/contabilidade/Conta
 import ContabilidadeAdminLineItems from "@/pages/module-admin/contabilidade/ContabilidadeAdminLineItems";
 import ContabilidadeAdminSettings from "@/pages/module-admin/contabilidade/ContabilidadeAdminSettings";
 import ContabilidadeAdminAudit from "@/pages/module-admin/contabilidade/ContabilidadeAdminAudit";
+import HelpdeskAdminHome from "@/pages/module-admin/helpdesk/HelpdeskAdminHome";
 
 function resolveSection(rawSection?: string): ModuleAdminSection {
   if (!rawSection || rawSection === "admin") return "home";
@@ -41,6 +42,13 @@ export default function ModuleAdminRouter({ moduleKey, section }: { moduleKey: s
       case "home":
       default:
         content = <ContabilidadeAdminHome />;
+        break;
+    }
+  } else if (moduleKey === "helpdesk") {
+    switch (currentSection) {
+      case "home":
+      default:
+        content = <HelpdeskAdminHome />;
         break;
     }
   } else {

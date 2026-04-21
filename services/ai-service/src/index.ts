@@ -22,7 +22,9 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 const PORT = parseInt(process.env.AI_SERVICE_PORT || "4010");
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const AI_API_KEY = process.env.AI_PROVIDER_API_KEY || "";
-const AI_BASE_URL = process.env.AI_PROVIDER_BASE_URL || "https://api.openai.com/v1";
+const AI_BASE_URL = process.env.AI_PROVIDER_BASE_URL || "http://host.docker.internal:4000/v1";
+const DEFAULT_CHAT_MODEL = process.env.AI_CHAT_MODEL || "platform-chat";
+const DEFAULT_EMBEDDING_MODEL = process.env.AI_EMBEDDING_MODEL || "platform-embedding";
 
 // R2 / S3 config for file exports
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID || "";
@@ -136,17 +138,41 @@ async function initMeteringTables() {
 // ─── Cost Estimation ────────────────────────────────────────────────
 
 const MODEL_COSTS: Record<string, { input: number; output: number }> = {
-  "gpt-4o": { input: 0.0025, output: 0.01 },
-  "gpt-4o-mini": { input: 0.00015, output: 0.0006 },
-  "gpt-4-turbo": { input: 0.01, output: 0.03 },
-  "gpt-4": { input: 0.03, output: 0.06 },
-  "gpt-3.5-turbo": { input: 0.0005, output: 0.0015 },
+  "gpt-5.4": { input: 0.0025, output: 0.015 },
+  "gpt-5.4-mini": { input: 0.00075, output: 0.0045 },
+  "gpt-5.4-nano": { input: 0.0002, output: 0.00125 },
+  "gpt-5.3-chat-latest": { input: 0.00175, output: 0.014 },
+  "gpt-5.3-codex": { input: 0.00175, output: 0.014 },
   "text-embedding-3-small": { input: 0.00002, output: 0 },
   "text-embedding-3-large": { input: 0.00013, output: 0 },
 };
 
+function inferProvider(model: string): string {
+  const normalized = (model || "").toLowerCase();
+  if (normalized.startsWith("ollama/") || normalized.includes("qwen") || normalized.includes("llama") || normalized.includes("gemma")) {
+    return "ollama";
+  }
+  if (normalized.startsWith("openai/") || normalized.startsWith("gpt-") || normalized.startsWith("o")) {
+    return "openai";
+  }
+  return "litellm";
+}
+
+function normalizeUsage(usage: any): { prompt_tokens: number; completion_tokens: number; total_tokens: number } {
+  const promptTokens = Number(usage?.prompt_tokens ?? usage?.input_tokens ?? 0) || 0;
+  const completionTokens = Number(usage?.completion_tokens ?? usage?.output_tokens ?? 0) || 0;
+  const totalTokens = Number(usage?.total_tokens ?? (promptTokens + completionTokens)) || 0;
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: totalTokens,
+  };
+}
+
 function estimateCost(model: string, promptTokens: number, completionTokens: number): number {
-  const costs = MODEL_COSTS[model] || MODEL_COSTS["gpt-4o-mini"];
+  const normalized = (model || "").replace(/^openai\//, "");
+  const costs = MODEL_COSTS[normalized];
+  if (!costs) return 0;
   return (promptTokens / 1000) * costs.input + (completionTokens / 1000) * costs.output;
 }
 
@@ -252,7 +278,7 @@ async function callUpstreamChat(body: {
   response_format?: unknown;
 }): Promise<{ data: any; durationMs: number }> {
   const start = Date.now();
-  const model = body.model || "gpt-4o-mini";
+  const model = body.model || DEFAULT_CHAT_MODEL;
 
   const response = await fetch(`${AI_BASE_URL}/chat/completions`, {
     method: "POST",
@@ -264,7 +290,7 @@ async function callUpstreamChat(body: {
       model,
       messages: body.messages,
       temperature: body.temperature ?? 0.7,
-      max_tokens: body.max_tokens,
+      max_completion_tokens: body.max_tokens,
       response_format: body.response_format,
     }),
   });
@@ -285,7 +311,7 @@ async function callUpstreamEmbeddings(body: {
   model?: string;
 }): Promise<{ data: any; durationMs: number }> {
   const start = Date.now();
-  const model = body.model || "text-embedding-3-small";
+  const model = body.model || DEFAULT_EMBEDDING_MODEL;
 
   const response = await fetch(`${AI_BASE_URL}/embeddings`, {
     method: "POST",
@@ -384,8 +410,9 @@ app.post("/api/v1/chat/completions", async (req, res) => {
   try {
     const { data, durationMs } = await callUpstreamChat({ messages, model, temperature, max_tokens, response_format });
 
-    const usage = data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-    const actualModel = data.model || model || "gpt-4o-mini";
+    const usage = normalizeUsage(data.usage);
+    const actualModel = data.model || model || DEFAULT_CHAT_MODEL;
+    const provider = inferProvider(actualModel);
     const cost = estimateCost(actualModel, usage.prompt_tokens, usage.completion_tokens);
 
     await recordUsageEvent({
@@ -393,7 +420,7 @@ app.post("/api/v1/chat/completions", async (req, res) => {
       userId: ctx.userId,
       moduleKey: ctx.moduleKey || "contabilidade",
       requestId: ctx.requestId,
-      provider: "openai",
+      provider,
       model: actualModel,
       endpoint: "chat/completions",
       promptTokens: usage.prompt_tokens,
@@ -426,8 +453,8 @@ app.post("/api/v1/chat/completions", async (req, res) => {
       userId: ctx.userId,
       moduleKey: ctx.moduleKey || "contabilidade",
       requestId: ctx.requestId,
-      provider: "openai",
-      model: model || "gpt-4o-mini",
+      provider: inferProvider(model || DEFAULT_CHAT_MODEL),
+      model: model || DEFAULT_CHAT_MODEL,
       endpoint: "chat/completions",
       promptTokens: 0, completionTokens: 0, totalTokens: 0,
       estimatedCostUsd: 0,
@@ -456,8 +483,9 @@ app.post("/api/v1/embeddings", async (req, res) => {
   try {
     const { data, durationMs } = await callUpstreamEmbeddings({ input, model });
 
-    const usage = data.usage || { prompt_tokens: 0, total_tokens: 0 };
-    const actualModel = data.model || model || "text-embedding-3-small";
+    const usage = normalizeUsage(data.usage);
+    const actualModel = data.model || model || DEFAULT_EMBEDDING_MODEL;
+    const provider = inferProvider(actualModel);
     const cost = estimateCost(actualModel, usage.prompt_tokens || usage.total_tokens, 0);
 
     await recordUsageEvent({
@@ -465,7 +493,7 @@ app.post("/api/v1/embeddings", async (req, res) => {
       userId: ctx.userId,
       moduleKey: ctx.moduleKey || "contabilidade",
       requestId: ctx.requestId,
-      provider: "openai",
+      provider,
       model: actualModel,
       endpoint: "embeddings",
       promptTokens: usage.prompt_tokens || usage.total_tokens || 0,
@@ -955,7 +983,7 @@ app.post("/api/v1/agent/chat", async (req, res) => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${AI_API_KEY}`,
       },
-      body: JSON.stringify({ model, messages, temperature: 0.7, max_tokens: 2048 }),
+      body: JSON.stringify({ model, messages, temperature: 0.7, max_completion_tokens: 2048 }),
     });
     const durationMs = Date.now() - start;
 

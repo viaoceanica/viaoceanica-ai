@@ -1,4 +1,4 @@
-import { Receipt } from "lucide-react";
+import { BookOpen, Receipt } from "lucide-react";
 
 export type ModuleAdminSection = "home" | "imports" | "blockers" | "line-items" | "settings" | "audit";
 
@@ -13,5 +13,10 @@ export const moduleAdminRegistry: Record<string, ModuleAdminDefinition> = {
     label: "Contabilidade",
     icon: Receipt,
     sections: ["home", "imports", "blockers", "line-items", "settings", "audit"],
+  },
+  helpdesk: {
+    label: "Helpdesk",
+    icon: BookOpen,
+    sections: ["home"],
   },
 };

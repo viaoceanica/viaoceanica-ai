@@ -21,8 +21,6 @@ We adopt a **microservices architecture** with an API Gateway pattern. Each modu
 | platform-core | Users, teams, companies, auth, password reset | 4000 | Node.js + Express + Drizzle |
 | ai-service | Centralized AI proxy with metering | 4010 | Node.js + Express + pg |
 | billing | Billing profiles, invoices, token management | 4020 | Node.js + Express |
-| mod-restauracao | Restaurant management module | 4001 | Node.js + Express |
-| mod-gestao-email | Email campaign management module | 4002 | Node.js + Express |
 | mod-contabilidade | Accounting/bookkeeping module (Python) | 4003 | Python + FastAPI |
 | shell | Frontend SPA | 3001 | React + Vite (static) |
 | contabilidade-frontend | ViaContab frontend (iframe) | 7100 | Next.js |

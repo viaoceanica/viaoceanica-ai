@@ -46,8 +46,6 @@ function useApiQuery<T>(path: string) {
 const MODULE_LABELS: Record<string, string> = {
   platform: "Plataforma",
   contabilidade: "Contabilidade",
-  restauracao: "Restauração",
-  "gestao-email": "Gestão Email",
   unknown: "Desconhecido",
 };
 

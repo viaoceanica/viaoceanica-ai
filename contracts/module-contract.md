@@ -10,13 +10,13 @@ Every module must provide a manifest file (`module-manifest.json`) at its root. 
 
 | Field | Type | Description |
 |---|---|---|
-| `module_key` | string | Unique identifier (lowercase, kebab-case). Example: `restauracao` |
-| `name` | string | Human-readable display name. Example: `Restauração` |
+| `module_key` | string | Unique identifier (lowercase, kebab-case). Example: `helpdesk` |
+| `name` | string | Human-readable display name. Example: `Helpdesk` |
 | `version` | string | Semantic version. Example: `1.0.0` |
 | `description` | string | Short description of the module's purpose |
-| `route` | string | Frontend route prefix. Example: `/module/restauracao` |
+| `route` | string | Frontend route prefix. Example: `/module/helpdesk` |
 | `frontend_mount_type` | enum | `iframe` or `microfrontend` or `internal` |
-| `backend_service_url` | string | Internal Docker network URL. Example: `http://mod-restauracao:4001` |
+| `backend_service_url` | string | Internal Docker network URL. Example: `http://mod-helpdesk:4001` |
 | `health_endpoint` | string | Health check path. Default: `/health` |
 | `readiness_endpoint` | string | Readiness check path. Default: `/ready` |
 | `status` | enum | `active`, `maintenance`, `deprecated` |

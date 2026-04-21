@@ -29,7 +29,7 @@ const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://ai-service:4010";
 const BILLING_SERVICE_URL = process.env.BILLING_SERVICE_URL || "http://billing:4020";
 
 // Module backends are resolved dynamically from the registry
-// Format: MOD_<MODULE_KEY_UPPER>_URL=http://mod-restauracao:4001
+// Format: MOD_<MODULE_KEY_UPPER>_URL=http://mod-helpdesk:4001
 function getModuleUrl(moduleKey: string): string | undefined {
   const envKey = `MOD_${moduleKey.toUpperCase().replace(/-/g, "_")}_URL`;
   return process.env[envKey];
