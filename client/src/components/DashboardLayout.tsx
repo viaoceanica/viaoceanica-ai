@@ -168,7 +168,7 @@ function DashboardLayoutContent({
 
   // Fetch active modules for the current user (entitlements)
   const { data: activeModules, refetch: refetchActiveModules } = useQuery<any[]>(
-    variant === "company" ? "/api/platform/entitlements/modules" : null,
+    variant === "company" ? "/api/platform/entitlements/active" : null,
     { enabled: variant === "company" }
   );
 

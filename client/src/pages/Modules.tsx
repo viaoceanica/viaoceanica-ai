@@ -160,7 +160,7 @@ export default function Modules() {
                   <Switch
                     checked={enabled}
                     onCheckedChange={(checked) => handleToggle(mod.moduleKey, checked, mod.name)}
-                    disabled={toggleMod.isPending}
+                    disabled={!canAdminModules || toggleMod.isPending || mod.status !== "active"}
                   />
                 </CardHeader>
                 <CardContent>
@@ -173,7 +173,7 @@ export default function Modules() {
                         <Badge variant="outline" className="text-xs">Em breve</Badge>
                       )}
                     </div>
-                    {enabled && (
+                    {enabled && canAdminModules && (
                       <div className="flex items-center gap-2 ml-auto">
                         {canAdminModules && mod.moduleKey === "contabilidade" && (
                           <Button

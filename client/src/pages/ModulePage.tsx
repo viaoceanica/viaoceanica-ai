@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { useQuery } from "@/hooks/useApi";
 import { Puzzle, Construction, ShieldAlert, Loader2, Receipt, BookOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/_core/hooks/useAuth";
 
 const iconMap: Record<string, React.ElementType> = {
@@ -42,7 +42,7 @@ export default function ModulePage() {
   const [helpdeskView, setHelpdeskView] = useState<"main" | "admin">("main");
 
   // Check if user has access to this module
-  const { data: activeModules, isLoading } = useQuery<any[]>("/api/platform/entitlements/modules");
+  const { data: activeModules, isLoading } = useQuery<any[]>("/api/platform/entitlements/active");
 
   const sendIframeContext = () => {
     if (iframeRef.current?.contentWindow && user) {
@@ -52,11 +52,20 @@ export default function ModulePage() {
           tenantId: user.companyId ? String(user.companyId) : "demo",
           userId: String(user.id),
           companyName: user.companyName || "",
+          companyRole: user.companyRole || "",
+          platformRoles: user.platformRole ? String(user.platformRole) : "",
         },
         "*"
       );
     }
   };
+
+  const tenantQuery = new URLSearchParams();
+  if (user?.companyId) tenantQuery.set("tenantId", String(user.companyId));
+  if (user?.id) tenantQuery.set("userId", String(user.id));
+  if (user?.companyRole) tenantQuery.set("companyRole", user.companyRole);
+  if (user?.platformRole) tenantQuery.set("platformRoles", String(user.platformRole));
+  const tenantQueryString = tenantQuery.toString();
 
   // Send tenant context to iframe via postMessage when loaded
   useEffect(() => {
@@ -84,7 +93,7 @@ export default function ModulePage() {
     );
   }
 
-  const hasAccess = activeModules?.some((m: any) => m.moduleKey === slug && m.enabled);
+  const hasAccess = activeModules?.some((m: any) => m.moduleKey === slug);
 
   if (!hasAccess) {
     return (
@@ -118,10 +127,10 @@ export default function ModulePage() {
 
   // Check if this module has an iframe frontend
   const iframeSrc = iframeModules[slug];
-  const resolvedIframeSrc = useMemo(() => {
-    if (slug !== "helpdesk") return iframeSrc;
-    return helpdeskView === "admin" ? "/module/helpdesk/admin" : "/module/helpdesk/";
-  }, [slug, iframeSrc, helpdeskView]);
+  const resolvedIframeSrcBase = slug === "helpdesk" && helpdeskView === "admin"
+    ? "/module/helpdesk/admin?v=20260427b"
+    : iframeSrc;
+  const resolvedIframeSrc = tenantQueryString ? `${resolvedIframeSrcBase}${resolvedIframeSrcBase.includes("?") ? "&" : "?"}${tenantQueryString}` : resolvedIframeSrcBase;
 
   if (iframeSrc) {
     return (
@@ -137,14 +146,6 @@ export default function ModulePage() {
           <Badge variant="default" className="ml-2">Ativo</Badge>
           {canAdminModule && iframeSrc && (
             <div className="ml-auto flex gap-2">
-              {slug === "helpdesk" && helpdeskView === "admin" ? (
-                <Button variant="ghost" size="sm" onClick={() => {
-                  setIframeLoaded(false);
-                  setHelpdeskView("main");
-                }}>
-                  Voltar ao helpdesk
-                </Button>
-              ) : null}
               <Button variant="outline" size="sm" onClick={() => {
                 if (slug === "helpdesk") {
                   setIframeLoaded(false);

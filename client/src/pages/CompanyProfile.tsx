@@ -4,12 +4,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { useQuery, useMutation } from "@/hooks/useApi";
+import { useAuth } from "@/_core/hooks/useAuth";
 import { Building2, Save, Check } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function CompanyProfile() {
+  const { user } = useAuth();
   // GET /api/platform/tenants/company → { ...company, plan, memberCount }
   const { data: companyData, isLoading, refetch } = useQuery<any>("/api/platform/tenants/company");
   const company = companyData;
@@ -29,6 +31,8 @@ export default function CompanyProfile() {
     address: "",
     website: "",
   });
+
+  const canManageCompany = user?.companyRole === "owner" || user?.companyRole === "admin";
 
   useEffect(() => {
     if (company) {
@@ -95,7 +99,7 @@ export default function CompanyProfile() {
                 <Input value={form.website} onChange={(e) => setForm(p => ({ ...p, website: e.target.value }))} />
               </div>
               <div className="md:col-span-2 flex justify-end">
-                <Button onClick={handleSave} disabled={update.isPending}>
+                <Button onClick={handleSave} disabled={!canManageCompany || update.isPending}>
                   <Save className="h-4 w-4 mr-1" />
                   Guardar alterações
                 </Button>
