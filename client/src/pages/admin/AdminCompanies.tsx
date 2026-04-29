@@ -16,6 +16,7 @@ type CompanyForm = {
   name: string;
   sector: string;
   email: string;
+  ownerPassword: string;
   phone: string;
   address: string;
   website: string;
@@ -26,6 +27,7 @@ const defaultCompanyForm: CompanyForm = {
   name: "",
   sector: "",
   email: "",
+  ownerPassword: "",
   phone: "",
   address: "",
   website: "",
@@ -88,6 +90,7 @@ export default function AdminCompanies() {
       name: company.name || "",
       sector: company.sector || "",
       email: company.email || "",
+      ownerPassword: "",
       phone: company.phone || "",
       address: company.address || "",
       website: company.website || "",
@@ -102,10 +105,26 @@ export default function AdminCompanies() {
       return;
     }
 
+    if (!companyDialog.editId) {
+      if (!companyForm.email.trim()) {
+        toast.error("Email de login do tenant é obrigatório");
+        return;
+      }
+      if (companyForm.ownerPassword.length < 6) {
+        toast.error("Password inicial deve ter pelo menos 6 caracteres");
+        return;
+      }
+    } else if (companyForm.ownerPassword && companyForm.ownerPassword.length < 6) {
+      toast.error("Nova password deve ter pelo menos 6 caracteres");
+      return;
+    }
+
     const payload = {
       name: companyForm.name.trim(),
       sector: companyForm.sector || null,
       email: companyForm.email || null,
+      ownerEmail: companyForm.email ? companyForm.email.trim().toLowerCase() : null,
+      ownerPassword: companyForm.ownerPassword || null,
       phone: companyForm.phone || null,
       address: companyForm.address || null,
       website: companyForm.website || null,
@@ -241,7 +260,7 @@ export default function AdminCompanies() {
           <DialogHeader>
             <DialogTitle>{companyDialog.editId ? "Editar tenant" : "Novo tenant"}</DialogTitle>
             <DialogDescription>
-              {companyDialog.editId ? "Atualizar dados da empresa" : "Criar um novo tenant manualmente no portal admin"}
+              {companyDialog.editId ? "Atualizar dados da empresa e, se necessário, redefinir password do proprietário" : "Criar um novo tenant manualmente no portal admin"}
             </DialogDescription>
           </DialogHeader>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 py-3">
@@ -254,8 +273,17 @@ export default function AdminCompanies() {
               <Input value={companyForm.sector} onChange={(e) => setCompanyForm((p) => ({ ...p, sector: e.target.value }))} placeholder="Ex: Turismo" />
             </div>
             <div className="space-y-2">
-              <Label>Email</Label>
-              <Input value={companyForm.email} onChange={(e) => setCompanyForm((p) => ({ ...p, email: e.target.value }))} placeholder="contacto@empresa.com" />
+              <Label>{companyDialog.editId ? "Email" : "Email de login (admin do tenant)"}</Label>
+              <Input value={companyForm.email} onChange={(e) => setCompanyForm((p) => ({ ...p, email: e.target.value }))} placeholder="admin@empresa.com" />
+            </div>
+            <div className="space-y-2">
+              <Label>{companyDialog.editId ? "Nova password do proprietário (opcional)" : "Password inicial"}</Label>
+              <Input
+                type="password"
+                value={companyForm.ownerPassword}
+                onChange={(e) => setCompanyForm((p) => ({ ...p, ownerPassword: e.target.value }))}
+                placeholder={companyDialog.editId ? "Deixar em branco para não alterar" : "Mínimo 6 caracteres"}
+              />
             </div>
             <div className="space-y-2">
               <Label>Telefone</Label>

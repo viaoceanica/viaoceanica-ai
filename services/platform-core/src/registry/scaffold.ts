@@ -53,7 +53,7 @@ PORT = int(os.getenv("MOD_${slugToUpperEnv(cfg.slug)}_PORT", "${cfg.port}"))
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # ─── AI Service Configuration ──────────────────────────────────────
-AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://host.docker.internal:18789/v1")
+AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://ai-service:4010")
 AI_AGENT_ID = os.getenv("AI_AGENT_ID", "${cfg.slug}")
 
 @asynccontextmanager
@@ -158,7 +158,7 @@ from typing import Optional
 
 logger = logging.getLogger("${cfg.slug}.ai")
 
-AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://host.docker.internal:18789/v1")
+AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://ai-service:4010")
 AI_AGENT_ID = os.getenv("AI_AGENT_ID", "${cfg.slug}")
 
 
@@ -167,7 +167,7 @@ async def ask_assistant(
     session_id: str,
     agent_id: Optional[str] = None,
     context: Optional[dict] = None,
-    model: str = "openclaw",
+    model: str = "qwen2.5:14b-instruct",
 ) -> dict:
     """
     Send a message to the module's OpenClaw AI agent.
@@ -177,7 +177,7 @@ async def ask_assistant(
         session_id: Unique session ID (typically tenant_id-user_id)
         agent_id: OpenClaw agent ID (defaults to module slug)
         context: Additional context to include in the system prompt
-        model: Model identifier (default: "openclaw" which routes through OpenClaw)
+        model: Model identifier (default: local Ollama chat model)
 
     Returns:
         dict with 'reply' (str) and 'usage' (dict)
@@ -340,7 +340,7 @@ function nodejsAiClient(cfg: ScaffoldConfig): string {
  * Communicates with the OpenClaw gateway to leverage module-specific AI agents.
  */
 
-const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://host.docker.internal:18789/v1";
+const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://ai-service:4010";
 const AI_AGENT_ID = process.env.AI_AGENT_ID || "${cfg.slug}";
 
 interface AskAssistantParams {
@@ -369,10 +369,10 @@ interface AskAssistantResponse {
  * @param params.sessionId - Unique session ID (typically tenantId-userId)
  * @param params.agentId - OpenClaw agent ID (defaults to module slug)
  * @param params.context - Additional context for the system prompt
- * @param params.model - Model identifier (default: "openclaw")
+ * @param params.model - Model identifier (default: local Ollama chat model)
  */
 export async function askAssistant(params: AskAssistantParams): Promise<AskAssistantResponse> {
-  const { message, sessionId, agentId, context, model = "openclaw" } = params;
+  const { message, sessionId, agentId, context, model = "qwen2.5:14b-instruct" } = params;
   const agent = agentId || AI_AGENT_ID;
 
   let systemPrompt = \`Estás a responder como assistente do módulo \${agent}.\`;
@@ -700,7 +700,7 @@ echo "Test with:"
 echo "  openclaw agent --agent \${AGENT_ID} --message \\"Olá, teste de integração\\""
 echo ""
 echo "The agent will be available at:"
-echo "  POST http://localhost:18789/v1/chat/completions"
+echo "  POST http://localhost:4010/v1/chat/completions"
 echo "  Header: X-OpenClaw-Agent: \${AGENT_ID}"
 `;
 }
@@ -749,7 +749,7 @@ services:
       <<: *common-env
       MOD_${keyUpper}_PORT: "${cfg.port}"
       DATABASE_URL: postgresql://viaoceanica:\${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/${dbName}
-      AI_SERVICE_URL: \${AI_SERVICE_URL:-http://host.docker.internal:18789/v1}
+      AI_SERVICE_URL: \${AI_SERVICE_URL:-http://ai-service:4010}
       AI_AGENT_ID: \${AI_AGENT_ID:-${cfg.slug}}
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -862,7 +862,7 @@ function dockerComposeSnippet(cfg: ScaffoldConfig): string {
       <<: *common-env
       MOD_${keyUpper}_PORT: "${cfg.port}"
       DATABASE_URL: ${dbUrl}
-      AI_SERVICE_URL: http://host.docker.internal:18789/v1
+      AI_SERVICE_URL: http://ai-service:4010
       AI_AGENT_ID: ${cfg.slug}
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -953,7 +953,7 @@ POSTGRES_PASSWORD=viao_db_2024_secure
 POSTGRES_PORT=5432
 
 # AI / OpenClaw
-AI_SERVICE_URL=http://host.docker.internal:18789/v1
+AI_SERVICE_URL=http://ai-service:4010
 AI_AGENT_ID=${cfg.slug}
 
 # Redis
@@ -1062,7 +1062,7 @@ curl -X POST http://localhost:${cfg.port}/api/v1/ai/chat \\
 |----------|-----------|---------|
 | \`MOD_${keyUpper}_PORT\` | Porta do backend | ${cfg.port} |
 | \`DATABASE_URL\` | Connection string PostgreSQL | — |
-| \`AI_SERVICE_URL\` | URL do OpenClaw gateway | http://host.docker.internal:18789/v1 |
+| \`AI_SERVICE_URL\` | URL do AI service local-first | http://ai-service:4010 |
 | \`AI_AGENT_ID\` | ID do agente OpenClaw | ${cfg.slug} |
 | \`REDIS_URL\` | URL do Redis | redis://localhost:6379 |
 | \`POSTGRES_PASSWORD\` | Password do PostgreSQL | viao_db_2024_secure |
@@ -1162,4 +1162,3 @@ export async function generateScaffoldZip(cfg: ScaffoldConfig): Promise<Buffer> 
     archive.finalize();
   });
 }
-

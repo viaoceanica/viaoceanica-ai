@@ -2,7 +2,7 @@ import { useLocation } from "wouter";
 import { Card, CardContent, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useQuery } from "@/hooks/useApi";
-import { Puzzle, Construction, ShieldAlert, Loader2, Receipt, BookOpen } from "lucide-react";
+import { Puzzle, Construction, ShieldAlert, Loader2, Receipt, BookOpen, Mail } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/_core/hooks/useAuth";
@@ -10,11 +10,13 @@ import { useAuth } from "@/_core/hooks/useAuth";
 const iconMap: Record<string, React.ElementType> = {
   contabilidade: Receipt,
   helpdesk: BookOpen,
+  email: Mail,
 };
 
 const nameMap: Record<string, string> = {
   contabilidade: "Contabilidade",
   helpdesk: "Helpdesk",
+  email: "Email",
 };
 
 /**
@@ -28,6 +30,7 @@ const nameMap: Record<string, string> = {
 const iframeModules: Record<string, string> = {
   contabilidade: "/module/contabilidade/",
   helpdesk: "/module/helpdesk/",
+  email: "/module/email/",
 };
 
 export default function ModulePage() {
@@ -39,7 +42,15 @@ export default function ModulePage() {
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const { user } = useAuth();
   const canAdminModule = user?.companyRole === "owner" || user?.companyRole === "admin";
-  const [helpdeskView, setHelpdeskView] = useState<"main" | "admin">("main");
+  const [moduleView, setModuleView] = useState<"main" | "admin">("main");
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("view") === "admin") {
+      setModuleView("admin");
+    }
+  }, []);
 
   // Check if user has access to this module
   const { data: activeModules, isLoading } = useQuery<any[]>("/api/platform/entitlements/active");
@@ -49,7 +60,7 @@ export default function ModulePage() {
       iframeRef.current.contentWindow.postMessage(
         {
           type: "viao-context",
-          tenantId: user.companyId ? String(user.companyId) : "demo",
+          tenantId: user.companyId ? String(user.companyId) : "",
           userId: String(user.id),
           companyName: user.companyName || "",
           companyRole: user.companyRole || "",
@@ -127,10 +138,19 @@ export default function ModulePage() {
 
   // Check if this module has an iframe frontend
   const iframeSrc = iframeModules[slug];
-  const resolvedIframeSrcBase = slug === "helpdesk" && helpdeskView === "admin"
-    ? "/module/helpdesk/admin?v=20260427b"
+  const adminIframeModules: Record<string, string> = {
+    helpdesk: "/module/helpdesk/admin?v=20260427b",
+    email: "/module/email/admin/",
+  };
+  const adminIframeSrc = adminIframeModules[slug];
+  const resolvedIframeSrcBase = moduleView === "admin" && adminIframeSrc
+    ? adminIframeSrc
     : iframeSrc;
-  const resolvedIframeSrc = tenantQueryString ? `${resolvedIframeSrcBase}${resolvedIframeSrcBase.includes("?") ? "&" : "?"}${tenantQueryString}` : resolvedIframeSrcBase;
+  const resolvedIframeSrc = resolvedIframeSrcBase
+    ? (tenantQueryString
+        ? `${resolvedIframeSrcBase}${resolvedIframeSrcBase.includes("?") ? "&" : "?"}${tenantQueryString}`
+        : resolvedIframeSrcBase)
+    : undefined;
 
   if (iframeSrc) {
     return (
@@ -144,21 +164,15 @@ export default function ModulePage() {
             <p className="text-muted-foreground mt-0.5">Módulo de IA</p>
           </div>
           <Badge variant="default" className="ml-2">Ativo</Badge>
-          {canAdminModule && iframeSrc && (
+          {canAdminModule && adminIframeSrc && (
             <div className="ml-auto flex gap-2">
               <Button variant="outline" size="sm" onClick={() => {
-                if (slug === "helpdesk") {
-                  setIframeLoaded(false);
-                  setHelpdeskView((prev) => (prev === "admin" ? "main" : "admin"));
-                  const target = document.getElementById("module-iframe-container");
-                  target?.scrollIntoView({ behavior: "smooth", block: "start" });
-                  return;
-                }
-                iframeRef.current?.contentWindow?.postMessage({ type: "viao-open-helpdesk-admin" }, "*");
+                setIframeLoaded(false);
+                setModuleView((prev) => (prev === "admin" ? "main" : "admin"));
                 const target = document.getElementById("module-iframe-container");
                 target?.scrollIntoView({ behavior: "smooth", block: "start" });
               }}>
-                {slug === "helpdesk" && helpdeskView === "admin" ? "Ver interface" : "Administração"}
+                {moduleView === "admin" ? "Ver interface" : "Administração"}
               </Button>
             </div>
           )}

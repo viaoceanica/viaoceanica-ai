@@ -199,7 +199,7 @@ All sensitive configuration is managed through the docker-compose.yml file. Crit
 | POSTGRES_PASSWORD | postgres | Database password |
 | SMTP_PASS | platform-core | Email service password |
 | AI_PROVIDER_API_KEY | ai-service | OpenAI API key |
-| OPENAI_API_KEY | mod-contabilidade | OpenAI key for contabilidade |
+| OPENAI_API_KEY | mod-contabilidade | AI provider key for contabilidade |
 | R2_ACCESS_KEY_ID | mod-contabilidade | Cloudflare R2 access key |
 | R2_SECRET_ACCESS_KEY | mod-contabilidade | Cloudflare R2 secret key |
 

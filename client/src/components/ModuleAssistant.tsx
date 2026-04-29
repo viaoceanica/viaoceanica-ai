@@ -15,6 +15,16 @@ const AGENT_NAMES: Record<string, { name: string; emoji: string; greeting: strin
     emoji: "📊",
     greeting: "Olá! Sou o assistente de contabilidade. Posso ajudar com SNC, IVA, IRS, IRC e questões fiscais portuguesas. Também posso exportar relatórios e classificações para ficheiro.",
   },
+  helpdesk: {
+    name: "Assistente Helpdesk",
+    emoji: "🎫",
+    greeting: "Olá! Sou o assistente de helpdesk. Posso ajudar com triagem de tickets, SLAs, prioridades, respostas a clientes e organização da operação de suporte.",
+  },
+  email: {
+    name: "Assistente Email",
+    emoji: "✉️",
+    greeting: "Olá! Sou o assistente de email. Posso ajudar com campanhas, automações, segmentação, follow-up comercial e operação de caixas de entrada.",
+  },
   platform: {
     name: "Assistente Via Oceânica",
     emoji: "🌊",
@@ -231,6 +241,18 @@ function getSuggestedPrompts(moduleKey: string): string[] {
         "Como classifico uma fatura de material de escritório no SNC?",
         "Qual a taxa de IVA para serviços de consultoria?",
         "Exporta uma tabela com as contas SNC mais comuns",
+      ];
+    case "helpdesk":
+      return [
+        "Como devo priorizar tickets urgentes vs normais?",
+        "Que regras de SLA devo aplicar para incidentes críticos?",
+        "Ajuda-me a escrever uma resposta clara para um cliente sobre atraso",
+      ];
+    case "email":
+      return [
+        "Ajuda-me a criar uma sequência de follow-up comercial",
+        "Como devo segmentar uma campanha para leads quentes?",
+        "Escreve um email curto para reativar contactos frios",
       ];
     default:
       return [

@@ -7,12 +7,12 @@ psycopg2-binary
 qdrant-client
 python-dotenv
 pydantic-settings
-openai
 pypdf
 pymupdf
 opencv-python-headless
 pillow
 requests
+pytesseract
 pyzbar
 pylibdmtx
 zxing-cpp

@@ -210,8 +210,15 @@ ON CONFLICT DO NOTHING;
 INSERT INTO module_registry (module_key, name, description, version, route, frontend_mount_type, backend_service_url, health_endpoint, readiness_endpoint, icon, status, capabilities, tenant_restricted)
 VALUES
   ('contabilidade', 'Contabilidade', 'Importação e classificação de faturas com IA — upload de documentos, extração automática, pesquisa semântica e análise de custos.', '1.0.0', '/module/contabilidade', 'iframe', 'http://mod-contabilidade:4003', '/health', '/ready', 'Receipt', 'active', '["ai","storage"]', false),
-  ('helpdesk', 'Helpdesk', 'Módulo de helpdesk integrado na Via Oceânica AI, preparado para contexto multi-tenant e expansão operacional.', '1.0.0', '/module/helpdesk', 'iframe', 'http://mod-helpdesk:4001', '/health', '/ready', 'BookOpen', 'active', '["ai","storage","notifications","email","analytics"]', false)
+  ('helpdesk', 'Helpdesk', 'Módulo de helpdesk integrado na Via Oceânica AI, preparado para contexto multi-tenant e expansão operacional.', '1.0.0', '/module/helpdesk', 'iframe', 'http://mod-helpdesk:4001', '/health', '/ready', 'BookOpen', 'active', '["ai","storage","notifications","email","analytics"]', false),
+  ('email', 'Email', 'Operação de email, campanhas e automações com apoio de IA na plataforma Via Oceânica.', '1.0.0', '/module/email', 'iframe', 'http://mod-email:4004', '/health', '/ready', 'Mail', 'active', '["ai","email","analytics"]', false)
 ON CONFLICT (module_key) DO NOTHING;
+
+INSERT INTO tenant_modules (tenant_id, module_key, enabled, visibility_mode, rollout_state)
+SELECT c.id, m.module_key, true, 'global', 'enabled'
+FROM companies c
+JOIN module_registry m ON m.module_key IN ('contabilidade', 'helpdesk', 'email')
+ON CONFLICT (tenant_id, module_key) DO NOTHING;
 
 -- ─── Create platform admin user (password: admin123) ────────────────
 -- bcrypt hash for 'admin123' with 12 rounds

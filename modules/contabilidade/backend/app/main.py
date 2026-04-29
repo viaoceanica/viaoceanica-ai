@@ -28,14 +28,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session, joinedload, selectinload
 
+from .ai_client import chat_completion as ai_chat_completion
 from .config import get_settings
 from .database import engine, get_session, SessionLocal
+from .middleware import get_module_context
 from .embeddings import search_invoice_embeddings, upsert_invoice_embedding
-from .llm_client import complete_prompt
 from .models import Base, CatalogAlias, CatalogItem, FailedImport, Invoice, InvoiceCorrection, InvoiceImportEvent, InvoiceLineItem, InvoiceTemplate, StorageUploadQueue, VendorProfile, TenantProfile
 from .processing import (
-    _lookup_vendor_name_from_nif,
     _lookup_vendor_profile_from_nif,
+    _looks_like_placeholder_vendor_name,
+    _resolve_vendor_profile_from_nif,
     build_extraction_from_text,
     extract_invoice_data,
     precheck_invoice_candidate,
@@ -491,14 +493,14 @@ def apply_counterparty_nif_heuristics(extraction: dict[str, Any], tenant_id: str
             corrected_supplier_nif = candidate_nifs[0]
             extraction["supplier_nif"] = corrected_supplier_nif
             extraction["customer_nif"] = tenant_nif
-            looked_up_vendor = _lookup_vendor_name_from_nif(corrected_supplier_nif)
+            looked_up_vendor = _resolve_vendor_profile_from_nif(corrected_supplier_nif, tenant_id=tenant_id, allow_external=True).get("name")
             tenant_name = normalize_label(profile.company_name)
             current_vendor = normalize_label(extraction.get("vendor"))
             if looked_up_vendor and (not current_vendor or current_vendor == tenant_name):
                 extraction["vendor"] = looked_up_vendor
 
     if likely_customer_as_vendor and supplier_nif:
-        looked_up_vendor = _lookup_vendor_name_from_nif(supplier_nif)
+        looked_up_vendor = _resolve_vendor_profile_from_nif(supplier_nif, tenant_id=tenant_id, allow_external=True).get("name")
         if looked_up_vendor:
             extraction["vendor"] = looked_up_vendor
 
@@ -510,7 +512,7 @@ def apply_vendor_profile_enrichment(extraction: dict[str, Any], tenant_id: str, 
     if not supplier_nif:
         return extraction
 
-    profile = _lookup_vendor_profile_from_nif(supplier_nif)
+    profile = _resolve_vendor_profile_from_nif(supplier_nif, tenant_id=tenant_id, allow_external=True)
     if not profile:
         return extraction
 
@@ -519,11 +521,14 @@ def apply_vendor_profile_enrichment(extraction: dict[str, Any], tenant_id: str, 
     current_vendor = normalize_label(extraction.get("vendor"))
     profile_name = str(profile.get("name") or "").strip()
     profile_address = str(profile.get("address") or "").strip() or None
+    profile_contact = str(profile.get("contact") or "").strip() or None
 
     if profile_name and (not current_vendor or current_vendor == tenant_name):
         extraction["vendor"] = profile_name
     if profile_address and not str(extraction.get("vendor_address") or "").strip():
         extraction["vendor_address"] = profile_address
+    if profile_contact and not str(extraction.get("vendor_contact") or "").strip():
+        extraction["vendor_contact"] = profile_contact
 
     return extraction
 
@@ -968,7 +973,7 @@ def enrich_line_item_payload(
     default_tax_rate: Decimal | None = None,
     vendor_name: str | None = None,
 ) -> dict[str, Any]:
-    description = str(item.get("description") or "").strip()
+    description = _sanitize_line_item_description(item.get("description") or item.get("name") or item.get("text") or item.get("label"))
     normalized_description = normalize_label(description)
     catalog_lookup_description = normalize_catalog_lookup_label(description)
     quantity = _to_decimal_safe(item.get("quantity"), quant="0.001")
@@ -1000,8 +1005,8 @@ def enrich_line_item_payload(
             tax_rate = default_tax_rate
             tax_rate_source = "calculated_invoice"
 
-    normalized_unit, measurement_type = infer_line_measurement(description, quantity)
-    line_type, line_category = infer_line_type(description)
+    normalized_unit, measurement_type = infer_line_measurement(description or "", quantity)
+    line_type, line_category = infer_line_type(description or "")
     normalized_unit_price = infer_normalized_unit_price(quantity, unit_price, line_subtotal, line_total)
     catalog_item, confidence = find_or_create_catalog_item(
         tenant_id=tenant_id,
@@ -1055,6 +1060,26 @@ def enrich_line_item_payload(
     }
 
 
+def _sanitize_line_item_description(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    if not cleaned:
+        return None
+    lowered = cleaned.lower()
+    if re.fullmatch(r"[\d\s.,€/-]+", cleaned):
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", cleaned):
+        return None
+    if re.fullmatch(r"\d{9}", cleaned):
+        return None
+    if any(token in lowered for token in {"fatura", "factura", "invoice", "nif", "atcud", "hash", "total", "subtotal", "tax", "iva", "customer", "cliente", "supplier", "fornecedor", "document", "documento", "valor", "price", "preco", "preço", "qty", "qtd", "quantity"}):
+        return None
+    if sum(ch.isalpha() for ch in cleaned) < 3:
+        return None
+    return cleaned
+
+
 def looks_like_instruction_text(value: str | None) -> bool:
     if not value:
         return False
@@ -1105,8 +1130,12 @@ def build_vendor_profile_payload(invoice: Invoice) -> dict[str, Any]:
         if bad_customer in upper_text:
             cues["ignore_customer_values"].append(bad_customer)
 
+    vendor_value = sanitize_learned_value(invoice.vendor)
+    if _looks_like_placeholder_vendor_name(vendor_value):
+        vendor_value = None
+
     return {
-        "vendor": sanitize_learned_value(invoice.vendor),
+        "vendor": vendor_value,
         "vendor_address": sanitize_learned_value(invoice.vendor_address),
         "vendor_contact": sanitize_learned_value(invoice.vendor_contact),
         "supplier_nif": sanitize_learned_value(invoice.supplier_nif),
@@ -1117,6 +1146,43 @@ def build_vendor_profile_payload(invoice: Invoice) -> dict[str, Any]:
         "notes": sanitize_learned_value(invoice.notes),
         "cues": cues,
     }
+
+
+def _merge_vendor_profile_payload(existing_payload: str | None, invoice: Invoice) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    if existing_payload:
+        try:
+            loaded = json.loads(existing_payload)
+            if isinstance(loaded, dict):
+                merged = loaded
+        except json.JSONDecodeError:
+            merged = {}
+
+    new_payload = build_vendor_profile_payload(invoice)
+    for field, value in new_payload.items():
+        if field == "cues" and isinstance(value, dict):
+            existing_cues = merged.get("cues") if isinstance(merged.get("cues"), dict) else {}
+            merged_cues = dict(existing_cues)
+            existing_ignore = {
+                str(item).strip().upper()
+                for item in (existing_cues.get("ignore_customer_values") or [])
+                if item
+            }
+            new_ignore = {
+                str(item).strip().upper()
+                for item in (value.get("ignore_customer_values") or [])
+                if item
+            }
+            merged_cues["ignore_customer_values"] = sorted(existing_ignore | new_ignore)
+            merged_cues["invoice_number_prefix"] = value.get("invoice_number_prefix") or existing_cues.get("invoice_number_prefix")
+            merged["cues"] = merged_cues
+            continue
+        if value not in (None, "", [], {}):
+            merged[field] = value
+        elif field not in merged:
+            merged[field] = value
+
+    return merged
 
 
 def init_learning_debug() -> dict[str, Any]:
@@ -1153,6 +1219,8 @@ def apply_vendor_profile_to_extraction(
         match_key = None
         profile_nif = normalize_digits(profile.supplier_nif)
         profile_vendor = normalize_identifier(profile.vendor_name)
+        if _looks_like_placeholder_vendor_name(profile.vendor_name):
+            continue
 
         if normalized_supplier_nif and profile_nif == normalized_supplier_nif:
             score += 100
@@ -1220,12 +1288,14 @@ def apply_vendor_profile_to_extraction(
 
 def upsert_vendor_profile(invoice: Invoice, session: Session) -> None:
     normalized_supplier_nif = normalize_digits(invoice.supplier_nif)
-    normalized_vendor = normalize_identifier(invoice.vendor)
+    vendor_value = invoice.vendor if not _looks_like_placeholder_vendor_name(invoice.vendor) else None
+    normalized_vendor = normalize_identifier(vendor_value)
+    looked_up_vendor: str | None = None
     if not normalized_supplier_nif and not normalized_vendor:
         return
 
     if normalized_supplier_nif:
-        looked_up_vendor = _lookup_vendor_name_from_nif(normalized_supplier_nif)
+        looked_up_vendor = _resolve_vendor_profile_from_nif(normalized_supplier_nif, tenant_id=invoice.tenant_id, allow_external=True).get("name")
         if looked_up_vendor:
             looked_up_vendor_norm = normalize_identifier(looked_up_vendor)
             vendor_contact_blob = normalize_identifier(invoice.vendor_contact)
@@ -1252,9 +1322,17 @@ def upsert_vendor_profile(invoice: Invoice, session: Session) -> None:
                 profile = candidate
                 break
 
-    payload = json.dumps(build_vendor_profile_payload(invoice))
+    existing_payload = profile.payload if profile else None
+    payload = json.dumps(_merge_vendor_profile_payload(existing_payload, invoice))
+    learned_address = sanitize_learned_value(invoice.vendor_address)
+    learned_contact = sanitize_learned_value(invoice.vendor_contact)
+    if not profile and not (vendor_value or looked_up_vendor or learned_address or learned_contact):
+        return
     if profile:
-        profile.vendor_name = invoice.vendor
+        if vendor_value:
+            profile.vendor_name = vendor_value
+        elif looked_up_vendor:
+            profile.vendor_name = looked_up_vendor
         profile.supplier_nif = normalized_supplier_nif or profile.supplier_nif
         profile.payload = payload
     else:
@@ -1262,7 +1340,7 @@ def upsert_vendor_profile(invoice: Invoice, session: Session) -> None:
             VendorProfile(
                 tenant_id=invoice.tenant_id,
                 supplier_nif=normalized_supplier_nif or normalized_vendor or "unknown",
-                vendor_name=invoice.vendor,
+                vendor_name=vendor_value or looked_up_vendor,
                 payload=payload,
             )
         )
@@ -1382,10 +1460,42 @@ def apply_template_to_extraction(
         "invoice_date",
         "tax",
         "total",
+        "vendor",
+        "vendor_address",
+        "vendor_contact",
+        "line_items",
+        "notes",
     }
 
     for field, value in payload.items():
         if extraction.get("qr_data") and field in protected_when_qr:
+            continue
+        if field == "vendor":
+            candidate_vendor = sanitize_learned_value(value if isinstance(value, str) else None)
+            if not candidate_vendor or _looks_like_placeholder_vendor_name(candidate_vendor):
+                continue
+            extraction[field] = candidate_vendor
+            continue
+        if field == "line_items" and isinstance(value, list):
+            sanitized_items: list[dict[str, Any]] = []
+            for index, raw_item in enumerate(value):
+                if not isinstance(raw_item, dict):
+                    continue
+                description = _sanitize_line_item_description(
+                    raw_item.get("description") or raw_item.get("name") or raw_item.get("text") or raw_item.get("label")
+                )
+                has_amount = any(
+                    raw_item.get(key) not in (None, "")
+                    for key in ("line_total", "line_subtotal", "line_tax_amount", "total", "subtotal")
+                )
+                if not description and not has_amount:
+                    continue
+                item = {**raw_item}
+                item["position"] = raw_item.get("position") or (index + 1)
+                item["description"] = description
+                sanitized_items.append(item)
+            if sanitized_items:
+                extraction[field] = sanitized_items
             continue
         extraction[field] = value
 
@@ -1399,10 +1509,14 @@ def _ensure_line_items(extraction: dict[str, Any], filename: str | None) -> list
     line_items = extraction.get("line_items") or []
     if line_items:
         return line_items
+    if extraction.get("qr_data"):
+        return []
     amount = extraction.get("subtotal")
     if amount is None:
         amount = extraction.get("total")
-    description = extraction.get("notes") or extraction.get("vendor") or filename or "documento"
+    description = _sanitize_line_item_description(extraction.get("notes") or extraction.get("vendor") or filename or "documento")
+    if not description:
+        return []
     fallback_total = extraction.get("total") if extraction.get("total") is not None else amount
     quantity = Decimal("1.00") if fallback_total is not None else None
     return [
@@ -1487,9 +1601,37 @@ def score_extraction_confidence(extraction: dict[str, Any]) -> tuple[Decimal, bo
 def upsert_invoice_template(invoice: Invoice, session: Session) -> None:
     if not invoice.invoice_number or not invoice.supplier_nif:
         return
+
+    vendor_value = sanitize_learned_value(invoice.vendor)
+    if _looks_like_placeholder_vendor_name(vendor_value):
+        vendor_value = None
+
+    line_items_payload: list[dict[str, Any]] = []
+    for index, item in enumerate(invoice.line_items or []):
+        description = _sanitize_line_item_description(item.description)
+        has_amount = any(
+            value is not None
+            for value in (item.line_total, item.line_subtotal, item.line_tax_amount, item.unit_price)
+        )
+        if not description and not has_amount:
+            continue
+        line_items_payload.append(
+            {
+                "position": index + 1,
+                "code": item.code,
+                "description": description,
+                "quantity": float(item.quantity) if item.quantity is not None else None,
+                "unit_price": float(item.unit_price) if item.unit_price is not None else None,
+                "line_subtotal": float(item.line_subtotal) if item.line_subtotal is not None else None,
+                "line_tax_amount": float(item.line_tax_amount) if item.line_tax_amount is not None else None,
+                "line_total": float(item.line_total) if item.line_total is not None else None,
+                "tax_rate": float(item.tax_rate) if item.tax_rate is not None else None,
+            }
+        )
+
     payload = json.dumps(
         {
-            "vendor": sanitize_learned_value(invoice.vendor),
+            "vendor": vendor_value,
             "vendor_address": sanitize_learned_value(invoice.vendor_address),
             "vendor_contact": sanitize_learned_value(invoice.vendor_contact),
             "supplier_nif": sanitize_learned_value(invoice.supplier_nif),
@@ -1504,20 +1646,7 @@ def upsert_invoice_template(invoice: Invoice, session: Session) -> None:
             "due_date": sanitize_learned_value(invoice.due_date),
             "currency": sanitize_learned_value(invoice.currency),
             "notes": sanitize_learned_value(invoice.notes),
-            "line_items": [
-                {
-                    "position": index + 1,
-                    "code": item.code,
-                    "description": item.description,
-                    "quantity": float(item.quantity) if item.quantity is not None else None,
-                    "unit_price": float(item.unit_price) if item.unit_price is not None else None,
-                    "line_subtotal": float(item.line_subtotal) if item.line_subtotal is not None else None,
-                    "line_tax_amount": float(item.line_tax_amount) if item.line_tax_amount is not None else None,
-                    "line_total": float(item.line_total) if item.line_total is not None else None,
-                    "tax_rate": float(item.tax_rate) if item.tax_rate is not None else None,
-                }
-                for index, item in enumerate(invoice.line_items or [])
-            ],
+            "line_items": line_items_payload,
         }
     )
     template = (
@@ -1807,8 +1936,6 @@ def format_invoice_context(invoice: Invoice) -> str:
 
 
 def build_chat_answer(question: str, contexts: list[str]) -> str:
-    if not settings.openai_api_key:
-        return "Serviço de IA indisponível (OPENAI_API_KEY em falta)."
     context_text = "\n\n".join(contexts)
     prompt = (
         "Responde em português (Portugal) com base apenas nas faturas abaixo. "
@@ -1817,13 +1944,13 @@ def build_chat_answer(question: str, contexts: list[str]) -> str:
         f"Pergunta: {question}\nResposta:"
     )
     try:
-        response = complete_prompt(
-            model=settings.chat_model,
-            prompt=prompt,
-            max_output_tokens=500,
-            temperature=0.1,
+        answer, _usage = ai_chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            model=settings.extraction_model,
+            max_tokens=500,
+            temperature=0.0,
         )
-        return response.text.strip() or "Não encontrei uma resposta com os dados disponíveis."
+        return answer.strip() or "Não encontrei uma resposta com os dados disponíveis."
     except Exception as exc:
         logger.warning("Falha ao gerar resposta: %s", exc)
         return "Não consegui gerar uma resposta com os dados disponíveis."
@@ -2974,6 +3101,21 @@ def _process_upload_for_ingest(
 
         learning_debug = init_learning_debug()
         _watchtower_stage(task_id, "extraction")
+        try:
+            ctx = get_module_context()
+            ai_context_headers = {
+                "X-Viao-User-Id": ctx.user_id,
+                "X-Viao-Tenant-Id": ctx.tenant_id,
+                "X-Viao-Module-Key": "contabilidade",
+                "X-Viao-Request-Id": ctx.request_id,
+            }
+        except Exception:
+            ai_context_headers = {
+                "X-Viao-User-Id": os.getenv("DEFAULT_USER_ID", "1"),
+                "X-Viao-Tenant-Id": tenant_id,
+                "X-Viao-Module-Key": "contabilidade",
+                "X-Viao-Request-Id": f"ingest-{uuid4()}",
+            }
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
                 extract_invoice_data,
@@ -2981,6 +3123,7 @@ def _process_upload_for_ingest(
                 cached_text,
                 cached_raw,
                 precheck_usage,
+                ai_context_headers,
             )
             extraction = future.result(timeout=180)
         logger.info(

@@ -5,6 +5,7 @@
  */
 
 import { Router, Request, Response } from "express";
+import bcrypt from "bcryptjs";
 import { getDb } from "../db.js";
 import { companies, users, teams, teamMembers, invitations, plans, tokenTransactions, tenantModules, modulePermissions } from "../../drizzle/schema.js";
 import { eq, and, desc, sql, inArray } from "drizzle-orm";
@@ -738,9 +739,24 @@ router.post("/admin/companies", requireAdmin, async (req: Request, res: Response
   try {
     const db = await getDb();
     if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
-    const { name, sector, email, phone, address, website, planId } = req.body;
+    const { name, sector, email, phone, address, website, planId, ownerEmail, ownerPassword, ownerName } = req.body;
     const normalizedName = String(name || "").trim();
     if (!normalizedName) return res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "name é obrigatório" } });
+
+    const normalizedOwnerEmail = String(ownerEmail || email || "").trim().toLowerCase();
+    if (!normalizedOwnerEmail) {
+      return res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "ownerEmail é obrigatório" } });
+    }
+
+    const normalizedOwnerPassword = String(ownerPassword || "");
+    if (normalizedOwnerPassword.length < 6) {
+      return res.status(400).json({ success: false, error: { code: "INVALID_PASSWORD", message: "ownerPassword deve ter pelo menos 6 caracteres" } });
+    }
+
+    const existingUser = await db.select({ id: users.id }).from(users).where(eq(users.email, normalizedOwnerEmail)).limit(1);
+    if (existingUser.length > 0) {
+      return res.status(409).json({ success: false, error: { code: "EMAIL_EXISTS", message: "Este email já está registado" } });
+    }
 
     const normalizedPlanId = planId !== undefined && planId !== null && planId !== ""
       ? Number(planId)
@@ -753,13 +769,45 @@ router.post("/admin/companies", requireAdmin, async (req: Request, res: Response
     const result = await db.insert(companies).values({
       name: normalizedName,
       sector: sector || null,
-      email: email || null,
+      email: String(email || normalizedOwnerEmail || "").trim() || null,
       phone: phone || null,
       address: address || null,
       website: website || null,
       planId: normalizedPlanId,
     }).returning();
-    return res.status(201).json({ success: true, data: result[0] });
+
+    const company = result[0];
+
+    try {
+      const passwordHash = await bcrypt.hash(normalizedOwnerPassword, 12);
+      const ownerResult = await db.insert(users).values({
+        email: normalizedOwnerEmail,
+        name: String(ownerName || "").trim() || normalizedName,
+        passwordHash,
+        loginMethod: "email",
+        platformRole: "user",
+        companyId: company.id,
+        companyRole: "owner",
+        lastSignedIn: new Date(),
+      }).returning();
+
+      const owner = ownerResult[0];
+      return res.status(201).json({
+        success: true,
+        data: {
+          ...company,
+          owner: {
+            id: owner.id,
+            email: owner.email,
+            name: owner.name,
+            companyRole: owner.companyRole,
+          },
+        },
+      });
+    } catch (ownerError) {
+      await db.delete(companies).where(eq(companies.id, company.id));
+      throw ownerError;
+    }
   } catch (error) {
     console.error("[Tenants] Create company error:", error);
     return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
@@ -773,6 +821,72 @@ router.put("/admin/companies/:companyId", requireAdmin, async (req: Request, res
     const companyId = Number(req.params.companyId);
     if (!Number.isFinite(companyId) || companyId <= 0) {
       return res.status(400).json({ success: false, error: { code: "INVALID_COMPANY_ID" } });
+    }
+
+    const existingCompany = (await db.select().from(companies).where(eq(companies.id, companyId)).limit(1))[0];
+    if (!existingCompany) {
+      return res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: "Tenant não encontrado" } });
+    }
+
+    const normalizedOwnerPassword = req.body.ownerPassword === undefined || req.body.ownerPassword === null
+      ? ""
+      : String(req.body.ownerPassword);
+
+    const normalizedOwnerEmail = String(req.body.ownerEmail || req.body.email || existingCompany.email || "").trim().toLowerCase();
+
+    if (normalizedOwnerPassword && normalizedOwnerPassword.length < 6) {
+      return res.status(400).json({ success: false, error: { code: "INVALID_PASSWORD", message: "ownerPassword deve ter pelo menos 6 caracteres" } });
+    }
+
+    const ownerUsers = normalizedOwnerPassword
+      ? await db.select({ id: users.id }).from(users).where(and(eq(users.companyId, companyId), eq(users.companyRole, "owner")))
+      : [];
+
+    let ownerIds = ownerUsers.map((owner) => owner.id);
+    let ownerPasswordHash: string | null = null;
+
+    if (normalizedOwnerPassword) {
+      ownerPasswordHash = await bcrypt.hash(normalizedOwnerPassword, 12);
+    }
+
+    if (normalizedOwnerPassword && ownerIds.length === 0) {
+      if (!normalizedOwnerEmail) {
+        return res.status(404).json({ success: false, error: { code: "OWNER_NOT_FOUND", message: "Não foi encontrado um utilizador proprietário para este tenant" } });
+      }
+
+      const existingOwnerByEmail = (await db.select().from(users).where(eq(users.email, normalizedOwnerEmail)).limit(1))[0];
+
+      if (existingOwnerByEmail) {
+        if (existingOwnerByEmail.companyId && existingOwnerByEmail.companyId !== companyId) {
+          return res.status(409).json({ success: false, error: { code: "USER_ALREADY_ASSIGNED", message: "O utilizador já pertence a outro tenant" } });
+        }
+
+        await db
+          .update(users)
+          .set({
+            companyId,
+            companyRole: "owner",
+            loginMethod: "email",
+            passwordHash: ownerPasswordHash,
+            updatedAt: new Date(),
+          })
+          .where(eq(users.id, existingOwnerByEmail.id));
+
+        ownerIds = [existingOwnerByEmail.id];
+      } else {
+        const createdOwner = (await db.insert(users).values({
+          email: normalizedOwnerEmail,
+          name: String(req.body.ownerName || existingCompany.name || normalizedOwnerEmail.split("@")[0] || "").trim() || normalizedOwnerEmail,
+          passwordHash: ownerPasswordHash,
+          loginMethod: "email",
+          platformRole: "user",
+          companyId,
+          companyRole: "owner",
+          lastSignedIn: new Date(),
+        }).returning({ id: users.id }))[0];
+
+        ownerIds = [createdOwner.id];
+      }
     }
 
     const updateData: Record<string, unknown> = { updatedAt: new Date() };
@@ -801,6 +915,11 @@ router.put("/admin/companies/:companyId", requireAdmin, async (req: Request, res
     }
 
     await db.update(companies).set(updateData).where(eq(companies.id, companyId));
+
+    if (normalizedOwnerPassword && ownerIds.length > 0 && ownerPasswordHash) {
+      await db.update(users).set({ passwordHash: ownerPasswordHash, loginMethod: "email", updatedAt: new Date() }).where(inArray(users.id, ownerIds));
+    }
+
     const updated = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
     if (updated.length === 0) return res.status(404).json({ success: false, error: { code: "NOT_FOUND" } });
     return res.json({ success: true, data: updated[0] });

@@ -206,6 +206,11 @@ function DashboardLayoutContent({
 
   // Detect current module for AI assistant
   const currentModuleKey = (() => {
+    const modulePathMatch = location.match(/^\/dashboard\/module\/([^/]+)/);
+    if (modulePathMatch?.[1]) {
+      return modulePathMatch[1];
+    }
+
     const modMatch = activeModules?.find((m: any) => location.startsWith(`/dashboard/module/${m.moduleKey}`));
     return modMatch?.moduleKey || "platform";
   })();
@@ -297,7 +302,7 @@ function DashboardLayoutContent({
                 </SidebarMenuItem>
 
                 {/* Active modules — dynamic items */}
-                {activeModules && activeModules.length > 0 && activeModules.filter((m: any) => m.enabled).map((mod: any) => {
+                {activeModules && activeModules.length > 0 && activeModules.map((mod: any) => {
                   const ModIcon = moduleIconMap[mod.icon || ""] || Puzzle;
                   const modPath = `/dashboard/module/${mod.moduleKey}`;
                   const isModActive = location.startsWith(modPath);

@@ -35,6 +35,7 @@ _current_context: contextvars.ContextVar[Optional[ModuleContext]] = contextvars.
 )
 
 DEFAULT_TENANT = os.getenv("DEFAULT_TENANT_ID", "demo")
+DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID", "1")
 
 
 def get_module_context() -> ModuleContext:
@@ -84,8 +85,8 @@ class ViaoContextMiddleware(BaseHTTPMiddleware):
         if not tenant_id:
             tenant_id = request.headers.get("x-tenant-id", "") or DEFAULT_TENANT
 
-        if not user_id:
-            user_id = "0"  # Anonymous in standalone mode
+        if not user_id or str(user_id).strip() == "0":
+            user_id = DEFAULT_USER_ID  # Synthetic user for standalone/internal AI calls
 
         ctx = ModuleContext(
             user_id=user_id,
