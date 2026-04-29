@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { trpc } from "@/lib/trpc";
+import { useQuery, useMutation, useDynamicMutation } from "@/hooks/useApi";
 import {
   CreditCard, Plus, Pencil, Trash2, Check, Users, Zap, Building2, Crown, Puzzle
 } from "lucide-react";
@@ -21,9 +21,9 @@ type PlanForm = {
   description: string;
   tokensPerMonth: number;
   maxMembers: number;
-  price: number; // cents
+  monthlyPrice: number; // cents
   isActive: boolean;
-  modulesAccess: string; // comma-separated module slugs or empty
+  modulesAccess: string; // JSON array of module slugs
 };
 
 const defaultForm: PlanForm = {
@@ -31,7 +31,7 @@ const defaultForm: PlanForm = {
   description: "",
   tokensPerMonth: 1000,
   maxMembers: 3,
-  price: 0,
+  monthlyPrice: 0,
   isActive: true,
   modulesAccess: "",
 };
@@ -51,20 +51,19 @@ function formatMembers(max: number): string {
 // ─── Main Component ─────────────────────────────────────────────────
 
 export default function AdminPlans() {
-  const utils = trpc.useUtils();
-  const { data: plans, isLoading } = trpc.admin.plansWithCounts.useQuery();
-  const { data: allModules } = trpc.admin.allModules.useQuery();
+  const { data: plans, isLoading, refetch } = useQuery<any[]>("/api/platform/tenants/admin/plans");
+  const { data: allModules } = useQuery<any[]>("/api/platform/registry/modules");
 
-  const createMut = trpc.admin.createPlan.useMutation({
-    onSuccess: () => { utils.admin.plansWithCounts.invalidate(); toast.success("Plano criado com sucesso"); },
+  const createMut = useMutation<any, any>("/api/platform/tenants/admin/plans", "POST", {
+    onSuccess: () => { refetch(); toast.success("Plano criado com sucesso"); },
     onError: (e) => toast.error(e.message),
   });
-  const updateMut = trpc.admin.updatePlan.useMutation({
-    onSuccess: () => { utils.admin.plansWithCounts.invalidate(); toast.success("Plano atualizado"); },
+  const updateDynMut = useDynamicMutation("PUT", {
+    onSuccess: () => { refetch(); toast.success("Plano atualizado"); },
     onError: (e) => toast.error(e.message),
   });
-  const deleteMut = trpc.admin.deletePlan.useMutation({
-    onSuccess: () => { utils.admin.plansWithCounts.invalidate(); toast.success("Plano eliminado"); },
+  const deleteDynMut = useDynamicMutation("DELETE", {
+    onSuccess: () => { refetch(); toast.success("Plano eliminado"); },
     onError: (e) => toast.error(e.message),
   });
 
@@ -81,11 +80,11 @@ export default function AdminPlans() {
     setForm({
       name: plan.name || "",
       description: plan.description || "",
-      tokensPerMonth: plan.tokensPerMonth ?? 0,
-      maxMembers: plan.maxMembers ?? 3,
-      price: plan.price ?? 0,
-      isActive: plan.isActive ?? true,
-      modulesAccess: plan.modulesAccess || "",
+      tokensPerMonth: plan.tokensPerMonth ?? plan.tokens_per_month ?? 0,
+      maxMembers: plan.maxMembers ?? plan.max_members ?? 3,
+      monthlyPrice: plan.monthlyPrice ?? plan.monthly_price ?? 0,
+      isActive: plan.isActive ?? plan.is_active ?? true,
+      modulesAccess: plan.features ? (typeof plan.features === "string" ? plan.features : JSON.stringify(plan.features)) : "",
     });
     setFormDialog({ open: true, editId: plan.id });
   };
@@ -95,19 +94,18 @@ export default function AdminPlans() {
 
     const payload = {
       name: form.name,
-      description: form.description || undefined,
+      description: form.description || null,
       tokensPerMonth: form.tokensPerMonth,
       maxMembers: form.maxMembers,
-      price: form.price,
-      modulesAccess: form.modulesAccess || undefined,
+      monthlyPrice: form.monthlyPrice,
+      features: form.modulesAccess ? JSON.parse(form.modulesAccess || "[]") : null,
     };
 
     if (formDialog.editId) {
-      await updateMut.mutateAsync({
-        id: formDialog.editId,
-        ...payload,
-        isActive: form.isActive,
-      });
+      await updateDynMut.mutateAsync(
+        `/api/platform/tenants/admin/plans/${formDialog.editId}`,
+        { ...payload, isActive: form.isActive }
+      );
     } else {
       await createMut.mutateAsync(payload);
     }
@@ -115,18 +113,22 @@ export default function AdminPlans() {
   };
 
   // Parse module slugs for display
-  const parseModuleAccess = (access: string | null): string[] => {
-    if (!access) return [];
-    try {
-      const parsed = JSON.parse(access);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return access.split(",").map(s => s.trim()).filter(Boolean);
+  const parseModuleAccess = (features: any): string[] => {
+    if (!features) return [];
+    if (Array.isArray(features)) return features.filter((f: any) => typeof f === "string");
+    if (typeof features === "string") {
+      try {
+        const parsed = JSON.parse(features);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return features.split(",").map(s => s.trim()).filter(Boolean);
+      }
     }
+    return [];
   };
 
   const getModuleName = (slug: string): string => {
-    const mod = allModules?.find((m: any) => m.slug === slug);
+    const mod = allModules?.find((m: any) => (m.moduleKey || m.module_key) === slug);
     return mod?.name || slug;
   };
 
@@ -137,6 +139,11 @@ export default function AdminPlans() {
       ? current.filter(s => s !== slug)
       : [...current, slug];
     setForm(p => ({ ...p, modulesAccess: JSON.stringify(updated) }));
+  };
+
+  // Count companies per plan (VPS plans don't have companyCount, we show what we have)
+  const getCompanyCount = (plan: any): number => {
+    return plan.companyCount ?? plan.company_count ?? 0;
   };
 
   return (
@@ -158,9 +165,13 @@ export default function AdminPlans() {
       ) : (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {plans?.map((plan: any) => {
-            const moduleAccess = parseModuleAccess(plan.modulesAccess);
+            const moduleAccess = parseModuleAccess(plan.features);
+            const price = plan.monthlyPrice ?? plan.monthly_price ?? 0;
+            const tokens = plan.tokensPerMonth ?? plan.tokens_per_month ?? 0;
+            const members = plan.maxMembers ?? plan.max_members ?? 3;
+            const active = plan.isActive ?? plan.is_active ?? true;
             return (
-              <Card key={plan.id} className={`border-border/50 hover:border-border transition-colors ${!plan.isActive ? "opacity-60" : ""}`}>
+              <Card key={plan.id} className={`border-border/50 hover:border-border transition-colors ${!active ? "opacity-60" : ""}`}>
                 <CardHeader className="pb-3">
                   <div className="flex items-start justify-between">
                     <div className="flex items-center gap-2">
@@ -170,21 +181,21 @@ export default function AdminPlans() {
                       <div>
                         <CardTitle className="text-lg">{plan.name}</CardTitle>
                         <CardDescription className="text-xs mt-0.5">
-                          {plan.companyCount || 0} {plan.companyCount === 1 ? "empresa" : "empresas"}
+                          {getCompanyCount(plan)} {getCompanyCount(plan) === 1 ? "empresa" : "empresas"}
                         </CardDescription>
                       </div>
                     </div>
                     <div className="flex items-center gap-1">
-                      <Badge variant={plan.isActive ? "default" : "secondary"} className="text-xs">
-                        {plan.isActive ? "Ativo" : "Inativo"}
+                      <Badge variant={active ? "default" : "secondary"} className="text-xs">
+                        {active ? "Ativo" : "Inativo"}
                       </Badge>
                     </div>
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="text-3xl font-bold tracking-tight">
-                    {formatPrice(plan.price)}
-                    {plan.price > 0 && <span className="text-sm font-normal text-muted-foreground">/mês</span>}
+                    {formatPrice(price)}
+                    {price > 0 && <span className="text-sm font-normal text-muted-foreground">/mês</span>}
                   </div>
 
                   {plan.description && (
@@ -194,11 +205,11 @@ export default function AdminPlans() {
                   <div className="space-y-2 text-sm">
                     <div className="flex items-center gap-2">
                       <Zap className="h-3.5 w-3.5 text-primary shrink-0" />
-                      <span>{plan.tokensPerMonth.toLocaleString("pt-PT")} tokens/mês</span>
+                      <span>{tokens.toLocaleString("pt-PT")} tokens/mês</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <Users className="h-3.5 w-3.5 text-primary shrink-0" />
-                      <span>{formatMembers(plan.maxMembers)} membros</span>
+                      <span>{formatMembers(members)} membros</span>
                     </div>
                     {moduleAccess.length > 0 && (
                       <div className="flex items-start gap-2">
@@ -288,11 +299,11 @@ export default function AdminPlans() {
                 <Input
                   type="number"
                   min={0}
-                  value={form.price}
-                  onChange={(e) => setForm(p => ({ ...p, price: parseInt(e.target.value) || 0 }))}
+                  value={form.monthlyPrice}
+                  onChange={(e) => setForm(p => ({ ...p, monthlyPrice: parseInt(e.target.value) || 0 }))}
                 />
                 <p className="text-xs text-muted-foreground">
-                  {form.price === 0 ? "Gratuito" : `${(form.price / 100).toFixed(2).replace(".", ",")}€/mês`}
+                  {form.monthlyPrice === 0 ? "Gratuito" : `${(form.monthlyPrice / 100).toFixed(2).replace(".", ",")}€/mês`}
                 </p>
               </div>
               <div className="space-y-2">
@@ -342,7 +353,8 @@ export default function AdminPlans() {
                 </p>
                 <div className="grid grid-cols-2 gap-2">
                   {allModules.map((mod: any) => {
-                    const isSelected = parseModuleAccess(form.modulesAccess).includes(mod.slug);
+                    const slug = mod.moduleKey || mod.module_key || mod.slug;
+                    const isSelected = parseModuleAccess(form.modulesAccess).includes(slug);
                     return (
                       <Button
                         key={mod.id}
@@ -350,7 +362,7 @@ export default function AdminPlans() {
                         variant={isSelected ? "default" : "outline"}
                         size="sm"
                         className="justify-start text-xs h-9"
-                        onClick={() => toggleModuleAccess(mod.slug)}
+                        onClick={() => toggleModuleAccess(slug)}
                       >
                         {isSelected && <Check className="h-3 w-3 mr-1.5 shrink-0" />}
                         {mod.name}
@@ -364,8 +376,8 @@ export default function AdminPlans() {
 
           <DialogFooter className="mt-4">
             <Button variant="outline" onClick={() => setFormDialog(p => ({ ...p, open: false }))}>Cancelar</Button>
-            <Button onClick={handleSave} disabled={createMut.isPending || updateMut.isPending}>
-              {createMut.isPending || updateMut.isPending ? "A guardar..." : formDialog.editId ? "Guardar" : "Criar Plano"}
+            <Button onClick={handleSave} disabled={createMut.isPending || updateDynMut.isPending}>
+              {createMut.isPending || updateDynMut.isPending ? "A guardar..." : formDialog.editId ? "Guardar" : "Criar Plano"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -385,10 +397,10 @@ export default function AdminPlans() {
             <Button
               variant="destructive"
               onClick={async () => {
-                await deleteMut.mutateAsync({ id: deleteDialog.planId });
+                await deleteDynMut.mutateAsync(`/api/platform/tenants/admin/plans/${deleteDialog.planId}`);
                 setDeleteDialog(p => ({ ...p, open: false }));
               }}
-              disabled={deleteMut.isPending}
+              disabled={deleteDynMut.isPending}
             >
               Eliminar
             </Button>

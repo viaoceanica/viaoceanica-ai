@@ -1,0 +1,116 @@
+# ─── Helpdesk — Docker Compose ──────────────────────────────────
+# Full docker-compose.yml for standalone development and deployment.
+#
+# Quick start:
+#   cp .env.example .env
+#   docker compose up -d
+#
+# This file includes:
+#   - Backend service (mod-helpdesk)
+#   - Frontend service (helpdesk-frontend)
+#   - PostgreSQL database
+#   - Redis cache
+#   - Volumes for data persistence
+#
+# For production deployment, merge these services into the main
+# docker-compose.yml of the Via Oceânica platform.
+# ──────────────────────────────────────────────────────────────────
+
+x-common-env: &common-env
+  NODE_ENV: ${NODE_ENV:-development}
+  REDIS_URL: redis://redis:6379
+  TZ: Europe/Lisbon
+
+services:
+  # ─── Module Backend ──────────────────────────────────────────────
+  mod-helpdesk:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${MOD_HELPDESK_PORT:-4001}:4001"
+    environment:
+      <<: *common-env
+      MOD_HELPDESK_PORT: "4001"
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_helpdesk
+      AI_SERVICE_URL: ${AI_SERVICE_URL:-http://host.docker.internal:18789/v1}
+      AI_AGENT_ID: ${AI_AGENT_ID:-helpdesk}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - mod-helpdesk-data:/app/data
+
+  # ─── Module Frontend ─────────────────────────────────────────────
+  helpdesk-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      SERVER_API_BASE_URL: http://mod-helpdesk:4001
+    depends_on:
+      mod-helpdesk:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+  # ─── PostgreSQL ──────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: viaoceanica
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-viao_db_2024_secure}
+      POSTGRES_DB: viaoceanica_helpdesk
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U viaoceanica -d viaoceanica_helpdesk"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis ───────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mod-helpdesk-data:
+  postgres-data:
+  redis-data:

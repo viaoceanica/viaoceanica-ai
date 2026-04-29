@@ -29,7 +29,7 @@ const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://ai-service:4010";
 const BILLING_SERVICE_URL = process.env.BILLING_SERVICE_URL || "http://billing:4020";
 
 // Module backends are resolved dynamically from the registry
-// Format: MOD_<MODULE_KEY_UPPER>_URL=http://mod-restauracao:4001
+// Format: MOD_<MODULE_KEY_UPPER>_URL=http://mod-helpdesk:4001
 function getModuleUrl(moduleKey: string): string | undefined {
   const envKey = `MOD_${moduleKey.toUpperCase().replace(/-/g, "_")}_URL`;
   return process.env[envKey];
@@ -98,6 +98,7 @@ interface TenantContext {
   tenantId: string;
   sessionId: string;
   platformRoles: string;
+  companyRole: string;
   moduleEntitlements: string;
 }
 
@@ -109,6 +110,7 @@ async function resolveTenantContext(session: SessionPayload, requestId: string):
     tenantId: String(session.tenantId || 0),
     sessionId: requestId,
     platformRoles: session.platformRole || "user",
+    companyRole: session.companyRole || "member",
     moduleEntitlements: "", // Resolved by platform-core entitlements service
   };
 }
@@ -132,6 +134,8 @@ const PUBLIC_PATHS = [
   "/api/auth/login",
   "/api/auth/register",
   "/api/auth/forgot-password",
+  "/api/auth/reset-password",
+  "/api/auth/verify-reset-token",
   "/health",
   "/ready",
 ];
@@ -170,6 +174,7 @@ app.use(async (req, res, next) => {
   req.headers["x-viao-tenant-id"] = ctx.tenantId;
   req.headers["x-viao-session-id"] = ctx.sessionId;
   req.headers["x-viao-platform-roles"] = ctx.platformRoles;
+  req.headers["x-viao-company-role"] = ctx.companyRole;
   req.headers["x-viao-module-entitlements"] = ctx.moduleEntitlements;
 
   next();

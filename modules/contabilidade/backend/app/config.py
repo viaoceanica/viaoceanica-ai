@@ -10,9 +10,14 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg2://viacontab:viacontab@postgres:5432/viacontab"
     qdrant_url: str = "http://qdrant:6333"
     openai_api_key: str = ""
+    openai_api_base: str = Field("http://host.docker.internal:4000/v1", validation_alias="OPENAI_API_BASE")
     nif_lookup_key: str = Field("", validation_alias="NIF_PT_API_KEY")
-    extraction_model: str = "gpt-5.4-mini"
-    embedding_model: str = "text-embedding-3-small"
+    extraction_model: str = "contab-extract"
+    repair_model: str = "contab-repair"
+    chat_model: str = "contab-chat"
+    vision_model: str = "contab-vision"
+    embedding_model: str = "contab-embedding"
+    embedding_vector_size: int = 4096
     debug_learning: bool = False
     skip_db_init: bool = False
     allowed_origins: list[str] = Field(default_factory=lambda: ["*"])

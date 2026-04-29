@@ -34,8 +34,6 @@ The platform runs on a single VPS (77.42.95.216) with Docker Compose orchestrati
 | AI Service | ai-service-1 | 4010 | /health | 1 CPU / 512M |
 | Billing | billing-1 | 4020 | /health | 0.25 CPU / 128M |
 | Shell (Frontend) | shell-1 | 3001 | wget / | 0.25 CPU / 64M |
-| Mod Restauração | mod-restauracao-1 | 4001 | /health | 0.5 CPU / 256M |
-| Mod Gestão Email | mod-gestao-email-1 | 4002 | /health | 0.5 CPU / 256M |
 | Qdrant | qdrant-1 | 6333 | TCP check | 0.5 CPU / 512M |
 | Mod Contabilidade | mod-contabilidade-1 | 4003 | /health | 1 CPU / 1024M |
 | Contab Frontend | contabilidade-frontend-1 | 3000 | wget /module/contabilidade | 0.25 CPU / 128M |

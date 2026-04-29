@@ -2,17 +2,20 @@ import { useLocation } from "wouter";
 import { Card, CardContent, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useQuery } from "@/hooks/useApi";
-import { Puzzle, Construction, ShieldAlert, Loader2, Receipt } from "lucide-react";
+import { Puzzle, Construction, ShieldAlert, Loader2, Receipt, BookOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/_core/hooks/useAuth";
+import { Settings } from "lucide-react";
 
 const iconMap: Record<string, React.ElementType> = {
   contabilidade: Receipt,
+  helpdesk: BookOpen,
 };
 
 const nameMap: Record<string, string> = {
   contabilidade: "Contabilidade",
+  helpdesk: "Helpdesk",
 };
 
 /**
@@ -25,6 +28,7 @@ const nameMap: Record<string, string> = {
  */
 const iframeModules: Record<string, string> = {
   contabilidade: "/module/contabilidade/",
+  helpdesk: "/module/helpdesk/",
 };
 
 export default function ModulePage() {
@@ -35,13 +39,14 @@ export default function ModulePage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const { user } = useAuth();
+  const canAdminModule = (user?.companyRole === "owner" || user?.companyRole === "admin") && (slug === "contabilidade" || slug === "helpdesk");
+  const adminTarget = `/dashboard/module/${slug}/admin`;
 
   // Check if user has access to this module
   const { data: activeModules, isLoading } = useQuery<any[]>("/api/platform/entitlements/modules");
 
-  // Send tenant context to iframe via postMessage when loaded
-  useEffect(() => {
-    if (iframeLoaded && iframeRef.current?.contentWindow && user) {
+  const sendIframeContext = () => {
+    if (iframeRef.current?.contentWindow && user) {
       iframeRef.current.contentWindow.postMessage(
         {
           type: "viao-context",
@@ -52,6 +57,24 @@ export default function ModulePage() {
         "*"
       );
     }
+  };
+
+  // Send tenant context to iframe via postMessage when loaded
+  useEffect(() => {
+    if (iframeLoaded) {
+      sendIframeContext();
+    }
+  }, [iframeLoaded, user]);
+
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type === "viao-context-request") {
+        sendIframeContext();
+      }
+    };
+
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
   }, [iframeLoaded, user]);
 
   if (isLoading) {
@@ -100,7 +123,7 @@ export default function ModulePage() {
   if (iframeSrc) {
     return (
       <div className="space-y-4">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
             <Icon className="h-5 w-5 text-primary" />
           </div>
@@ -109,6 +132,11 @@ export default function ModulePage() {
             <p className="text-muted-foreground mt-0.5">Módulo de IA</p>
           </div>
           <Badge variant="default" className="ml-2">Ativo</Badge>
+          {canAdminModule && (
+            <Button variant="outline" size="sm" className="ml-auto" onClick={() => setLocation(adminTarget)}>
+              <Settings className="h-4 w-4 mr-2" /> Administração
+            </Button>
+          )}
         </div>
 
         <div className="relative w-full rounded-lg border bg-card overflow-hidden" style={{ minHeight: "calc(100vh - 200px)" }}>

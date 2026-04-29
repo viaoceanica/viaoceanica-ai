@@ -21,22 +21,20 @@ import SettingsPage from "./pages/SettingsPage";
 import UserProfile from "./pages/UserProfile";
 import ModulePage from "./pages/ModulePage";
 import Billing from "./pages/Billing";
+import ModuleAdminRouter from "./pages/module-admin/ModuleAdminRouter";
 
 // Admin pages
-import AdminLogin from "./pages/admin/AdminLogin";
 import AdminDashboard from "./pages/admin/AdminDashboard";
 import AdminCompanies from "./pages/admin/AdminCompanies";
 import AdminTokens from "./pages/admin/AdminTokens";
 import AdminModules from "./pages/admin/AdminModules";
 import AdminPlans from "./pages/admin/AdminPlans";
 import AdminAIUsage from "./pages/admin/AdminAIUsage";
-import AdminBilling from "./pages/admin/AdminBilling";
-import AdminSettings from "./pages/admin/AdminSettings";
 
 function CompanyDashboardContent() {
   const [location] = useLocation();
   
-  // Match module/:slug pattern
+  const moduleAdminMatch = location.match(/^\/dashboard\/module\/([^/]+)\/admin(?:\/([^/]+))?$/);
   const moduleMatch = location.match(/^\/dashboard\/module\/(.+)$/);
   
   let content;
@@ -56,6 +54,8 @@ function CompanyDashboardContent() {
     content = <SettingsPage />;
   } else if (location === "/dashboard/billing") {
     content = <Billing />;
+  } else if (moduleAdminMatch) {
+    content = <ModuleAdminRouter moduleKey={moduleAdminMatch[1]} section={moduleAdminMatch[2]} />;
   } else if (moduleMatch) {
     content = <ModulePage />;
   } else {
@@ -85,10 +85,6 @@ function AdminContent() {
     content = <AdminPlans />;
   } else if (location === "/admin/ai-usage") {
     content = <AdminAIUsage />;
-  } else if (location === "/admin/billing") {
-    content = <AdminBilling />;
-  } else if (location === "/admin/settings") {
-    content = <AdminSettings />;
   } else {
     content = <NotFound />;
   }
@@ -109,7 +105,6 @@ function Router() {
   if (location === "/register") return <Register />;
   if (location === "/forgot-password") return <ForgotPassword />;
   if (location.startsWith("/reset-password/")) return <ResetPassword />;
-  if (location === "/admin-login") return <AdminLogin />;
   if (location.startsWith("/dashboard")) return <CompanyDashboardContent />;
   if (location.startsWith("/admin")) return <AdminContent />;
   return <NotFound />;

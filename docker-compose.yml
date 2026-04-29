@@ -5,11 +5,11 @@
 #   nginx (80/443) → gateway (3000) → platform-core (4000)
 #                                    → ai-service (4010)
 #                                    → billing (4020)
-#                                    → mod-restauracao (4001)
-#                                    → mod-gestao-email (4002)
 #                                    → mod-contabilidade (4003)
+#                                    → mod-helpdesk (4001)
 #   shell (3001) — frontend SPA (served by nginx container)
 #   contabilidade-frontend (7100) — ViaContab Next.js frontend (iframe)
+#   helpdesk-frontend (3000) — Helpdesk Next.js frontend (iframe)
 #
 # Dependencies:
 #   - PostgreSQL (local container) — platform_db
@@ -95,7 +95,7 @@ services:
       SMTP_HOST: ${SMTP_HOST:-mail.viaoceanica.com}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-viaoceanicaai@viaoceanica.com}
-      SMTP_PASS: ${SMTP_PASS}
+      SMTP_PASS: "SYN_%FK!S)H{YVGV"
       SMTP_FROM: ${SMTP_FROM:-viaoceanicaai@viaoceanica.com}
       APP_BASE_URL: ${APP_BASE_URL:-http://77.42.95.216:8200}
       DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
@@ -131,9 +131,8 @@ services:
       AI_SERVICE_URL: http://ai-service:4010
       BILLING_SERVICE_URL: http://billing:4020
       SHELL_URL: http://shell:3001
-      MOD_RESTAURACAO_URL: http://mod-restauracao:4001
-      MOD_GESTAO_EMAIL_URL: http://mod-gestao-email:4002
       MOD_CONTABILIDADE_URL: http://mod-contabilidade:4003
+      MOD_HELPDESK_URL: http://mod-helpdesk:4001
     depends_on:
       redis:
         condition: service_healthy
@@ -164,9 +163,19 @@ services:
     environment:
       <<: *common-env
       AI_SERVICE_PORT: "4010"
-      AI_PROVIDER_API_KEY: ${AI_PROVIDER_API_KEY:-}
-      AI_PROVIDER_BASE_URL: ${AI_PROVIDER_BASE_URL:-https://api.openai.com/v1}
+      AI_PROVIDER_API_KEY: "sk-example-master-key"
+      AI_PROVIDER_BASE_URL: "http://host.docker.internal:4000/v1"
+      AI_CHAT_MODEL: "platform-chat"
+      AI_EMBEDDING_MODEL: "platform-embedding"
+      R2_ACCOUNT_ID: "fe5ebe6feef4f417587cad5f5557ff03"
+      R2_ACCESS_KEY_ID: "fe0b581079c9242dd889535c43ea7630"
+      R2_SECRET_ACCESS_KEY: "4631168c8f0f7a5fc4b16d11eb1b9fd4efc7a0074c117c053bb0960cc5217e36"
+      R2_BUCKET: "viaoceanica"
+      R2_PUBLIC_URL: "https://pub-a13384e123be4d79b99448c764b9dec0.r2.dev"
+      R2_ENDPOINT: "https://fe5ebe6feef4f417587cad5f5557ff03.r2.cloudflarestorage.com"
       DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -235,64 +244,6 @@ services:
       timeout: 5s
       retries: 3
 
-  # ─── Module: Restauração ──────────────────────────────────────────
-  mod-restauracao:
-    build:
-      context: ./modules/restauracao
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    environment:
-      <<: *common-env
-      MOD_RESTAURACAO_PORT: "4001"
-      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: 256M
-        reservations:
-          cpus: "0.1"
-          memory: 64M
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4001/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
-  # ─── Module: Gestão Email ─────────────────────────────────────────
-  mod-gestao-email:
-    build:
-      context: ./modules/gestao-email
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    environment:
-      <<: *common-env
-      MOD_GESTAO_EMAIL_PORT: "4002"
-      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: 256M
-        reservations:
-          cpus: "0.1"
-          memory: 64M
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4002/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
   # ─── Qdrant (Vector DB) ────────────────────────────────────────────
   qdrant:
     image: qdrant/qdrant:latest
@@ -320,16 +271,19 @@ services:
       context: ./modules/contabilidade
       dockerfile: Dockerfile
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       DATABASE_URL: postgresql+psycopg2://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_contabilidade
       QDRANT_URL: http://qdrant:6333
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_KEY: sk-example-master-key
+      OPENAI_API_BASE: http://host.docker.internal:4000/v1
       NIF_PT_API_KEY: ${NIF_PT_API_KEY:-}
-      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
-      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
-      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_ACCOUNT_ID: fe5ebe6feef4f417587cad5f5557ff03
+      R2_ACCESS_KEY_ID: fe0b581079c9242dd889535c43ea7630
+      R2_SECRET_ACCESS_KEY: 4631168c8f0f7a5fc4b16d11eb1b9fd4efc7a0074c117c053bb0960cc5217e36
       R2_BUCKET: ${R2_BUCKET:-viaoceanica}
-      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_ENDPOINT: https://fe5ebe6feef4f417587cad5f5557ff03.r2.cloudflarestorage.com
       DEFAULT_TENANT_ID: "1"
     depends_on:
       postgres:
@@ -374,6 +328,70 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
+
+  # ─── Module: Helpdesk (Backend API) ───────────────────────────────
+  mod-helpdesk:
+    build:
+      context: ./modules/helpdesk
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      MOD_HELPDESK_PORT: "4001"
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_helpdesk
+      AI_SERVICE_URL: http://host.docker.internal:4000/v1
+      AI_SERVICE_API_KEY: sk-example-master-key
+      AI_AGENT_ID: helpdesk
+      AI_MODEL: helpdesk-chat
+      DEFAULT_TENANT_ID: "1"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:4001/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ─── Module: Helpdesk (Frontend) ──────────────────────────────────
+  helpdesk-frontend:
+    build:
+      context: ./modules/helpdesk/frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      SERVER_API_BASE_URL: http://mod-helpdesk:4001
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+    depends_on:
+      - mod-helpdesk
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+        reservations:
+          cpus: "0.05"
+          memory: 32M
+    healthcheck:
+      test: ["CMD", "node", "-e", "const http=require('http'); const req=http.get('http://127.0.0.1:3000/module/helpdesk', res=>process.exit(res.statusCode===200?0:1)); req.on('error', ()=>process.exit(1)); req.setTimeout(4000, ()=>{req.destroy(); process.exit(1);});"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # ─── Nginx (Reverse Proxy) ────────────────────────────────────────
   nginx:

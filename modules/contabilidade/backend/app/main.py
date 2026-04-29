@@ -23,7 +23,6 @@ from botocore.config import Config as BotocoreConfig
 from botocore.exceptions import ClientError
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, UploadFile
-from openai import OpenAI
 from starlette.datastructures import Headers
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, or_, text
@@ -32,7 +31,8 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from .config import get_settings
 from .database import engine, get_session, SessionLocal
 from .embeddings import search_invoice_embeddings, upsert_invoice_embedding
-from .models import Base, CatalogAlias, CatalogItem, FailedImport, Invoice, InvoiceCorrection, InvoiceLineItem, InvoiceTemplate, StorageUploadQueue, VendorProfile, TenantProfile
+from .llm_client import complete_prompt
+from .models import Base, CatalogAlias, CatalogItem, FailedImport, Invoice, InvoiceCorrection, InvoiceImportEvent, InvoiceLineItem, InvoiceTemplate, StorageUploadQueue, VendorProfile, TenantProfile
 from .processing import (
     _lookup_vendor_name_from_nif,
     _lookup_vendor_profile_from_nif,
@@ -229,6 +229,26 @@ MISSING_CATALOG_ALIAS_COLUMNS = {
     "last_used_at": "ALTER TABLE catalog_aliases ADD COLUMN last_used_at TIMESTAMP",
 }
 
+INVOICE_IMPORT_EVENTS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS invoice_import_events (
+    id UUID PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    invoice_id UUID NULL,
+    filename VARCHAR(255) NOT NULL,
+    storage_object_key VARCHAR(1024) NULL,
+    status VARCHAR(32) NOT NULL,
+    source VARCHAR(32) NOT NULL DEFAULT 'upload',
+    reason TEXT NULL,
+    detected_type VARCHAR(128) NULL,
+    supplier_nif VARCHAR(128) NULL,
+    invoice_number VARCHAR(128) NULL,
+    total NUMERIC(12, 2) NULL,
+    duplicate_candidate_invoice_id UUID NULL,
+    payload_json TEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+)
+"""
+
 COLUMN_LENGTH_REQUIREMENTS = {
     ("invoices", "supplier_nif"): 128,
     ("invoices", "customer_nif"): 128,
@@ -388,6 +408,8 @@ def initialize_database() -> None:
         return
 
     Base.metadata.create_all(bind=engine)
+    with engine.begin() as conn:
+        conn.execute(text(INVOICE_IMPORT_EVENTS_TABLE_SQL))
     ensure_invoice_columns()
     ensure_column_lengths()
     ensure_text_columns()
@@ -439,23 +461,45 @@ def apply_counterparty_nif_heuristics(extraction: dict[str, Any], tenant_id: str
     supplier_nif = normalize_digits(extraction.get("supplier_nif"))
     raw_text = str(extraction.get("raw_text") or "")
 
-    if not tenant_nif or not raw_text:
+    if not raw_text:
         return extraction
 
     candidate_nifs = []
     for match in re.findall(r"\b\d{9}\b", raw_text):
         digits = normalize_digits(match)
-        if digits and digits != tenant_nif and digits not in candidate_nifs:
+        if digits and digits not in candidate_nifs:
             candidate_nifs.append(digits)
 
-    if supplier_nif == tenant_nif and candidate_nifs:
-        corrected_supplier_nif = candidate_nifs[0]
-        extraction["supplier_nif"] = corrected_supplier_nif
-        extraction["customer_nif"] = tenant_nif
-        looked_up_vendor = _lookup_vendor_name_from_nif(corrected_supplier_nif)
-        tenant_name = normalize_label(profile.company_name)
-        current_vendor = normalize_label(extraction.get("vendor"))
-        if looked_up_vendor and (not current_vendor or current_vendor == tenant_name):
+    vendor_text = str(extraction.get("vendor") or "").strip()
+    customer_name = str(extraction.get("customer_name") or "").strip()
+    vendor_contact = str(extraction.get("vendor_contact") or "")
+    vendor_address = str(extraction.get("vendor_address") or "")
+
+    current_vendor_norm = normalize_label(vendor_text)
+    customer_norm = normalize_label(customer_name)
+    likely_customer_as_vendor = False
+    if customer_name and current_vendor_norm and current_vendor_norm == customer_norm:
+        likely_customer_as_vendor = True
+    if vendor_text and vendor_address and vendor_text.lower() in vendor_address.lower():
+        likely_customer_as_vendor = True
+    if vendor_text and vendor_contact and vendor_text.lower() not in vendor_contact.lower() and "@viagensaquarius.com" in vendor_contact.lower():
+        likely_customer_as_vendor = True
+
+    if tenant_nif and supplier_nif == tenant_nif:
+        candidate_nifs = [digits for digits in candidate_nifs if digits != tenant_nif]
+        if candidate_nifs:
+            corrected_supplier_nif = candidate_nifs[0]
+            extraction["supplier_nif"] = corrected_supplier_nif
+            extraction["customer_nif"] = tenant_nif
+            looked_up_vendor = _lookup_vendor_name_from_nif(corrected_supplier_nif)
+            tenant_name = normalize_label(profile.company_name)
+            current_vendor = normalize_label(extraction.get("vendor"))
+            if looked_up_vendor and (not current_vendor or current_vendor == tenant_name):
+                extraction["vendor"] = looked_up_vendor
+
+    if likely_customer_as_vendor and supplier_nif:
+        looked_up_vendor = _lookup_vendor_name_from_nif(supplier_nif)
+        if looked_up_vendor:
             extraction["vendor"] = looked_up_vendor
 
     return extraction
@@ -480,12 +524,6 @@ def apply_vendor_profile_enrichment(extraction: dict[str, Any], tenant_id: str, 
         extraction["vendor"] = profile_name
     if profile_address and not str(extraction.get("vendor_address") or "").strip():
         extraction["vendor_address"] = profile_address
-
-    if profile_name or profile_address:
-        marker = "NIF_PROFILE_ENRICHED"
-        existing_notes = str(extraction.get("notes") or "").strip()
-        if marker not in existing_notes:
-            extraction["notes"] = f"{existing_notes} | {marker}" if existing_notes else marker
 
     return extraction
 
@@ -981,7 +1019,17 @@ def enrich_line_item_payload(
         normalized_confidence = max(Decimal("0.20"), confidence - penalty).quantize(Decimal("0.01"))
     if normalized_confidence < Decimal("0.78") and "low_confidence_match" not in issues:
         issues.append("low_confidence_match")
-    review_reason = _format_review_reasons(issues)
+
+    blocking_issues = {
+        "quantity_non_positive",
+        "subtotal_mismatch",
+        "total_mismatch",
+        "missing_description",
+        "missing_amounts",
+    }
+    review_issues = [issue for issue in issues if issue in blocking_issues]
+    needs_review = bool(review_issues)
+    review_reason = _format_review_reasons(review_issues)
 
     return {
         **item,
@@ -1002,7 +1050,7 @@ def enrich_line_item_payload(
         "line_category": line_category,
         "line_type": line_type,
         "normalization_confidence": normalized_confidence,
-        "needs_review": normalized_confidence < Decimal("0.78") or bool(issues),
+        "needs_review": needs_review,
         "review_reason": review_reason,
     }
 
@@ -1136,6 +1184,9 @@ def apply_vendor_profile_to_extraction(
     except json.JSONDecodeError:
         return extraction
 
+    qr_backed = bool(extraction.get("qr_data"))
+    protected_qr_fields = {"supplier_nif", "customer_nif", "vendor", "customer_name"}
+
     for field in [
         "vendor",
         "vendor_address",
@@ -1146,7 +1197,7 @@ def apply_vendor_profile_to_extraction(
         "customer_name",
         "customer_nif",
     ]:
-        if extraction.get("qr_data") and field in {"supplier_nif", "customer_nif"}:
+        if qr_backed and field in protected_qr_fields:
             continue
         value = sanitize_learned_value(payload.get(field))
         if value:
@@ -1172,6 +1223,15 @@ def upsert_vendor_profile(invoice: Invoice, session: Session) -> None:
     normalized_vendor = normalize_identifier(invoice.vendor)
     if not normalized_supplier_nif and not normalized_vendor:
         return
+
+    if normalized_supplier_nif:
+        looked_up_vendor = _lookup_vendor_name_from_nif(normalized_supplier_nif)
+        if looked_up_vendor:
+            looked_up_vendor_norm = normalize_identifier(looked_up_vendor)
+            vendor_contact_blob = normalize_identifier(invoice.vendor_contact)
+            if normalized_vendor and looked_up_vendor_norm and normalized_vendor != looked_up_vendor_norm:
+                if vendor_contact_blob and normalize_identifier(invoice.vendor) not in vendor_contact_blob:
+                    return
 
     profile = None
     if normalized_supplier_nif:
@@ -1757,14 +1817,13 @@ def build_chat_answer(question: str, contexts: list[str]) -> str:
         f"Pergunta: {question}\nResposta:"
     )
     try:
-        client = OpenAI(api_key=settings.openai_api_key)
-        response = client.responses.create(
-            model=settings.extraction_model,
-            input=prompt,
+        response = complete_prompt(
+            model=settings.chat_model,
+            prompt=prompt,
             max_output_tokens=500,
+            temperature=0.1,
         )
-        answer = getattr(response, "output_text", "") or ""
-        return answer.strip() or "Não encontrei uma resposta com os dados disponíveis."
+        return response.text.strip() or "Não encontrei uma resposta com os dados disponíveis."
     except Exception as exc:
         logger.warning("Falha ao gerar resposta: %s", exc)
         return "Não consegui gerar uma resposta com os dados disponíveis."
@@ -1843,6 +1902,75 @@ def _read_upload_bytes(upload: UploadFile) -> bytes:
     return content
 
 
+def _humanize_rejection_reason(reason: str | None, detected_type: str | None = None) -> str:
+    message = (reason or "").strip()
+    detected = (detected_type or "").strip().lower()
+    lowered = message.lower()
+
+    if "processing_timeout" in lowered or detected == "processing_timeout":
+        return "Tempo limite excedido durante a análise do documento. Tente novamente com um ficheiro mais leve ou melhor legível."
+    if "processing_error" in lowered or detected == "processing_error":
+        return "Falha técnica ao analisar o documento. Verifique o ficheiro e tente novamente."
+    if detected == "zip_error" or "falha ao expandir zip" in lowered:
+        return message or "Não foi possível abrir o ficheiro ZIP. Verifique se não está corrompido e tente novamente."
+    if detected == "invalid_document":
+        return message or "O ficheiro não pôde ser lido como documento válido."
+    if "receipt" in detected or "receipt" in lowered:
+        return "O documento parece ser um recibo simples, não uma fatura completa."
+    if detected in {"payroll", "bank_statement", "purchase_order", "delivery_note", "quote", "payment_certificate"}:
+        label_map = {
+            "payroll": "recibo/processamento salarial",
+            "bank_statement": "extrato bancário",
+            "purchase_order": "ordem de compra",
+            "delivery_note": "guia de transporte/remessa",
+            "quote": "orçamento",
+            "payment_certificate": "comprovativo de pagamento",
+        }
+        return f"O documento foi identificado como {label_map.get(detected, detected)}, não como fatura."
+    if "could not validate" in lowered:
+        return "Não foi possível confirmar que o documento é uma fatura ou documento fiscal aceite."
+    if "document identified as" in lowered:
+        human = message.split("Document identified as", 1)[-1].strip().replace("_", " ")
+        return f"O documento foi identificado como {human}, não como fatura."
+    if message:
+        return message
+    return "Documento rejeitado durante a validação."
+
+
+
+def record_import_event(
+    session: Session,
+    *,
+    tenant_id: str,
+    filename: str,
+    status: str,
+    source: str = "upload",
+    invoice: Invoice | None = None,
+    storage_object_key: str | None = None,
+    reason: str | None = None,
+    detected_type: str | None = None,
+    duplicate_candidate_invoice_id: UUID | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    event = InvoiceImportEvent(
+        tenant_id=tenant_id,
+        invoice_id=getattr(invoice, "id", None),
+        filename=filename,
+        storage_object_key=storage_object_key or getattr(invoice, "storage_object_key", None),
+        status=status,
+        source=source,
+        reason=reason,
+        detected_type=detected_type,
+        supplier_nif=getattr(invoice, "supplier_nif", None) if invoice else None,
+        invoice_number=getattr(invoice, "invoice_number", None) if invoice else None,
+        total=getattr(invoice, "total", None) if invoice else None,
+        duplicate_candidate_invoice_id=duplicate_candidate_invoice_id,
+        payload_json=json.dumps(payload, ensure_ascii=False) if payload else None,
+    )
+    session.add(event)
+
+
+
 def persist_failed_import(
     session: Session,
     *,
@@ -1854,6 +1982,7 @@ def persist_failed_import(
     mime_type: str | None = None,
     file_bytes: bytes | None = None,
 ) -> FailedImport:
+    reason = _humanize_rejection_reason(reason, detected_type)
     stored_blob = file_bytes
     if stored_blob is not None and len(stored_blob) > MAX_FAILED_IMPORT_BLOB:
         stored_blob = None
@@ -1903,13 +2032,28 @@ def compute_invoice_blockers(invoice: Invoice) -> list[dict[str, str]]:
         )
 
     if invoice.requires_review:
-        blockers.append(
-            {
-                "code": "document_requires_review",
-                "severity": "warning",
-                "message": "Documento marcado para revisão manual",
-            }
+        meaningful_line_review_count = sum(
+            1
+            for line in (invoice.line_items or [])
+            if getattr(line, "needs_review", False)
+            and str(getattr(line, "review_reason", "") or "").strip()
         )
+        has_real_document_issue = any(
+            [
+                subtotal is None,
+                tax is None,
+                total is None,
+                meaningful_line_review_count > 0,
+            ]
+        )
+        if has_real_document_issue:
+            blockers.append(
+                {
+                    "code": "document_requires_review",
+                    "severity": "warning",
+                    "message": "Documento marcado para revisão manual",
+                }
+            )
 
     if invoice.confidence_score is not None and Decimal(str(invoice.confidence_score)) < Decimal("85"):
         blockers.append(
@@ -1920,7 +2064,12 @@ def compute_invoice_blockers(invoice: Invoice) -> list[dict[str, str]]:
             }
         )
 
-    line_review_count = sum(1 for line in (invoice.line_items or []) if getattr(line, "needs_review", False))
+    line_review_count = sum(
+        1
+        for line in (invoice.line_items or [])
+        if getattr(line, "needs_review", False)
+        and str(getattr(line, "review_reason", "") or "").strip()
+    )
     if line_review_count > 0:
         blockers.append(
             {
@@ -1930,7 +2079,7 @@ def compute_invoice_blockers(invoice: Invoice) -> list[dict[str, str]]:
             }
         )
 
-    qr_detected = "QR português detetado" in str(invoice.notes or "")
+    qr_detected = bool(getattr(invoice, "supplier_nif", None))
     if str(invoice.filename or "").lower().endswith(".pdf") and not qr_detected and not supplier_nif:
         blockers.append(
             {
@@ -1940,7 +2089,7 @@ def compute_invoice_blockers(invoice: Invoice) -> list[dict[str, str]]:
             }
         )
 
-    if "DUPLICATE_CANDIDATE" in str(invoice.notes or ""):
+    if _extract_duplicate_candidate_invoice_id(getattr(invoice, "notes", None)) is not None:
         blockers.append(
             {
                 "code": "duplicate_candidate",
@@ -2641,6 +2790,16 @@ def cost_trends(
     )
 
 
+def _extract_duplicate_candidate_invoice_id(notes: str | None) -> UUID | None:
+    match = re.search(r"DUPLICATE_CANDIDATE:\s*provável duplicada de\s+([a-f0-9-]+)", str(notes or ""), re.I)
+    if not match:
+        return None
+    try:
+        return UUID(match.group(1))
+    except Exception:
+        return None
+
+
 def serialize_invoice(invoice: Invoice) -> dict[str, Any]:
     learning_debug = getattr(invoice, "learning_debug", None)
     if isinstance(learning_debug, str):
@@ -2655,6 +2814,7 @@ def serialize_invoice(invoice: Invoice) -> dict[str, Any]:
             "tenant_id": invoice.tenant_id,
             "filename": invoice.filename,
             "storage_object_key": getattr(invoice, "storage_object_key", None),
+            "duplicate_candidate_invoice_id": _extract_duplicate_candidate_invoice_id(invoice.notes),
             "vendor": invoice.vendor,
             "vendor_address": invoice.vendor_address,
             "vendor_contact": invoice.vendor_contact,
@@ -2785,7 +2945,7 @@ def _process_upload_for_ingest(
             detected_type,
         )
         if not should_process:
-            reason = validation_reason or "Documento inválido para processamento de faturas"
+            reason = _humanize_rejection_reason(validation_reason or "Documento inválido para processamento de faturas", detected_type)
             _watchtower_finish(task_id, status="rejected", reason=reason)
             session.rollback()
             if persist_failure_record:
@@ -2799,6 +2959,16 @@ def _process_upload_for_ingest(
                     mime_type=upload.content_type,
                     file_bytes=_get_upload_bytes(),
                 )
+            record_import_event(
+                session,
+                tenant_id=tenant_id,
+                filename=filename,
+                status="rejected",
+                source=source,
+                reason=reason,
+                detected_type=detected_type,
+                storage_object_key=storage_object_key,
+            )
             session.commit()
             return None, RejectedDocument(filename=filename, reason=reason, detected_type=detected_type)
 
@@ -2812,7 +2982,7 @@ def _process_upload_for_ingest(
                 cached_raw,
                 precheck_usage,
             )
-            extraction = future.result(timeout=90)
+            extraction = future.result(timeout=180)
         logger.info(
             "Extraction finished for %s in %.2fs (is_invoice=%s, detected_type=%s)",
             filename,
@@ -2824,18 +2994,23 @@ def _process_upload_for_ingest(
         if not extraction.get("is_invoice"):
             filename_hint = normalize_label(filename)
             has_invoice_filename = any(token in filename_hint for token in ["fatura", "factura", "invoice"])
-            has_financial_signals = any(
+            strong_financial_signals = sum(
                 extraction.get(field) is not None
                 for field in ["subtotal", "tax", "total", "invoice_number", "supplier_nif"]
             )
-            if has_invoice_filename and has_financial_signals:
+            has_line_items = bool(_has_meaningful_line_items(extraction.get("line_items")))
+            has_qr_identity = bool(extraction.get("qr_data") and extraction.get("supplier_nif"))
+            if has_invoice_filename and (has_qr_identity or (strong_financial_signals >= 3 and has_line_items)):
                 extraction["is_invoice"] = True
                 extraction["detected_type"] = "invoice_filename_hint"
-                extraction["validation_reason"] = "Accepted by filename + financial signal heuristic"
+                extraction["validation_reason"] = "Accepted by filename + strong invoice signals heuristic"
 
         if not extraction.get("is_invoice"):
-            reason = extraction.get("validation_reason") or "Documento inválido para processamento de faturas"
             detected = extraction.get("detected_type")
+            reason = _humanize_rejection_reason(
+                extraction.get("validation_reason") or "Documento inválido para processamento de faturas",
+                detected,
+            )
             _watchtower_finish(task_id, status="rejected", reason=reason)
             session.rollback()
             if persist_failure_record:
@@ -2849,14 +3024,72 @@ def _process_upload_for_ingest(
                     mime_type=upload.content_type,
                     file_bytes=_get_upload_bytes(),
                 )
+            record_import_event(
+                session,
+                tenant_id=tenant_id,
+                filename=filename,
+                status="rejected",
+                source=source,
+                reason=reason,
+                detected_type=detected,
+                storage_object_key=storage_object_key,
+            )
+            session.commit()
+            return None, RejectedDocument(filename=filename, reason=reason, detected_type=detected)
+
+        early_duplicate_candidate = find_potential_duplicate_invoice(
+            tenant_id=tenant_id,
+            supplier_nif=extraction.get("supplier_nif"),
+            invoice_number=extraction.get("invoice_number"),
+            total=_to_decimal_safe(extraction.get("total"), quant="0.01"),
+            session=session,
+        )
+
+        core_invoice_signals = [
+            extraction.get("vendor"),
+            extraction.get("supplier_nif"),
+            extraction.get("invoice_number"),
+            extraction.get("subtotal"),
+            extraction.get("tax"),
+            extraction.get("total"),
+        ]
+        line_items_present = bool(_has_meaningful_line_items(extraction.get("line_items")))
+        if not early_duplicate_candidate and not line_items_present and sum(value not in (None, "", []) for value in core_invoice_signals) < 2:
+            reason = "Documento sem sinais suficientes de fatura após extração"
+            detected = extraction.get("detected_type") or "unknown"
+            reason = _humanize_rejection_reason(reason, detected)
+            _watchtower_finish(task_id, status="rejected", reason=reason)
+            session.rollback()
+            if persist_failure_record:
+                persist_failed_import(
+                    session,
+                    tenant_id=tenant_id,
+                    filename=filename,
+                    reason=reason,
+                    detected_type=detected,
+                    source=source,
+                    mime_type=upload.content_type,
+                    file_bytes=_get_upload_bytes(),
+                )
+            record_import_event(
+                session,
+                tenant_id=tenant_id,
+                filename=filename,
+                status="rejected",
+                source=source,
+                reason=reason,
+                detected_type=detected,
+                storage_object_key=storage_object_key,
+            )
             session.commit()
             return None, RejectedDocument(filename=filename, reason=reason, detected_type=detected)
 
         _watchtower_stage(task_id, "template")
         extraction = apply_template_to_extraction(extraction, tenant_id, session, debug=learning_debug)
         extraction = apply_tenant_defaults_to_extraction(extraction, tenant_id, session)
-        extraction = apply_counterparty_nif_heuristics(extraction, tenant_id, session)
-        extraction = apply_vendor_profile_enrichment(extraction, tenant_id, session)
+        if not extraction.get("qr_data"):
+            extraction = apply_counterparty_nif_heuristics(extraction, tenant_id, session)
+            extraction = apply_vendor_profile_enrichment(extraction, tenant_id, session)
 
         extracted_line_items = extraction.get("line_items")
         missing_line_items = not _has_meaningful_line_items(extracted_line_items)
@@ -2870,18 +3103,17 @@ def _process_upload_for_ingest(
             existing_notes = str(extraction.get("notes") or "").strip()
             extraction["notes"] = f"{existing_notes} | {marker}" if existing_notes else marker
 
-        duplicate_candidate = find_potential_duplicate_invoice(
+        duplicate_candidate = early_duplicate_candidate or find_potential_duplicate_invoice(
             tenant_id=tenant_id,
             supplier_nif=extraction.get("supplier_nif"),
             invoice_number=extraction.get("invoice_number"),
             total=_to_decimal_safe(extraction.get("total"), quant="0.01"),
             session=session,
         )
+        duplicate_candidate_id: UUID | None = None
         if duplicate_candidate is not None:
             requires_review = True
-            duplicate_marker = f"DUPLICATE_CANDIDATE: provável duplicada de {duplicate_candidate.id}"
-            existing_notes = str(extraction.get("notes") or "").strip()
-            extraction["notes"] = f"{existing_notes} | {duplicate_marker}" if existing_notes else duplicate_marker
+            duplicate_candidate_id = duplicate_candidate.id
 
         extraction["confidence_score"] = confidence_score
         extraction["requires_review"] = requires_review
@@ -2913,11 +3145,23 @@ def _process_upload_for_ingest(
             token_total=extraction.get("token_total"),
             confidence_score=extraction.get("confidence_score"),
             requires_review=bool(extraction.get("requires_review", False)),
-            notes=extraction["notes"],
+            notes=extraction.get("notes"),
             status="requere revisao" if extraction.get("requires_review") else "processed",
         )
         session.add(invoice)
         session.flush()
+        record_import_event(
+            session,
+            tenant_id=tenant_id,
+            filename=filename,
+            status="duplicate" if duplicate_candidate_id else ("review" if invoice.requires_review else "success"),
+            source=source,
+            invoice=invoice,
+            storage_object_key=storage_object_key,
+            detected_type=extraction.get("detected_type"),
+            duplicate_candidate_invoice_id=duplicate_candidate_id,
+            payload={"requires_review": bool(invoice.requires_review)},
+        )
         default_tax_rate = infer_default_tax_rate(invoice.subtotal, invoice.tax)
 
         for index, item in enumerate(line_items_payload, start=1):
@@ -2975,25 +3219,26 @@ def _process_upload_for_ingest(
     except InvalidDocumentError as exc:
         logger.warning("Documento inválido %s: %s", filename, exc)
         session.rollback()
-        _watchtower_finish(task_id, status="rejected", reason=str(exc))
+        reason = _humanize_rejection_reason(str(exc), "invalid_document")
+        _watchtower_finish(task_id, status="rejected", reason=reason)
         if persist_failure_record:
             persist_failed_import(
                 session,
                 tenant_id=tenant_id,
                 filename=filename,
-                reason=str(exc),
+                reason=reason,
                 detected_type="invalid_document",
                 source=source,
                 mime_type=upload.content_type,
                 file_bytes=_get_upload_bytes(),
             )
         session.commit()
-        return None, RejectedDocument(filename=filename, reason=str(exc), detected_type="invalid_document")
+        return None, RejectedDocument(filename=filename, reason=reason, detected_type="invalid_document")
     except FutureTimeout:
         logger.warning("Timeout ao processar documento %s", filename)
         session.rollback()
         _watchtower_finish(task_id, status="rejected", reason="processing_timeout")
-        reason = "Tempo limite excedido durante extração (90s por ficheiro)"
+        reason = "Tempo limite excedido durante extração (180s por ficheiro)"
         if persist_failure_record:
             persist_failed_import(
                 session,
@@ -3010,8 +3255,8 @@ def _process_upload_for_ingest(
     except Exception as exc:
         logger.exception("Falha ao processar documento %s: %s", filename, exc)
         session.rollback()
-        _watchtower_finish(task_id, status="rejected", reason="processing_error")
-        reason = "Falha técnica ao analisar o documento"
+        reason = _humanize_rejection_reason("Falha técnica ao analisar o documento", "processing_error")
+        _watchtower_finish(task_id, status="rejected", reason=reason)
         if persist_failure_record:
             persist_failed_import(
                 session,
@@ -3076,6 +3321,7 @@ def ingest_invoices(
         raise HTTPException(status_code=400, detail="Selecione pelo menos um ficheiro")
 
     ingested_rows: list[Invoice] = []
+    duplicate_rows: list[dict[str, Any]] = []
     for upload, source in files_to_process:
         upload_bytes = _read_upload_bytes(upload)
         invoice, rejection = _process_upload_for_ingest(tenant_id=tenant_id, upload=upload, session=session, source=source)
@@ -3095,6 +3341,16 @@ def ingest_invoices(
                     session.commit()
         if rejection:
             rejected_rows.append(rejection)
+        if invoice:
+            serialized = serialize_invoice(invoice)
+            duplicate_id = serialized.get("duplicate_candidate_invoice_id")
+            if duplicate_id:
+                duplicate_rows.append(
+                    DuplicateReviewCandidate(
+                        uploaded=InvoiceBase.model_validate(serialized),
+                        existing_invoice_id=duplicate_id,
+                    ).model_dump(mode="json")
+                )
 
     logger.info("Committed ingest batch for tenant=%s (ingested=%s, rejected=%s)", tenant_id, len(ingested_rows), len(rejected_rows))
 
@@ -3104,6 +3360,7 @@ def ingest_invoices(
     return {
         "ingested": [serialize_invoice(invoice) for invoice in ingested_rows],
         "rejected": [item.model_dump() for item in rejected_rows],
+        "duplicates": duplicate_rows,
     }
 
 
@@ -3194,6 +3451,18 @@ def complete_storage_upload(
 
     ingested_rows: list[Invoice] = [invoice] if invoice else []
     rejected_rows: list[RejectedDocument] = [rejection] if rejection else []
+    duplicate_rows: list[dict[str, Any]] = []
+
+    if invoice is not None:
+        serialized = serialize_invoice(invoice)
+        duplicate_id = serialized.get("duplicate_candidate_invoice_id")
+        if duplicate_id:
+            duplicate_rows.append(
+                DuplicateReviewCandidate(
+                    uploaded=InvoiceBase.model_validate(serialized),
+                    existing_invoice_id=duplicate_id,
+                ).model_dump(mode="json")
+            )
 
     for ingested in ingested_rows:
         background_tasks.add_task(enqueue_invoice_embedding_job, ingested.id)
@@ -3201,6 +3470,7 @@ def complete_storage_upload(
     return {
         "ingested": [serialize_invoice(ingested) for ingested in ingested_rows],
         "rejected": [item.model_dump() for item in rejected_rows],
+        "duplicates": duplicate_rows,
     }
 
 
@@ -3263,6 +3533,12 @@ def delete_invoice(
 ):
     tenant_id = resolve_tenant_scope(header_tenant_id=x_tenant_id)
     invoice = require_invoice_for_tenant(session, invoice_id, tenant_id)
+
+    if getattr(invoice, "storage_object_key", None):
+        try:
+            _get_r2_client().delete_object(Bucket=settings.r2_bucket, Key=invoice.storage_object_key)
+        except Exception as exc:
+            logger.warning("Falha ao remover objeto storage %s da fatura %s: %s", invoice.storage_object_key, invoice.id, exc)
 
     session.delete(invoice)
     session.commit()

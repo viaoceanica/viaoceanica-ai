@@ -75,6 +75,7 @@ class InvoiceBase(BaseModel):
     id: uuid.UUID
     tenant_id: str
     filename: str
+    duplicate_candidate_invoice_id: Optional[uuid.UUID] = None
     storage_object_key: Optional[str] = None
     vendor: Optional[str] = None
     vendor_address: Optional[str] = None
@@ -240,9 +241,15 @@ class AutomationBlockerListResponse(BaseModel):
     items: list[AutomationBlockerRow]
 
 
+class DuplicateReviewCandidate(BaseModel):
+    uploaded: InvoiceBase
+    existing_invoice_id: uuid.UUID
+
+
 class IngestResponse(BaseModel):
     ingested: list[InvoiceBase]
     rejected: list[RejectedDocument] = []
+    duplicates: list[DuplicateReviewCandidate] = []
 
 
 class StorageUploadInitRequest(BaseModel):

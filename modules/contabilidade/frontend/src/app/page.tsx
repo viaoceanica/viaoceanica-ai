@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-// Use basePath-prefixed path so browser requests go through Next.js server-side rewrite
 const API_BASE = "/module/contabilidade/api-proxy";
 
 type TabKey = "upload" | "queue" | "search";
@@ -35,6 +34,7 @@ interface Invoice {
   id: string;
   tenant_id: string;
   filename: string;
+  duplicate_candidate_invoice_id?: string | null;
   vendor?: string | null;
   vendor_address?: string | null;
   vendor_contact?: string | null;
@@ -72,6 +72,30 @@ interface FailedImportRow {
   retry_count: number;
   last_retry_at?: string | null;
   created_at: string;
+}
+
+interface RejectedUploadRow {
+  filename: string;
+  reason: string;
+  detected_type?: string | null;
+}
+
+interface UploadInboxRow {
+  kind: "invoice" | "rejected";
+  id: string;
+  filename: string;
+  statusLabel: string;
+  statusTone: "success" | "warn" | "error";
+  reason?: string;
+  detectedType?: string | null;
+  vendor?: string | null;
+  createdAt?: string;
+  invoice?: Invoice;
+}
+
+interface DuplicateReviewState {
+  uploaded: Invoice;
+  existingId: string;
 }
 
 interface ReviewLineItem {
@@ -309,20 +333,34 @@ function invoiceQueueState(row: Invoice): "review" | "processed" | "error" {
 
 function guidanceForError(message: string) {
   const lowered = message.toLowerCase();
-  if (lowered.includes("tenant")) return "O tenant é injetado automaticamente pelo dashboard. Se este erro persistir, recarregue a página.";
-  if (lowered.includes("selecione") || lowered.includes("ficheiro")) return "Adicione pelo menos um PDF/JPG/PNG e tente novamente.";
+  if (lowered.includes("tenant")) return "Defina um tenant válido antes de continuar.";
+  if (lowered.includes("selecione") || lowered.includes("adicione pelo menos um")) return "Adicione pelo menos um PDF/JPG/PNG e tente novamente.";
+  if (lowered.includes("502 bad gateway") || lowered.includes("bad gateway")) {
+    return "O serviço demorou demasiado tempo a responder. O sistema pode estar a processar o ficheiro ou ter excedido o tempo limite.";
+  }
+  if (lowered.includes("tempo limite") || lowered.includes("processing_timeout") || lowered.includes("timeout ao processar")) {
+    return "O processamento demorou demasiado tempo e foi interrompido. Tente novamente ou use um ficheiro mais leve/legível.";
+  }
+  if (lowered.includes("socket hang up") || lowered.includes("econnreset")) {
+    return "A ligação ao serviço de ingestão foi interrompida durante o upload. Tente novamente. Se repetir, o backend precisa de inspeção neste ficheiro.";
+  }
   if (lowered.includes("network") || lowered.includes("failed to fetch")) {
-    return "Confirme backend ativo em /api/health e ligação entre frontend/backend.";
+    return "Confirme backend ativo e ligação entre frontend e backend.";
   }
   if (lowered.includes("zip")) return "Verifique ZIP (máx 200 ficheiros, 20MB por ficheiro, 100MB total).";
+  if (lowered.includes("não como fatura") || lowered.includes("não foi possível confirmar")) {
+    return "Confirme que o ficheiro é mesmo uma fatura legível, com número, fornecedor/NIF e totais visíveis.";
+  }
+  if (lowered.includes("recibo simples")) return "Se quiser processar recibos, teremos de ajustar as regras de validação.";
+  if (lowered.includes("tempo limite")) return "Tente um PDF mais pequeno, menos páginas, ou uma imagem mais nítida.";
   return "Revise os campos destacados e tente novamente.";
 }
 
 function getStageLabel(step: UploadStep) {
-  if (step === "validate") return "Validate";
-  if (step === "extract") return "Extract";
-  if (step === "review") return "Review";
-  return "Save";
+  if (step === "validate") return "Validar";
+  if (step === "extract") return "Extrair";
+  if (step === "review") return "Rever";
+  return "Guardar";
 }
 
 export default function Home() {
@@ -339,10 +377,13 @@ export default function Home() {
 
   const [files, setFiles] = useState<FileList | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
+  const [isDragActive, setIsDragActive] = useState(false);
+  const [uploadListFilter, setUploadListFilter] = useState<"all" | "good" | "review" | "rejected">("all");
   const [uploadStage, setUploadStage] = useState<"idle" | UploadStep | "done" | "error">("idle");
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [uploadSuccess, setUploadSuccess] = useState("");
+  const [uploadRejected, setUploadRejected] = useState<RejectedUploadRow[]>([]);
 
   const [isQueueLoading, setIsQueueLoading] = useState(true);
   const [queueError, setQueueError] = useState("");
@@ -357,6 +398,7 @@ export default function Home() {
   const [queueSort, setQueueSort] = useState<QueueSort>("created_desc");
 
   const [detailInvoice, setDetailInvoice] = useState<Invoice | null>(null);
+  const [duplicateReview, setDuplicateReview] = useState<DuplicateReviewState | null>(null);
   const [detailForm, setDetailForm] = useState<EditableInvoiceForm>(emptyForm());
   const [detailLineItems, setDetailLineItems] = useState<EditableInvoiceLineItem[]>([]);
   const [isSavingDetail, setIsSavingDetail] = useState(false);
@@ -399,6 +441,42 @@ export default function Home() {
   const queueChordTimerRef = useRef<number | null>(null);
   const uploadSessionIdRef = useRef(makeId());
   const detailSectionRef = useRef<HTMLElement | null>(null);
+  const tenantReady = tenantId.trim().length > 0;
+
+  useEffect(() => {
+    const handleContextMessage = (event: MessageEvent) => {
+      const payload = event.data;
+      if (!payload || payload.type !== "viao-context") return;
+      if (payload.tenantId) setTenantId(String(payload.tenantId));
+    };
+
+    window.addEventListener("message", handleContextMessage);
+
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ type: "viao-context-request" }, "*");
+      }
+    } catch {
+      // ignore
+    }
+
+    const standaloneFallback = window.setTimeout(() => {
+      if (window.parent === window) {
+        setTenantId((prev) => prev || "demo");
+      } else if (!tenantId) {
+        try {
+          window.parent.postMessage({ type: "viao-context-request" }, "*");
+        } catch {
+          // ignore
+        }
+      }
+    }, 800);
+
+    return () => {
+      window.removeEventListener("message", handleContextMessage);
+      window.clearTimeout(standaloneFallback);
+    };
+  }, [tenantId]);
 
   const dismissToast = useCallback((toastId: string) => {
     setToasts((prev) => prev.filter((item) => item.id !== toastId));
@@ -587,7 +665,8 @@ export default function Home() {
     window.setTimeout(() => {
       detailSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 90);
-  }, []);
+    pushToast({ type: "info", title: "Editor aberto", detail: `Pode corrigir ${invoice.filename} abaixo.` });
+  }, [pushToast]);
 
   const openInvoiceById = useCallback(
     (invoiceId: string) => {
@@ -596,7 +675,9 @@ export default function Home() {
         pushToast({ type: "error", title: "Fatura não encontrada", detail: invoiceId });
         return;
       }
+      setActiveTab("queue");
       openInvoiceDetail(target);
+      pushToast({ type: "info", title: "A abrir editor", detail: "A fatura foi aberta na fila para edição." });
     },
     [rows, openInvoiceDetail, pushToast]
   );
@@ -624,6 +705,14 @@ export default function Home() {
 
   const addDetailLineItem = useCallback(() => {
     setDetailLineItems((prev) => [...prev, createEmptyEditableLineItem()]);
+  }, []);
+
+  const insertDetailLineItemAt = useCallback((index: number) => {
+    setDetailLineItems((prev) => {
+      const next = [...prev];
+      next.splice(index, 0, createEmptyEditableLineItem());
+      return next;
+    });
   }, []);
 
   const removeDetailLineItem = useCallback((index: number) => {
@@ -673,9 +762,22 @@ export default function Home() {
       if (!response.ok) throw new Error(data?.detail || "Falha ao guardar alterações");
 
       setRows((prev) => prev.map((row) => (row.id === data.id ? data : row)));
-      setDetailInvoice(null);
-      setDetailForm(emptyForm());
-      setDetailLineItems([]);
+      setDetailInvoice(data);
+      setDetailForm({
+        vendor: data.vendor ?? "",
+        category: data.category ?? "",
+        invoice_number: data.invoice_number ?? "",
+        invoice_date: toPtDate(data.invoice_date),
+        due_date: toPtDate(data.due_date),
+        supplier_nif: data.supplier_nif ?? "",
+        customer_name: data.customer_name ?? "",
+        customer_nif: data.customer_nif ?? "",
+        subtotal: toPtNumberString(data.subtotal),
+        tax: toPtNumberString(data.tax),
+        total: toPtNumberString(data.total),
+        notes: data.notes ?? "",
+      });
+      setDetailLineItems((data.line_items ?? []).map(toEditableLineItem));
       pushToast({ type: "success", title: "Fatura guardada", detail: data.invoice_number || data.filename });
       await refreshQueueData();
     } catch (error) {
@@ -686,12 +788,13 @@ export default function Home() {
     }
   }, [detailInvoice, detailForm, detailLineItems, apiBase, refreshQueueData, pushToast, tenantId]);
 
-  const commitInvoiceDelete = useCallback(
-    async (invoiceId: string) => {
-      const pending = pendingInvoiceDeleteRef.current[invoiceId];
-      if (!pending) return;
+  const queueInvoiceDelete = useCallback(
+    async (invoice: Invoice) => {
+      const confirmed = window.confirm(`Apagar fatura ${invoice.invoice_number || invoice.filename}?`);
+      if (!confirmed) return;
+
       try {
-        const response = await fetch(`${apiBase}/api/invoices/${invoiceId}`, {
+        const response = await fetch(`${apiBase}/api/invoices/${invoice.id}`, {
           method: "DELETE",
           headers: { "X-Tenant-Id": tenantId },
         });
@@ -699,60 +802,21 @@ export default function Home() {
           const data = await parseResponse(response);
           throw new Error(data?.detail || "Falha ao apagar fatura");
         }
-        if (detailInvoice?.id === invoiceId) {
+
+        setRows((prev) => prev.filter((row) => row.id !== invoice.id));
+        setSelectedInvoiceIds((prev) => prev.filter((id) => id !== invoice.id));
+        if (detailInvoice?.id === invoice.id) {
           setDetailInvoice(null);
           setDetailForm(emptyForm());
           setDetailLineItems([]);
         }
-        pushToast({ type: "success", title: "Fatura apagada", detail: pending.invoice.filename });
+        pushToast({ type: "success", title: "Fatura apagada", detail: invoice.filename });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Falha ao apagar fatura";
-        setRows((prev) => [pending.invoice, ...prev]);
         pushToast({ type: "error", title: "Não foi possível apagar", detail: `${message}. ${guidanceForError(message)}` });
-      } finally {
-        delete pendingInvoiceDeleteRef.current[invoiceId];
       }
     },
     [apiBase, detailInvoice, pushToast, tenantId]
-  );
-
-  const undoInvoiceDelete = useCallback(
-    (invoiceId: string) => {
-      const pending = pendingInvoiceDeleteRef.current[invoiceId];
-      if (!pending) return;
-      window.clearTimeout(pending.timeoutId);
-      setRows((prev) => [pending.invoice, ...prev]);
-      delete pendingInvoiceDeleteRef.current[invoiceId];
-      pushToast({ type: "info", title: "Apagamento revertido", detail: pending.invoice.filename });
-    },
-    [pushToast]
-  );
-
-  const queueInvoiceDelete = useCallback(
-    (invoice: Invoice) => {
-      const confirmed = window.confirm(`Apagar fatura ${invoice.invoice_number || invoice.filename}?`);
-      if (!confirmed) return;
-
-      setRows((prev) => prev.filter((row) => row.id !== invoice.id));
-      setSelectedInvoiceIds((prev) => prev.filter((id) => id !== invoice.id));
-
-      const timeoutId = window.setTimeout(() => {
-        void commitInvoiceDelete(invoice.id);
-      }, 5000);
-
-      pendingInvoiceDeleteRef.current[invoice.id] = { invoice, timeoutId };
-      pushToast(
-        {
-          type: "info",
-          title: "Fatura agendada para apagamento",
-          detail: "Ação destrutiva com janela de Undo de 5s.",
-          actionLabel: "Undo",
-          onAction: () => undoInvoiceDelete(invoice.id),
-        },
-        5200
-      );
-    },
-    [commitInvoiceDelete, undoInvoiceDelete, pushToast]
   );
 
   const commitFailedImportDelete = useCallback(
@@ -866,7 +930,7 @@ export default function Home() {
 
   const performUpload = useCallback(async () => {
     if (!tenantId.trim()) {
-      const message = "Tenant em falta — aguarde contexto do dashboard";
+      const message = "Tenant em falta";
       setUploadError(`${message}. ${guidanceForError(message)}`);
       setUploadSuccess("");
       pushToast({ type: "error", title: message, detail: guidanceForError(message) });
@@ -884,6 +948,7 @@ export default function Home() {
     setIsUploading(true);
     setUploadError("");
     setUploadSuccess("");
+    setUploadRejected([]);
     setTelemetry((prev) => ({ ...prev, started: prev.started + 1 }));
 
     let currentStep: UploadStep = "validate";
@@ -894,7 +959,11 @@ export default function Home() {
       void sendUploadTelemetryEvent("validate", "enter", "upload_started");
 
       const selectedFiles = Array.from(files);
-      const aggregated = { ingested: [] as unknown[], rejected: [] as Array<{ filename: string; reason: string; detected_type?: string }> };
+      const aggregated = {
+        ingested: [] as Invoice[],
+        rejected: [] as Array<{ filename: string; reason: string; detected_type?: string }>,
+        duplicates: [] as Array<{ uploaded: Invoice; existing_invoice_id: string }>,
+      };
 
       await new Promise((resolve) => window.setTimeout(resolve, 160));
       currentStep = "extract";
@@ -937,10 +1006,34 @@ export default function Home() {
 
           aggregated.ingested.push(...(completeData?.ingested ?? []));
           aggregated.rejected.push(...(completeData?.rejected ?? []));
+          aggregated.duplicates.push(...(completeData?.duplicates ?? []));
         } catch (fileError) {
           const storageReason = fileError instanceof Error ? fileError.message : "Falha no upload para storage";
+          const loweredStorageReason = storageReason.toLowerCase();
+          const shouldFallbackToDirectIngest =
+            loweredStorageReason.includes("failed to fetch") ||
+            loweredStorageReason.includes("cors") ||
+            loweredStorageReason.includes("falha no envio para storage") ||
+            loweredStorageReason.includes("upload para storage");
+
+          if (!shouldFallbackToDirectIngest) {
+            let reason = storageReason;
+            try {
+              const failedResponse = await fetch(`${apiBase}/api/tenants/${tenantId}/failed-imports`);
+              const failedData = await parseResponse(failedResponse);
+              const latestMatch = (failedData?.items ?? []).find((item: FailedImportRow) => item.filename === file.name);
+              if (latestMatch?.reason) {
+                reason = latestMatch.reason;
+              }
+            } catch {
+              // keep original reason
+            }
+            aggregated.rejected.push({ filename: file.name, reason, detected_type: "storage_upload_error" });
+            continue;
+          }
+
           try {
-            // Fallback path when direct-to-storage fails (e.g. missing R2 CORS from browser).
+            // Fallback path only when browser-to-storage upload fails.
             const fallbackFormData = new FormData();
             fallbackFormData.append("files", file);
             const fallbackResponse = await fetch(`${apiBase}/api/tenants/${tenantId}/ingest`, {
@@ -953,9 +1046,54 @@ export default function Home() {
             }
             aggregated.ingested.push(...(fallbackData?.ingested ?? []));
             aggregated.rejected.push(...(fallbackData?.rejected ?? []));
+            aggregated.duplicates.push(...(fallbackData?.duplicates ?? []));
           } catch (fallbackError) {
             const fallbackReason = fallbackError instanceof Error ? fallbackError.message : "Falha no fallback ingest";
-            const reason = `${storageReason}; fallback: ${fallbackReason}`;
+            const loweredFallbackReason = fallbackReason.toLowerCase();
+            let reason =
+              loweredStorageReason.includes("502 bad gateway") ||
+              loweredFallbackReason.includes("502 bad gateway") ||
+              loweredStorageReason.includes("bad gateway") ||
+              loweredFallbackReason.includes("bad gateway")
+                ? "O serviço devolveu um erro temporário de gateway durante o processamento do ficheiro."
+                : loweredStorageReason.includes("socket hang up") ||
+                    loweredFallbackReason.includes("socket hang up") ||
+                    loweredStorageReason.includes("econnreset") ||
+                    loweredFallbackReason.includes("econnreset")
+                  ? "Falha técnica de ligação ao serviço de ingestão durante o upload (socket hang up)."
+                  : loweredStorageReason.includes("timeout") || loweredFallbackReason.includes("timeout")
+                    ? "Tempo limite excedido durante a análise do documento."
+                    : `${storageReason}; fallback: ${fallbackReason}`;
+
+            try {
+              const invoiceResponse = await fetch(`${apiBase}/api/tenants/${tenantId}/invoices`);
+              const invoiceData = await parseResponse(invoiceResponse);
+              const latestInvoiceMatch = (invoiceData?.items ?? []).find((item: Invoice) => item.filename === file.name);
+              if (latestInvoiceMatch) {
+                aggregated.ingested.push(latestInvoiceMatch);
+                if (latestInvoiceMatch.duplicate_candidate_invoice_id) {
+                  aggregated.duplicates.push({
+                    uploaded: latestInvoiceMatch,
+                    existing_invoice_id: latestInvoiceMatch.duplicate_candidate_invoice_id,
+                  });
+                }
+                continue;
+              }
+            } catch {
+              // If invoice lookup fails, continue with failed-import lookup.
+            }
+
+            try {
+              const failedResponse = await fetch(`${apiBase}/api/tenants/${tenantId}/failed-imports`);
+              const failedData = await parseResponse(failedResponse);
+              const latestMatch = (failedData?.items ?? []).find((item: FailedImportRow) => item.filename === file.name);
+              if (latestMatch?.reason) {
+                reason = latestMatch.reason;
+              }
+            } catch {
+              // Keep synthesized reason if failed-import lookup also fails.
+            }
+
             aggregated.rejected.push({ filename: file.name, reason, detected_type: "storage_upload_error" });
           }
         }
@@ -966,8 +1104,13 @@ export default function Home() {
       bumpUploadStep("review");
       void sendUploadTelemetryEvent("review", "enter");
 
+      const ingestedFiles = new Set(
+        (aggregated.ingested as Array<{ filename?: string }>).map((item) => String(item?.filename || "").trim()).filter(Boolean)
+      );
+      const reconciledRejected = aggregated.rejected.filter((item) => !ingestedFiles.has(String(item.filename || "").trim()));
+
       const ingestedCount = aggregated.ingested.length;
-      const rejectedCount = aggregated.rejected.length;
+      const rejectedCount = reconciledRejected.length;
 
       currentStep = "save";
       setUploadStage("save");
@@ -975,13 +1118,28 @@ export default function Home() {
       void sendUploadTelemetryEvent("save", "enter");
 
       const message = `Processados ${ingestedCount} documento(s)${rejectedCount ? ` · ${rejectedCount} rejeitado(s)` : ""}.`;
-      setUploadSuccess(message);
+      setUploadSuccess(
+        rejectedCount
+          ? `${message} Veja abaixo os motivos de rejeição por ficheiro.`
+          : message
+      );
+      setUploadRejected(reconciledRejected);
+      const duplicateCandidate = aggregated.duplicates[0];
+      if (duplicateCandidate) {
+        setDuplicateReview({ uploaded: duplicateCandidate.uploaded, existingId: duplicateCandidate.existing_invoice_id });
+      }
       setFiles(null);
       setFileInputKey((prev) => prev + 1);
 
       setTelemetry((prev) => ({ ...prev, completed: prev.completed + 1 }));
       void sendUploadTelemetryEvent("save", "success", `ingested:${ingestedCount};rejected:${rejectedCount}`);
-      pushToast({ type: "success", title: "Upload concluído", detail: message });
+      pushToast({
+        type: rejectedCount ? "info" : "success",
+        title: rejectedCount ? "Upload concluído com rejeições" : "Upload concluído",
+        detail: rejectedCount
+          ? `${message} Consulte a lista de documentos rejeitados logo abaixo.`
+          : message,
+      });
 
       await refreshQueueData();
       await fetchSystemHealth();
@@ -1072,32 +1230,13 @@ export default function Home() {
     window.localStorage.setItem(TELEMETRY_KEY, JSON.stringify(telemetry));
   }, [telemetry]);
 
-  // Listen for tenant context from parent dashboard (postMessage)
   useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data?.type === "viao-context" && event.data.tenantId) {
-        setTenantId(event.data.tenantId);
-      }
-    };
-    window.addEventListener("message", handleMessage);
-    // Fallback: if no postMessage received within 2s, use "demo" as default
-    const fallbackTimer = window.setTimeout(() => {
-      setTenantId((prev) => prev || "demo");
-    }, 2000);
-    return () => {
-      window.removeEventListener("message", handleMessage);
-      window.clearTimeout(fallbackTimer);
-    };
-  }, []);
-
-  // Load data once tenantId is resolved
-  useEffect(() => {
-    if (!tenantId) return;
+    if (!tenantReady) return;
     void fetchTenantProfile();
     void refreshQueueData();
     void fetchSystemHealth();
     void fetchUploadTelemetrySummary();
-  }, [tenantId, fetchTenantProfile, refreshQueueData, fetchSystemHealth, fetchUploadTelemetrySummary]);
+  }, [tenantReady, fetchTenantProfile, refreshQueueData, fetchSystemHealth, fetchUploadTelemetrySummary]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -1193,12 +1332,56 @@ export default function Home() {
     });
   }, [rows, queueSearchInput, queueVendorFilter, queueStatusFilter, queueSort]);
 
+  const uploadInboxRows = useMemo<UploadInboxRow[]>(() => {
+    const invoiceRows: UploadInboxRow[] = rows.slice(0, 20).map((row) => {
+      const state = invoiceQueueState(row);
+      return {
+        kind: "invoice",
+        id: row.id,
+        filename: row.filename,
+        statusLabel: state === "review" ? "precisa de revisão" : state === "error" ? "erro" : "processada",
+        statusTone: state === "review" ? "warn" : state === "error" ? "error" : "success",
+        vendor: row.vendor,
+        createdAt: row.created_at,
+        invoice: row,
+      };
+    });
+
+    const rejectedRows: UploadInboxRow[] = failedImports.slice(0, 20).map((row) => ({
+      kind: "rejected",
+      id: row.id,
+      filename: row.filename,
+      statusLabel: "rejected",
+      statusTone: "error",
+      reason: row.reason,
+      detectedType: row.detected_type,
+      createdAt: row.created_at,
+    }));
+
+    return [...invoiceRows, ...rejectedRows]
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
+      .slice(0, 20);
+  }, [rows, failedImports]);
+
+  const filteredUploadInboxRows = useMemo(() => {
+    if (uploadListFilter === "all") return uploadInboxRows;
+    return uploadInboxRows.filter((item) => {
+      if (uploadListFilter === "rejected") return item.kind === "rejected";
+      if (uploadListFilter === "review") return item.statusLabel === "precisa de revisão";
+      if (uploadListFilter === "good") return item.statusLabel === "processada";
+      return true;
+    });
+  }, [uploadInboxRows, uploadListFilter]);
+
   const queueSummary = useMemo(() => {
     const review = rows.filter((row) => invoiceQueueState(row) === "review").length;
     const errors = rows.filter((row) => invoiceQueueState(row) === "error").length;
     const processed = rows.filter((row) => invoiceQueueState(row) === "processed").length;
     return { total: rows.length, review, errors, processed };
   }, [rows]);
+
+  const attentionRows = useMemo(() => queueRows.filter((row) => invoiceQueueState(row) !== "processed"), [queueRows]);
+  const processedRows = useMemo(() => queueRows.filter((row) => invoiceQueueState(row) === "processed"), [queueRows]);
 
   const searchResults = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -1257,56 +1440,43 @@ export default function Home() {
       ? "Atualizar fila"
       : "Focar pesquisa";
 
-  // Show loading while waiting for tenant context from parent dashboard
-  if (!tenantId) {
-    return (
-      <div className="app-shell" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "400px" }}>
-        <div style={{ textAlign: "center" }}>
-          <div className="spinner" style={{ margin: "0 auto 1rem", width: 32, height: 32, border: "3px solid #e5e7eb", borderTop: "3px solid #0d9488", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-          <p style={{ color: "#6b7280", fontSize: 14 }}>A obter contexto do dashboard...</p>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="app-shell">
       <header className="top-header">
         <div>
-          <p className="eyebrow">Módulo de Contabilidade</p>
-          <h1>Gestão de Faturas</h1>
-          <p className="subtext">Upload, classificação automática e pesquisa inteligente de documentos fiscais.</p>
+          <p className="eyebrow">ViaContab · UX Pass 1</p>
+          <h1>Contabilidade com fluxo claro</h1>
+          <p className="subtext">Tabs claras, passo-a-passo no upload, fila com bulk actions e pesquisa rápida.</p>
         </div>
-        <div className="shortcut-hints">Atalhos: <kbd>/</kbd> Search · <kbd>u</kbd> Upload · <kbd>g</kbd> <kbd>q</kbd> Queue</div>
+        <div className="shortcut-hints">Atalhos: <kbd>/</kbd> Pesquisar · <kbd>u</kbd> Enviar · <kbd>g</kbd> <kbd>q</kbd> Faturas</div>
+        <div className="inline-state neutral" style={{ marginTop: 10 }}>Tenant atual: <strong>{tenantId || "a aguardar contexto"}</strong></div>
       </header>
 
-      <section className="status-strip">
-        {renderStatusPill("API", health.api, health.api === "ok" ? "online" : "offline")}
-        {renderStatusPill("DB", health.db, health.db === "ok" ? "ready" : "indisponível")}
-        {renderStatusPill("OCR", health.ocr, health.ocrDetail)}
-        <button className="ghost-btn" onClick={() => void fetchSystemHealth()}>
-          Atualizar estado
-        </button>
-      </section>
+      {!tenantReady ? (
+        <section className="card">
+          <h2>A aguardar contexto do tenant</h2>
+          <p className="card-sub">O módulo só é carregado depois de receber o tenant da plataforma principal.</p>
+        </section>
+      ) : (
+        <>
+          <nav className="tabs-nav" aria-label="Navegação principal">
+            <button className={activeTab === "upload" ? "tab active" : "tab"} onClick={() => setActiveTab("upload")}>
+              Enviar
+            </button>
+            <button className={activeTab === "queue" ? "tab active" : "tab"} onClick={() => setActiveTab("queue")}>
+              Faturas
+            </button>
+            <button className={activeTab === "search" ? "tab active" : "tab"} onClick={() => setActiveTab("search")}>
+              Pesquisar
+            </button>
+          </nav>
 
-      <nav className="tabs-nav" aria-label="Navegação principal">
-        <button className={activeTab === "upload" ? "tab active" : "tab"} onClick={() => setActiveTab("upload")}>
-          Upload
-        </button>
-        <button className={activeTab === "queue" ? "tab active" : "tab"} onClick={() => setActiveTab("queue")}>
-          Queue
-        </button>
-        <button className={activeTab === "search" ? "tab active" : "tab"} onClick={() => setActiveTab("search")}>
-          Search
-        </button>
-      </nav>
-
-      <main className="content-grid">
-        {activeTab === "upload" && (
+          <main className="content-grid">
+            {activeTab === "upload" && (
           <>
             <section className="card">
               <h2>Fluxo de upload</h2>
-              <p className="card-sub">Validate → Extract → Review → Save com feedback em tempo real.</p>
+              <p className="card-sub">Validar → Extrair → Rever → Guardar com feedback em tempo real.</p>
 
               <div className="stepper">
                 {UPLOAD_STEPS.map((step) => {
@@ -1331,8 +1501,20 @@ export default function Home() {
                 <div className="progress-fill" style={{ width: `${uploadProgress}%` }} />
               </div>
 
-              <div className="grid-2">
-                <label className="field">
+              <div
+                className={`upload-dropzone ${isDragActive ? "active" : ""}`}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  setIsDragActive(true);
+                }}
+                onDragLeave={() => setIsDragActive(false)}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  setIsDragActive(false);
+                  if (event.dataTransfer.files?.length) setFiles(event.dataTransfer.files);
+                }}
+              >
+                <label className="field" style={{ margin: 0 }}>
                   <span>Documentos (PDF/JPG/PNG/ZIP)</span>
                   <input
                     key={fileInputKey}
@@ -1342,6 +1524,7 @@ export default function Home() {
                     disabled={isUploading}
                   />
                 </label>
+                <div className="dropzone-hint">Arraste ficheiros para aqui ou clique para selecionar.</div>
               </div>
 
               <div className="actions-row">
@@ -1358,6 +1541,8 @@ export default function Home() {
                     setFiles(null);
                     setFileInputKey((prev) => prev + 1);
                     setUploadError("");
+                    setUploadSuccess("");
+                    setUploadRejected([]);
                   }}
                   disabled={isUploading}
                 >
@@ -1366,76 +1551,86 @@ export default function Home() {
               </div>
 
               {uploadError ? <div className="inline-state error">{uploadError}</div> : null}
-              {uploadSuccess ? <div className="inline-state success">{uploadSuccess}</div> : null}
-              {!uploadError && !uploadSuccess ? (
+              {uploadSuccess ? <div className={`inline-state ${uploadRejected.length ? "warn" : "success"}`}>{uploadSuccess}</div> : null}
+              {uploadRejected.length ? (
+                <div className="inline-state warn">
+                  <strong>Documentos rejeitados</strong>
+                  <ul style={{ margin: "0.5rem 0 0", paddingLeft: "1.25rem" }}>
+                    {uploadRejected.map((item, index) => (
+                      <li key={`${item.filename}-${index}`}>
+                        <strong>{item.filename}</strong>: {item.reason}
+                        {item.detected_type ? ` (${item.detected_type})` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {!uploadError && !uploadSuccess && !uploadRejected.length ? (
                 <div className="inline-state neutral">Sem upload recente. Adicione ficheiros e clique em “Processar faturas agora”.</div>
               ) : null}
             </section>
 
-
-
             <section className="card">
-              <h2>Telemetry de fricção (upload funnel)</h2>
-              <p className="card-sub">Drop-off por etapa para guiar próximas melhorias de UX.</p>
+              <h2>Uploads recentes</h2>
+              <p className="card-sub">Ficheiros recentes com estado, motivo de rejeição e ações rápidas.</p>
 
-              <div className="telemetry-grid">
-                <div>
-                  <div className="telemetry-label">Iniciados</div>
-                  <div className="telemetry-value">{telemetry.started}</div>
-                </div>
-                <div>
-                  <div className="telemetry-label">Concluídos</div>
-                  <div className="telemetry-value">{telemetry.completed}</div>
-                </div>
-                <div>
-                  <div className="telemetry-label">Falhados</div>
-                  <div className="telemetry-value">{telemetry.failed}</div>
-                </div>
-                <div>
-                  <div className="telemetry-label">Taxa sucesso</div>
-                  <div className="telemetry-value">
-                    {telemetry.started > 0 ? `${((telemetry.completed / telemetry.started) * 100).toFixed(1)}%` : "—"}
-                  </div>
-                </div>
+              <div className="tabs-nav" style={{ marginBottom: 12 }}>
+                <button className={uploadListFilter === "all" ? "tab active" : "tab"} onClick={() => setUploadListFilter("all")}>Todos</button>
+                <button className={uploadListFilter === "good" ? "tab active" : "tab"} onClick={() => setUploadListFilter("good")}>Processadas</button>
+                <button className={uploadListFilter === "review" ? "tab active" : "tab"} onClick={() => setUploadListFilter("review")}>Em revisão</button>
+                <button className={uploadListFilter === "rejected" ? "tab active" : "tab"} onClick={() => setUploadListFilter("rejected")}>Rejeitadas</button>
               </div>
 
-              <div className="inline-list">
-                <div>Drop em Validate: <strong>{stepDropoff.validateDrop}</strong></div>
-                <div>Drop em Extract: <strong>{stepDropoff.extractDrop}</strong></div>
-                <div>Drop em Review: <strong>{stepDropoff.reviewDrop}</strong></div>
-                <div>Drop em Save: <strong>{stepDropoff.saveDrop}</strong></div>
-              </div>
-
-              <div className="actions-row">
-                <button className="ghost-btn" onClick={() => void fetchUploadTelemetrySummary()}>
-                  Atualizar telemetria do servidor (72h)
-                </button>
-              </div>
-
-              <div className="table-wrap" style={{ marginTop: 10 }}>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Step</th>
-                      <th>Enter</th>
-                      <th>Success</th>
-                      <th>Failure</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {UPLOAD_STEPS.map((step) => (
-                      <tr key={step}>
-                        <td>{getStageLabel(step)}</td>
-                        <td>{serverFunnel[step].enter}</td>
-                        <td>{serverFunnel[step].success}</td>
-                        <td>{serverFunnel[step].failure}</td>
+              {filteredUploadInboxRows.length === 0 ? (
+                <div className="inline-state neutral">Ainda não existem uploads recentes para este filtro.</div>
+              ) : (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Ficheiro</th>
+                        <th>Estado</th>
+                        <th>Motivo</th>
+                        <th>Ações</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {filteredUploadInboxRows.map((item) => (
+                        <tr key={`${item.kind}-${item.id}`}>
+                          <td>
+                            <div style={{ fontWeight: 600 }}>{item.filename}</div>
+                            <div style={{ fontSize: "0.9em", opacity: 0.8 }}>{item.vendor || item.detectedType || "—"}</div>
+                          </td>
+                          <td>
+                            <span className={`badge badge-large ${item.statusTone}`}>{item.statusLabel}</span>
+                          </td>
+                          <td>{item.reason || (item.kind === "invoice" ? "Processado com sucesso" : "—")}</td>
+                          <td>
+                            <div className="actions-inline">
+                              {item.invoice ? (
+                                <>
+                                  <button className="upload-action-btn icon-only-btn" onClick={() => openInvoiceById(item.invoice!.id)} title="Editar informação" aria-label="Editar informação">
+                                    <span aria-hidden="true">✏️</span>
+                                  </button>
+                                  <button className="upload-action-btn icon-only-btn" onClick={() => void openInvoicePdfById(item.invoice!.id)} title="Ver original" aria-label="Ver original">
+                                    <span aria-hidden="true">👁️</span>
+                                  </button>
+                                  <button className="upload-action-btn danger icon-only-btn" onClick={() => queueInvoiceDelete(item.invoice!)} title="Eliminar fatura" aria-label="Eliminar fatura">
+                                    <span aria-hidden="true">🗑️</span>
+                                  </button>
+                                </>
+                              ) : null}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </section>
-          </>
+
+                      </>
         )}
 
         {activeTab === "queue" && (
@@ -1443,14 +1638,14 @@ export default function Home() {
             <section className="card">
               <div className="row-between">
                 <div>
-                  <h2>Queue de faturas</h2>
-                  <p className="card-sub">Filtros + ordenação + bulk actions para reduzir cliques.</p>
+                  <h2>Faturas</h2>
+                  <p className="card-sub">Veja primeiro o que precisa de atenção e depois o que já está processado.</p>
                 </div>
                 <div className="badge-row">
-                  <span className="badge neutral">total {queueSummary.total}</span>
-                  <span className="badge warn">review {queueSummary.review}</span>
-                  <span className="badge success">processadas {queueSummary.processed}</span>
-                  <span className="badge error">erros {queueSummary.errors}</span>
+                  <span className="badge neutral">Total {queueSummary.total}</span>
+                  <span className="badge warn">Precisam de atenção {queueSummary.review}</span>
+                  <span className="badge success">Processadas {queueSummary.processed}</span>
+                  <span className="badge error">Erros {queueSummary.errors}</span>
                 </div>
               </div>
 
@@ -1503,7 +1698,7 @@ export default function Home() {
 
               <div className="actions-row">
                 <button className="ghost-btn" onClick={() => void refreshQueueData()} disabled={isQueueLoading}>
-                  {isQueueLoading ? "A atualizar..." : "Atualizar queue"}
+                  {isQueueLoading ? "A atualizar..." : "Atualizar faturas"}
                 </button>
                 <button className="danger-btn" disabled={selectedInvoiceIds.length === 0} onClick={handleBulkDelete}>
                   Apagar selecionadas ({selectedInvoiceIds.length})
@@ -1524,80 +1719,103 @@ export default function Home() {
               ) : queueRows.length === 0 ? (
                 <div className="inline-state neutral">Sem resultados para os filtros atuais.</div>
               ) : (
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>
-                          <input
-                            type="checkbox"
-                            checked={allVisibleSelected}
-                            onChange={(event) => {
-                              if (event.target.checked) {
-                                setSelectedInvoiceIds(queueRows.map((row) => row.id));
-                              } else {
-                                setSelectedInvoiceIds([]);
-                              }
-                            }}
-                            aria-label="Selecionar todos"
-                          />
-                        </th>
-                        <th>Estado</th>
-                        <th>Fornecedor</th>
-                        <th>Fatura</th>
-                        <th>Total</th>
-                        <th>Confiança</th>
-                        <th>Data</th>
-                        <th>Ações</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {queueRows.map((row) => {
-                        const state = invoiceQueueState(row);
-                        const stateLabel = state === "review" ? "review" : state === "error" ? "erro" : "ok";
-                        const currency = row.currency || "EUR";
-                        const isDuplicateCandidate = String(row.notes || "").includes("DUPLICATE_CANDIDATE");
-
-                        return (
-                          <tr key={row.id} className={isDuplicateCandidate ? "queue-row-duplicate" : undefined}>
-                            <td>
-                              <input
-                                type="checkbox"
-                                checked={selectedInvoiceIds.includes(row.id)}
-                                onChange={(event) => {
-                                  setSelectedInvoiceIds((prev) => {
-                                    if (event.target.checked) return [...prev, row.id];
-                                    return prev.filter((id) => id !== row.id);
-                                  });
-                                }}
-                                aria-label={`Selecionar ${row.filename}`}
-                              />
-                            </td>
-                            <td>
-                              <span className={`badge ${state === "review" ? "warn" : state === "error" ? "error" : "success"}`}>{stateLabel}</span>
-                              {isDuplicateCandidate ? <span className="badge warn" style={{ marginLeft: 6 }}>duplicada?</span> : null}
-                            </td>
-                            <td>{row.vendor || "—"}</td>
-                            <td>{row.invoice_number || row.filename}</td>
-                            <td>{formatMoney(row.total, currency)}</td>
-                            <td>{row.confidence_score == null ? "—" : `${Number(row.confidence_score).toFixed(1)}%`}</td>
-                            <td>{formatDate(row.created_at)}</td>
-                            <td>
-                              <div className="actions-inline">
-                                <button className="ghost-btn" onClick={() => openInvoiceDetail(row)}>
-                                  Abrir e editar
-                                </button>
-                                <button className="danger-btn" onClick={() => queueInvoiceDelete(row)}>
-                                  Apagar
-                                </button>
-                              </div>
-                            </td>
+                <>
+                  <h3 style={{ marginTop: 0 }}>Precisa de atenção</h3>
+                  {attentionRows.length === 0 ? (
+                    <div className="inline-state success">Nenhuma fatura pendente de atenção.</div>
+                  ) : (
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Estado</th>
+                            <th>Leitura</th>
+                            <th>Fornecedor</th>
+                            <th>Fatura</th>
+                            <th>Total</th>
+                            <th>Data</th>
+                            <th>Ações</th>
                           </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                        </thead>
+                        <tbody>
+                          {attentionRows.map((row) => {
+                            const state = invoiceQueueState(row);
+                            const stateLabel = state === "review" ? "precisa de atenção" : "erro";
+                            const currency = row.currency || "EUR";
+                            const isDuplicateCandidate = Boolean(row.duplicate_candidate_invoice_id);
+                            const confidence = row.confidence_score == null ? null : Number(row.confidence_score);
+                            const readingLabel = confidence == null ? "sem leitura" : confidence >= 95 ? "leitura alta" : confidence >= 80 ? "leitura média" : "leitura baixa";
+                            const readingTone = confidence == null ? "neutral" : confidence >= 95 ? "success" : confidence >= 80 ? "warn" : "error";
+                            return (
+                              <tr key={row.id} className={isDuplicateCandidate ? "queue-row-duplicate" : undefined}>
+                                <td>
+                                  <span className={`badge ${state === "review" ? "warn" : "error"}`}>{stateLabel}</span>
+                                  {isDuplicateCandidate ? <span className="badge warn" style={{ marginLeft: 6 }}>duplicada?</span> : null}
+                                </td>
+                                <td><span className={`badge ${readingTone}`}>{readingLabel}</span></td>
+                                <td>{row.vendor || "—"}</td>
+                                <td>{row.invoice_number || row.filename}</td>
+                                <td>{formatMoney(row.total, currency)}</td>
+                                <td>{formatDate(row.created_at)}</td>
+                                <td>
+                                  <div className="actions-inline">
+                                    <button className="upload-action-btn icon-only-btn" onClick={() => openInvoiceDetail(row)} title="Editar" aria-label="Editar">✏️</button>
+                                    <button className="upload-action-btn icon-only-btn" onClick={() => void openInvoicePdfById(row.id)} title="Ver original" aria-label="Ver original">👁️</button>
+                                    <button className="upload-action-btn danger icon-only-btn" onClick={() => queueInvoiceDelete(row)} title="Eliminar" aria-label="Eliminar">🗑️</button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  <h3 style={{ marginTop: 18 }}>Processadas</h3>
+                  {processedRows.length === 0 ? (
+                    <div className="inline-state neutral">Ainda não existem faturas processadas para estes filtros.</div>
+                  ) : (
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Leitura</th>
+                            <th>Fornecedor</th>
+                            <th>Fatura</th>
+                            <th>Total</th>
+                            <th>Data</th>
+                            <th>Ações</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {processedRows.map((row) => {
+                            const currency = row.currency || "EUR";
+                            const confidence = row.confidence_score == null ? null : Number(row.confidence_score);
+                            const readingLabel = confidence == null ? "sem leitura" : confidence >= 95 ? "leitura alta" : confidence >= 80 ? "leitura média" : "leitura baixa";
+                            const readingTone = confidence == null ? "neutral" : confidence >= 95 ? "success" : confidence >= 80 ? "warn" : "error";
+                            return (
+                              <tr key={row.id}>
+                                <td><span className={`badge ${readingTone}`}>{readingLabel}</span></td>
+                                <td>{row.vendor || "—"}</td>
+                                <td>{row.invoice_number || row.filename}</td>
+                                <td>{formatMoney(row.total, currency)}</td>
+                                <td>{formatDate(row.created_at)}</td>
+                                <td>
+                                  <div className="actions-inline">
+                                    <button className="upload-action-btn icon-only-btn" onClick={() => openInvoiceDetail(row)} title="Editar" aria-label="Editar">✏️</button>
+                                    <button className="upload-action-btn icon-only-btn" onClick={() => void openInvoicePdfById(row.id)} title="Ver original" aria-label="Ver original">👁️</button>
+                                    <button className="upload-action-btn danger icon-only-btn" onClick={() => queueInvoiceDelete(row)} title="Eliminar" aria-label="Eliminar">🗑️</button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
               )}
             </section>
 
@@ -1612,6 +1830,7 @@ export default function Home() {
                       <tr>
                         <th>Documento</th>
                         <th>Motivo</th>
+                        <th>Tipo detetado</th>
                         <th>Tentativas</th>
                         <th>Data</th>
                         <th>Ações</th>
@@ -1621,7 +1840,11 @@ export default function Home() {
                       {failedImports.map((row) => (
                         <tr key={row.id}>
                           <td>{row.filename}</td>
-                          <td>{row.reason}</td>
+                          <td>
+                            <div>{row.reason}</div>
+                            <div style={{ fontSize: "0.9em", opacity: 0.8, marginTop: 4 }}>{guidanceForError(row.reason)}</div>
+                          </td>
+                          <td>{row.detected_type || "—"}</td>
                           <td>{row.retry_count}</td>
                           <td>{formatDate(row.created_at)}</td>
                           <td>
@@ -1642,25 +1865,195 @@ export default function Home() {
               )}
             </section>
 
+            {detailInvoice && (
+              <div className="modal-backdrop">
+                <section ref={detailSectionRef} className="card queue-detail modal-card" onClick={(event) => event.stopPropagation()}>
+                  <div className="row-between">
+                  <div>
+                    <div className="eyebrow">Editor de fatura</div>
+                    <h2>Detalhe da fatura</h2>
+                    <p className="card-sub">Corrija os dados extraídos, ajuste linhas e guarde as alterações.</p>
+                  </div>
+                  <button
+                    className="ghost-btn"
+                    onClick={() => {
+                      setDetailInvoice(null);
+                      setDetailForm(emptyForm());
+                      setDetailLineItems([]);
+                      pushToast({ type: "info", title: "Editor fechado" });
+                    }}
+                  >
+                    Fechar
+                  </button>
+                  </div>
+
+                <details open>
+                  <summary>Dados principais</summary>
+                  <div className="grid-3">
+                    <label className="field">
+                      <span>Fornecedor</span>
+                      <input value={detailForm.vendor} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => setDetailForm((prev) => ({ ...prev, vendor: event.target.value }))} />
+                    </label>
+                    <label className="field">
+                      <span>Categoria</span>
+                      <input value={detailForm.category} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => setDetailForm((prev) => ({ ...prev, category: event.target.value }))} />
+                    </label>
+                    <label className="field">
+                      <span>Número</span>
+                      <input value={detailForm.invoice_number} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => setDetailForm((prev) => ({ ...prev, invoice_number: event.target.value }))} />
+                    </label>
+                  </div>
+                </details>
+
+                <details>
+                  <summary>Fiscal e datas</summary>
+                  <div className="grid-3">
+                    <label className="field">
+                      <span>Data fatura</span>
+                      <input value={detailForm.invoice_date} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => setDetailForm((prev) => ({ ...prev, invoice_date: event.target.value }))} />
+                    </label>
+                    <label className="field">
+                      <span>Data vencimento</span>
+                      <input value={detailForm.due_date} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => setDetailForm((prev) => ({ ...prev, due_date: event.target.value }))} />
+                    </label>
+                    <label className="field">
+                      <span>NIF fornecedor</span>
+                      <input value={detailForm.supplier_nif} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => setDetailForm((prev) => ({ ...prev, supplier_nif: event.target.value }))} />
+                    </label>
+                  </div>
+                </details>
+
+                <details>
+                  <summary>Totais e notas</summary>
+                  <div className="grid-3">
+                    <label className="field">
+                      <span>Subtotal</span>
+                      <input value={detailForm.subtotal} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => setDetailForm((prev) => ({ ...prev, subtotal: event.target.value }))} />
+                    </label>
+                    <label className="field">
+                      <span>IVA</span>
+                      <input value={detailForm.tax} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => setDetailForm((prev) => ({ ...prev, tax: event.target.value }))} />
+                    </label>
+                    <label className="field">
+                      <span>Total</span>
+                      <input value={detailForm.total} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => setDetailForm((prev) => ({ ...prev, total: event.target.value }))} />
+                    </label>
+                  </div>
+                  <label className="field" style={{ marginTop: 10 }}>
+                    <span>Notas</span>
+                    <textarea rows={3} value={detailForm.notes} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => setDetailForm((prev) => ({ ...prev, notes: event.target.value }))} />
+                  </label>
+                </details>
+
+                <div className="actions-row">
+                  <button className="primary-btn" onClick={() => void saveInvoiceDetail()} disabled={isSavingDetail}>
+                    {isSavingDetail ? "A guardar..." : "Guardar alterações"}
+                  </button>
+                </div>
+                <div className="inline-state neutral">Ao guardar, a fatura passa para estado <strong>corrigido</strong> e sai da revisão.</div>
+
+                <details>
+                  <summary>Linhas da fatura ({detailLineItems.length})</summary>
+
+                  <div className="actions-row" style={{ marginTop: 8 }}>
+                    <button className="ghost-btn" onClick={addDetailLineItem} type="button">
+                      + Adicionar linha
+                    </button>
+                  </div>
+
+                  {detailLineItems.length > 0 ? (
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Código</th>
+                            <th>Descrição</th>
+                            <th>Qtd</th>
+                            <th>Preço</th>
+                            <th>Subtotal</th>
+                            <th>IVA</th>
+                            <th>Total</th>
+                            <th>Taxa %</th>
+                            <th>Ações</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {detailLineItems.map((line, index) => (
+                            <tr key={line.id ?? `new-${index}`}>
+                              <td>
+                                <input value={line.code} onChange={(event) => handleDetailLineItemChange(index, "code", event.target.value)} style={{ width: 90 }} />
+                              </td>
+                              <td>
+                                <textarea
+                                  rows={2}
+                                  value={line.description}
+                                  onChange={(event) => handleDetailLineItemChange(index, "description", event.target.value)}
+                                  style={{ minWidth: 220, width: "100%", resize: "vertical" }}
+                                />
+                              </td>
+                              <td>
+                                <input value={line.quantity} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => handleDetailLineItemChange(index, "quantity", event.target.value)} style={{ width: 70 }} />
+                              </td>
+                              <td>
+                                <input value={line.unit_price} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => handleDetailLineItemChange(index, "unit_price", event.target.value)} style={{ width: 90 }} />
+                              </td>
+                              <td>
+                                <input value={line.line_subtotal} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => handleDetailLineItemChange(index, "line_subtotal", event.target.value)} style={{ width: 90 }} />
+                              </td>
+                              <td>
+                                <input value={line.line_tax_amount} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => handleDetailLineItemChange(index, "line_tax_amount", event.target.value)} style={{ width: 90 }} />
+                              </td>
+                              <td>
+                                <input value={line.line_total} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => handleDetailLineItemChange(index, "line_total", event.target.value)} style={{ width: 90 }} />
+                              </td>
+                              <td>
+                                <input value={line.tax_rate} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} onChange={(event) => handleDetailLineItemChange(index, "tax_rate", event.target.value)} style={{ width: 70 }} />
+                              </td>
+                              <td>
+                                <div className="actions-inline">
+                                  <button className="ghost-btn icon-only-btn" type="button" onClick={() => insertDetailLineItemAt(index)} title="Inserir acima" aria-label="Inserir acima">
+                                    ⤒
+                                  </button>
+                                  <button className="ghost-btn icon-only-btn" type="button" onClick={() => insertDetailLineItemAt(index + 1)} title="Inserir abaixo" aria-label="Inserir abaixo">
+                                    ⤓
+                                  </button>
+                                  <button className="danger-btn icon-only-btn" type="button" onClick={() => removeDetailLineItem(index)} title="Remover linha" aria-label="Remover linha">
+                                    🗑️
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="inline-state neutral">Sem linhas extraídas. Pode adicionar manualmente.</div>
+                  )}
+                </details>
+                </section>
+              </div>
+            )}
             <section className="card queue-support-review">
-              <h2>Revisão e bloqueios</h2>
-              <p className="card-sub">Mostra exatamente o que está pendente e permite abrir a fatura para limpar.</p>
-              <div className="telemetry-grid">
-                <div>
-                  <div className="telemetry-label">Linhas em revisão</div>
-                  <div className="telemetry-value">{reviewLineItems.length}</div>
+              <details>
+                <summary>Revisão e bloqueios ({reviewLineItems.length} linhas, {automationBlockers.length} bloqueios)</summary>
+                <p className="card-sub">Detalhes técnicos para validar o que ainda precisa de correção.</p>
+                <div className="telemetry-grid">
+                  <div>
+                    <div className="telemetry-label">Linhas em revisão</div>
+                    <div className="telemetry-value">{reviewLineItems.length}</div>
+                  </div>
+                  <div>
+                    <div className="telemetry-label">Bloqueios</div>
+                    <div className="telemetry-value">{automationBlockers.length}</div>
+                  </div>
                 </div>
-                <div>
-                  <div className="telemetry-label">Bloqueios</div>
-                  <div className="telemetry-value">{automationBlockers.length}</div>
+
+                <div className="inline-state neutral" style={{ marginTop: 10 }}>
+                  Para remover da lista: abra a fatura, corrija os campos/linhas e guarde. O item sai automaticamente da revisão.
                 </div>
-              </div>
 
-              <div className="inline-state neutral" style={{ marginTop: 10 }}>
-                Para remover da lista: abra a fatura, corrija os campos/linhas e guarde. O item sai automaticamente da revisão.
-              </div>
-
-              <h3 style={{ marginTop: 14 }}>Linhas em revisão</h3>
+                <h3 style={{ marginTop: 14 }}>Linhas em revisão</h3>
               {reviewLineItems.length === 0 ? (
                 <div className="inline-state success">Sem linhas pendentes de revisão.</div>
               ) : (
@@ -1694,196 +2087,40 @@ export default function Home() {
                 </div>
               )}
 
-              <h3 style={{ marginTop: 14 }}>Bloqueios</h3>
-              {automationBlockers.length === 0 ? (
-                <div className="inline-state success">Sem bloqueios de automação no recorte atual.</div>
-              ) : (
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Fatura</th>
-                        <th>Código</th>
-                        <th>Mensagem</th>
-                        <th>Ação</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {automationBlockers.slice(0, 20).map((blocker, index) => (
-                        <tr key={`${blocker.invoice_id}-${index}`}>
-                          <td>{blocker.invoice_number || blocker.filename}</td>
-                          <td>{blocker.code}</td>
-                          <td>{blocker.message}</td>
-                          <td>
-                            <button className="ghost-btn" onClick={() => void openInvoicePdfById(blocker.invoice_id)} title="Abrir PDF da fatura">
-                              👁️
-                            </button>
-                          </td>
+                <h3 style={{ marginTop: 14 }}>Bloqueios</h3>
+                {automationBlockers.length === 0 ? (
+                  <div className="inline-state success">Sem bloqueios de automação no recorte atual.</div>
+                ) : (
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Fatura</th>
+                          <th>Código</th>
+                          <th>Mensagem</th>
+                          <th>Ação</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+                      </thead>
+                      <tbody>
+                        {automationBlockers.slice(0, 20).map((blocker, index) => (
+                          <tr key={`${blocker.invoice_id}-${index}`}>
+                            <td>{blocker.invoice_number || blocker.filename}</td>
+                            <td>{blocker.code}</td>
+                            <td>{blocker.message}</td>
+                            <td>
+                              <button className="ghost-btn" onClick={() => void openInvoicePdfById(blocker.invoice_id)} title="Abrir PDF da fatura">
+                                👁️
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </details>
             </section>
 
-            {detailInvoice && (
-              <section ref={detailSectionRef} className="card queue-detail">
-                <div className="row-between">
-                  <div>
-                    <h2>Detalhe da fatura</h2>
-                    <p className="card-sub">Campos agrupados + disclosure para reduzir densidade.</p>
-                  </div>
-                  <button
-                    className="ghost-btn"
-                    onClick={() => {
-                      setDetailInvoice(null);
-                      setDetailForm(emptyForm());
-                      setDetailLineItems([]);
-                    }}
-                  >
-                    Fechar
-                  </button>
-                </div>
-
-                <details open>
-                  <summary>Dados principais</summary>
-                  <div className="grid-3">
-                    <label className="field">
-                      <span>Fornecedor</span>
-                      <input value={detailForm.vendor} onChange={(event) => setDetailForm((prev) => ({ ...prev, vendor: event.target.value }))} />
-                    </label>
-                    <label className="field">
-                      <span>Categoria</span>
-                      <input value={detailForm.category} onChange={(event) => setDetailForm((prev) => ({ ...prev, category: event.target.value }))} />
-                    </label>
-                    <label className="field">
-                      <span>Número</span>
-                      <input value={detailForm.invoice_number} onChange={(event) => setDetailForm((prev) => ({ ...prev, invoice_number: event.target.value }))} />
-                    </label>
-                  </div>
-                </details>
-
-                <details>
-                  <summary>Fiscal e datas</summary>
-                  <div className="grid-3">
-                    <label className="field">
-                      <span>Data fatura</span>
-                      <input value={detailForm.invoice_date} onChange={(event) => setDetailForm((prev) => ({ ...prev, invoice_date: event.target.value }))} />
-                    </label>
-                    <label className="field">
-                      <span>Data vencimento</span>
-                      <input value={detailForm.due_date} onChange={(event) => setDetailForm((prev) => ({ ...prev, due_date: event.target.value }))} />
-                    </label>
-                    <label className="field">
-                      <span>NIF fornecedor</span>
-                      <input value={detailForm.supplier_nif} onChange={(event) => setDetailForm((prev) => ({ ...prev, supplier_nif: event.target.value }))} />
-                    </label>
-                  </div>
-                </details>
-
-                <details>
-                  <summary>Totais e notas</summary>
-                  <div className="grid-3">
-                    <label className="field">
-                      <span>Subtotal</span>
-                      <input value={detailForm.subtotal} onChange={(event) => setDetailForm((prev) => ({ ...prev, subtotal: event.target.value }))} />
-                    </label>
-                    <label className="field">
-                      <span>IVA</span>
-                      <input value={detailForm.tax} onChange={(event) => setDetailForm((prev) => ({ ...prev, tax: event.target.value }))} />
-                    </label>
-                    <label className="field">
-                      <span>Total</span>
-                      <input value={detailForm.total} onChange={(event) => setDetailForm((prev) => ({ ...prev, total: event.target.value }))} />
-                    </label>
-                  </div>
-                  <label className="field" style={{ marginTop: 10 }}>
-                    <span>Notas</span>
-                    <textarea rows={3} value={detailForm.notes} onChange={(event) => setDetailForm((prev) => ({ ...prev, notes: event.target.value }))} />
-                  </label>
-                </details>
-
-                <div className="actions-row">
-                  <button className="primary-btn" onClick={() => void saveInvoiceDetail()} disabled={isSavingDetail}>
-                    {isSavingDetail ? "A guardar..." : "Guardar alterações"}
-                  </button>
-                </div>
-                <div className="inline-state neutral">Ao guardar, a fatura passa para estado <strong>corrigido</strong> e sai da revisão.</div>
-
-                <details>
-                  <summary>Linhas da fatura ({detailLineItems.length})</summary>
-
-                  <div className="actions-row" style={{ marginTop: 8 }}>
-                    <button className="ghost-btn" onClick={addDetailLineItem} type="button">
-                      + Adicionar linha
-                    </button>
-                  </div>
-
-                  {detailLineItems.length > 0 ? (
-                    <div className="table-wrap">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Código</th>
-                            <th>Descrição</th>
-                            <th>Qtd</th>
-                            <th>Preço</th>
-                            <th>Subtotal</th>
-                            <th>IVA</th>
-                            <th>Total</th>
-                            <th>Taxa %</th>
-                            <th>Ação</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {detailLineItems.map((line, index) => (
-                            <tr key={line.id ?? `new-${index}`}>
-                              <td>
-                                <input value={line.code} onChange={(event) => handleDetailLineItemChange(index, "code", event.target.value)} style={{ width: 90 }} />
-                              </td>
-                              <td>
-                                <textarea
-                                  rows={2}
-                                  value={line.description}
-                                  onChange={(event) => handleDetailLineItemChange(index, "description", event.target.value)}
-                                  style={{ minWidth: 220, width: "100%", resize: "vertical" }}
-                                />
-                              </td>
-                              <td>
-                                <input value={line.quantity} onChange={(event) => handleDetailLineItemChange(index, "quantity", event.target.value)} style={{ width: 70 }} />
-                              </td>
-                              <td>
-                                <input value={line.unit_price} onChange={(event) => handleDetailLineItemChange(index, "unit_price", event.target.value)} style={{ width: 90 }} />
-                              </td>
-                              <td>
-                                <input value={line.line_subtotal} onChange={(event) => handleDetailLineItemChange(index, "line_subtotal", event.target.value)} style={{ width: 90 }} />
-                              </td>
-                              <td>
-                                <input value={line.line_tax_amount} onChange={(event) => handleDetailLineItemChange(index, "line_tax_amount", event.target.value)} style={{ width: 90 }} />
-                              </td>
-                              <td>
-                                <input value={line.line_total} onChange={(event) => handleDetailLineItemChange(index, "line_total", event.target.value)} style={{ width: 90 }} />
-                              </td>
-                              <td>
-                                <input value={line.tax_rate} onChange={(event) => handleDetailLineItemChange(index, "tax_rate", event.target.value)} style={{ width: 70 }} />
-                              </td>
-                              <td>
-                                <button className="danger-btn" type="button" onClick={() => removeDetailLineItem(index)}>
-                                  Remover
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : (
-                    <div className="inline-state neutral">Sem linhas extraídas. Pode adicionar manualmente.</div>
-                  )}
-                </details>
-              </section>
-            )}
           </>
         )}
 
@@ -1918,54 +2155,66 @@ export default function Home() {
               )}
             </section>
 
-            <section className="card">
-              <h2>Search assistida (chat)</h2>
-              <p className="card-sub">Perguntas em linguagem natural com referências de faturas.</p>
-
-              <div className="chat-box">
-                {chatHistory.length === 0 ? (
-                  <div className="inline-state neutral">Sem conversas ainda. Ex.: “Quanto gastei com Via Oceânica este mês?”</div>
-                ) : (
-                  chatHistory.map((message) => (
-                    <div key={message.id} className={`chat-message ${message.role}`}>
-                      <div>{message.text}</div>
-                      {message.references && message.references.length > 0 ? (
-                        <div className="chat-ref">
-                          {message.references.map((reference) => (
-                            <span key={`${message.id}-${reference.invoice_id}`}>
-                              #{reference.invoice_number ?? reference.invoice_id.slice(0, 8)} ({reference.vendor ?? "Fornecedor"})
-                            </span>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  ))
-                )}
-                {isChatLoading ? <div className="chat-loading">A pensar...</div> : null}
-              </div>
-
-              {chatError ? <div className="inline-state error">{chatError}</div> : null}
-
-              <label className="field">
-                <span>Pergunta</span>
-                <textarea
-                  rows={3}
-                  value={chatInput}
-                  onChange={(event) => setChatInput(event.target.value)}
-                  placeholder="Pergunte sobre totais, fornecedores, IVA, etc."
-                  disabled={isChatLoading}
-                />
-              </label>
-
-              <div className="actions-row">
-                <button className="primary-btn" onClick={() => void handleSendChat()} disabled={isChatLoading || !chatInput.trim()}>
-                  {isChatLoading ? "A pensar..." : "Perguntar"}
-                </button>
-              </div>
-            </section>
           </>
         )}
-      </main>
+          </main>
+        </>
+      )}
+
+      {duplicateReview ? (
+        <div className="modal-backdrop" onClick={() => setDuplicateReview(null)}>
+          <section className="card modal-card" onClick={(event) => event.stopPropagation()}>
+            <div className="row-between">
+              <div>
+                <div className="eyebrow">Possível duplicado</div>
+                <h2>Esta fatura parece ser duplicada</h2>
+                <p className="card-sub">Compare a nova fatura com a já existente e escolha como quer continuar.</p>
+              </div>
+              <button className="ghost-btn" onClick={() => setDuplicateReview(null)}>Fechar</button>
+            </div>
+
+            <div className="grid-2" style={{ marginTop: 12 }}>
+              <div className="inline-state warn">
+                <strong>Nova fatura</strong>
+                <div>{duplicateReview.uploaded.filename}</div>
+                <div>{duplicateReview.uploaded.vendor || "—"}</div>
+                <div>{duplicateReview.uploaded.invoice_number || "—"}</div>
+              </div>
+              <div className="inline-state neutral">
+                <strong>Fatura existente</strong>
+                <div>ID: {duplicateReview.existingId}</div>
+              </div>
+            </div>
+
+            <div className="actions-row" style={{ marginTop: 16 }}>
+              <button className="ghost-btn" onClick={() => void openInvoicePdfById(duplicateReview.uploaded.id)}>
+                Ver nova fatura
+              </button>
+              <button className="ghost-btn" onClick={() => void openInvoicePdfById(duplicateReview.existingId)}>
+                Ver fatura existente
+              </button>
+              <button
+                className="primary-btn"
+                onClick={() => {
+                  setDuplicateReview(null);
+                  openInvoiceById(duplicateReview.uploaded.id);
+                }}
+              >
+                Guardar como nova
+              </button>
+              <button
+                className="danger-btn"
+                onClick={() => {
+                  queueInvoiceDelete(duplicateReview.uploaded);
+                  setDuplicateReview(null);
+                }}
+              >
+                Marcar como duplicada e descartar
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       <aside className="toasts">
         {toasts.map((toast) => (

@@ -32,8 +32,6 @@ jobs:
           - services/gateway
           - services/ai-service
           - services/billing
-          - modules/restauracao
-          - modules/gestao-email
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -62,10 +60,6 @@ jobs:
             context: services/ai-service
           - name: billing
             context: services/billing
-          - name: mod-restauracao
-            context: modules/restauracao
-          - name: mod-gestao-email
-            context: modules/gestao-email
     steps:
       - uses: actions/checkout@v4
       - name: Build Docker image

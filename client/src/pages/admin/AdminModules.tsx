@@ -7,19 +7,19 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Switch } from "@/components/ui/switch";
-import { trpc } from "@/lib/trpc";
+import { useQuery, useMutation, useDynamicMutation, apiFetch } from "@/hooks/useApi";
 import {
   Puzzle, Plus, Pencil, Trash2, UtensilsCrossed, Mail, Receipt, Brain,
-  Globe, Package, Copy, Check, ChevronDown, ChevronUp, Server, Monitor,
+  Globe, Package, Copy, Check, Server, Monitor,
   FileCode, Database, Settings, CheckCircle2, Circle, ClipboardList,
   Layers, BarChart3, ShieldCheck, Bell, CreditCard, Briefcase,
   FileText, Users, Zap, Wrench, BookOpen, Camera, Music, Map, Calendar,
   MessageSquare, ShoppingCart, Truck, Heart, Star, Download
 } from "lucide-react";
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useLocation } from "wouter";
 
 // ─── Icon Registry ──────────────────────────────────────────────────
 const iconMap: Record<string, React.ElementType> = {
@@ -87,33 +87,43 @@ const capabilityOptions = [
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
-/** Convert a Portuguese module name to a kebab-case module_key */
 function nameToSlug(name: string): string {
   return name
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // remove accents
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, "") // remove special chars
+    .replace(/[^a-z0-9\s-]/g, "")
     .trim()
-    .replace(/\s+/g, "-") // spaces to hyphens
-    .replace(/-+/g, "-"); // collapse multiple hyphens
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-");
 }
 
-/** Determine the next available port based on existing modules */
 function getNextPort(modules: any[]): number {
   const usedPorts = modules
     .map(m => {
-      const match = m.backendUrl?.match(/:(\d+)/);
+      const url = m.backendServiceUrl || m.backend_service_url || "";
+      const match = url.match(/:(\d+)/);
       return match ? parseInt(match[1]) : null;
     })
     .filter((p): p is number => p !== null);
-  // Known reserved ports: 3000 (gateway/shell), 3001 (shell), 4000 (platform-core), 4010 (ai), 4020 (billing)
   const allUsed = new Set([...usedPorts, 3000, 3001, 4000, 4010, 4020]);
   let port = 4001;
   while (allUsed.has(port)) port++;
   return port;
 }
 
-// ─── Types ──────────────────────────────────────────────────────────
+// Normalize VPS module record (camelCase from drizzle) to our form shape
+function normalizeModule(mod: any) {
+  return {
+    ...mod,
+    slug: mod.moduleKey || mod.module_key || "",
+    backendUrl: mod.backendServiceUrl || mod.backend_service_url || "",
+    frontendUrl: mod.frontendUrl || "",
+    mountType: mod.frontendMountType || mod.frontend_mount_type || "iframe",
+    status: mod.status || "active",
+    icon: mod.icon || "Puzzle",
+    description: mod.description || "",
+  };
+}
 
 type ModuleForm = {
   name: string;
@@ -252,7 +262,6 @@ function DockerComposePreview({ form }: { form: ModuleForm }) {
       retries: 3`;
   }
 
-  // Gateway env var
   yaml += `
 
   # ─── Add to gateway service environment: ──────────────────────
@@ -377,8 +386,6 @@ const moduleIconMap = {
   );
 }
 
-// ─── Integration Checklist ──────────────────────────────────────────
-
 function IntegrationChecklist({ form }: { form: ModuleForm }) {
   const isIframe = form.mountType === "iframe";
   const isSeparateDb = form.databaseMode === "separate";
@@ -400,7 +407,7 @@ function IntegrationChecklist({ form }: { form: ModuleForm }) {
     {
       title: "Base de Dados",
       items: [
-        { text: `Criar init script deploy/init-${form.slug.replace(/-/g, "-")}-db.sh`, always: false, condition: isSeparateDb },
+        { text: `Criar init script deploy/init-${form.slug}-db.sh`, always: false, condition: isSeparateDb },
         { text: "Montar init script nos volumes do postgres", always: false, condition: isSeparateDb },
         { text: "Criar tabelas/migrações da base de dados", always: true },
       ],
@@ -472,25 +479,48 @@ function IntegrationChecklist({ form }: { form: ModuleForm }) {
 // ─── Main Component ─────────────────────────────────────────────────
 
 export default function AdminModules() {
-  const utils = trpc.useUtils();
-  const { data: modules, isLoading } = trpc.admin.allModules.useQuery();
+  const [, setLocation] = useLocation();
 
-  const createMut = trpc.admin.createModule.useMutation({
-    onSuccess: () => { utils.admin.allModules.invalidate(); toast.success("Módulo criado com sucesso"); },
-    onError: (e) => toast.error(e.message),
+  // VPS registry routes: GET /api/platform/registry/modules
+  const { data: rawModules, isLoading, refetch } = useQuery<any[]>("/api/platform/registry/modules");
+
+  // VPS registry: POST /api/platform/registry/modules (uses snake_case body)
+  const createMut = useMutation<any, any>("/api/platform/registry/modules", "POST", {
+    onSuccess: () => { refetch(); toast.success("Módulo criado com sucesso"); },
+    onError: (e: any) => toast.error(e.message),
   });
-  const updateMut = trpc.admin.updateModule.useMutation({
-    onSuccess: () => { utils.admin.allModules.invalidate(); toast.success("Módulo atualizado"); },
-    onError: (e) => toast.error(e.message),
+  // VPS registry: PUT /api/platform/registry/modules/:key (uses snake_case body)
+  const updateDynMut = useDynamicMutation("PUT", {
+    onSuccess: () => { refetch(); toast.success("Módulo atualizado"); },
+    onError: (e: any) => toast.error(e.message),
   });
-  const deleteMut = trpc.admin.deleteModule.useMutation({
-    onSuccess: () => { utils.admin.allModules.invalidate(); toast.success("Módulo eliminado"); },
-    onError: (e) => toast.error(e.message),
+  // VPS registry: DELETE /api/platform/registry/modules/:key
+  const deleteDynMut = useDynamicMutation("DELETE", {
+    onSuccess: () => { refetch(); toast.success("Módulo eliminado"); },
+    onError: (e: any) => toast.error(e.message),
   });
-  const scaffoldMut = trpc.admin.generateScaffold.useMutation({
-    onSuccess: (data) => {
+
+  // Scaffold download via REST
+  const [scaffoldPending, setScaffoldPending] = useState(false);
+  const handleDownloadScaffold = async (moduleForm: ModuleForm) => {
+    setScaffoldPending(true);
+    try {
+      const res = await apiFetch("/api/platform/registry/modules/scaffold", {
+        method: "POST",
+        body: JSON.stringify({
+          slug: moduleForm.slug,
+          name: moduleForm.name,
+          description: moduleForm.description,
+          icon: moduleForm.icon,
+          mountType: moduleForm.mountType,
+          backendLanguage: moduleForm.backendLanguage,
+          databaseMode: moduleForm.databaseMode,
+          capabilities: moduleForm.capabilities,
+          port: moduleForm.port,
+        }),
+      });
       // Convert base64 to blob and trigger download
-      const byteChars = atob(data.base64);
+      const byteChars = atob(res.base64);
       const byteNumbers = new Array(byteChars.length);
       for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
       const byteArray = new Uint8Array(byteNumbers);
@@ -498,39 +528,27 @@ export default function AdminModules() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = data.filename;
+      a.download = res.filename || `scaffold-${moduleForm.slug}.zip`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
       toast.success("Scaffold ZIP transferido");
-    },
-    onError: (e) => toast.error(e.message),
-  });
-
-  const handleDownloadScaffold = (moduleForm: ModuleForm) => {
-    scaffoldMut.mutate({
-      slug: moduleForm.slug,
-      name: moduleForm.name,
-      description: moduleForm.description,
-      icon: moduleForm.icon,
-      mountType: moduleForm.mountType,
-      backendLanguage: moduleForm.backendLanguage,
-      databaseMode: moduleForm.databaseMode,
-      capabilities: moduleForm.capabilities,
-      port: moduleForm.port,
-    });
+    } catch (e: any) {
+      toast.error(e.message || "Erro ao gerar scaffold");
+    } finally {
+      setScaffoldPending(false);
+    }
   };
 
-  const [formDialog, setFormDialog] = useState<{ open: boolean; editId: number | null }>({ open: false, editId: null });
+  const [formDialog, setFormDialog] = useState<{ open: boolean; editId: string | null }>({ open: false, editId: null });
   const [form, setForm] = useState<ModuleForm>(defaultForm);
-  const [deleteDialog, setDeleteDialog] = useState<{ open: boolean; moduleId: number; moduleName: string }>({ open: false, moduleId: 0, moduleName: "" });
+  const [deleteDialog, setDeleteDialog] = useState<{ open: boolean; moduleKey: string; moduleName: string }>({ open: false, moduleKey: "", moduleName: "" });
   const [detailDialog, setDetailDialog] = useState<{ open: boolean; module: any | null }>({ open: false, module: null });
-  const [configExpanded, setConfigExpanded] = useState(false);
 
-  const nextPort = useMemo(() => getNextPort(modules || []), [modules]);
+  const modules = useMemo(() => (rawModules || []).map(normalizeModule), [rawModules]);
+  const nextPort = useMemo(() => getNextPort(rawModules || []), [rawModules]);
 
-  // Auto-generate slug and URLs when name changes (only for new modules)
   const updateFromName = useCallback((name: string) => {
     if (formDialog.editId) {
       setForm(p => ({ ...p, name }));
@@ -548,7 +566,6 @@ export default function AdminModules() {
     }));
   }, [formDialog.editId, nextPort]);
 
-  // Update frontend URL when mount type changes
   const updateMountType = useCallback((mountType: string) => {
     setForm(p => ({
       ...p,
@@ -559,7 +576,6 @@ export default function AdminModules() {
 
   const openCreate = () => {
     setForm({ ...defaultForm, port: nextPort });
-    setConfigExpanded(false);
     setFormDialog({ open: true, editId: null });
   };
 
@@ -579,27 +595,27 @@ export default function AdminModules() {
       status: mod.status || "active",
       port: portMatch ? parseInt(portMatch[1]) : nextPort,
     });
-    setConfigExpanded(false);
-    setFormDialog({ open: true, editId: mod.id });
+    setFormDialog({ open: true, editId: mod.slug });
   };
 
   const handleSave = async () => {
     if (!form.name.trim()) { toast.error("Nome é obrigatório"); return; }
     if (!form.slug.trim()) { toast.error("Slug é obrigatório"); return; }
 
+    // VPS registry uses snake_case field names
     const payload = {
-      slug: form.slug,
+      module_key: form.slug,
       name: form.name,
       description: form.description,
       icon: form.icon,
-      mountType: form.mountType,
-      backendUrl: form.backendUrl,
-      frontendUrl: form.frontendUrl,
+      frontend_mount_type: form.mountType,
+      backend_service_url: form.backendUrl,
+      route: `/module/${form.slug}`,
       status: form.status,
     };
 
     if (formDialog.editId) {
-      await updateMut.mutateAsync({ id: formDialog.editId, ...payload });
+      await updateDynMut.mutateAsync(`/api/platform/registry/modules/${formDialog.editId}`, payload);
     } else {
       await createMut.mutateAsync(payload);
     }
@@ -636,10 +652,10 @@ export default function AdminModules() {
         <div className="grid gap-4 md:grid-cols-2">{[1, 2, 3].map(i => <Skeleton key={i} className="h-44 w-full rounded-xl" />)}</div>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
-          {modules?.map((mod: any) => {
+          {modules.map((mod: any) => {
             const Icon = iconMap[mod.icon || ""] || Puzzle;
             return (
-              <Card key={mod.id} className="border-border/50 hover:border-border transition-colors">
+              <Card key={mod.id || mod.slug} className="border-border/50 hover:border-border transition-colors">
                 <CardHeader className="flex flex-row items-start gap-3 pb-3">
                   <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
                     <Icon className="h-5 w-5 text-primary" />
@@ -654,7 +670,7 @@ export default function AdminModules() {
                         <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(mod)}>
                           <Pencil className="h-3.5 w-3.5" />
                         </Button>
-                        <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-destructive" onClick={() => setDeleteDialog({ open: true, moduleId: mod.id, moduleName: mod.name })}>
+                        <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-destructive" onClick={() => setDeleteDialog({ open: true, moduleKey: mod.slug, moduleName: mod.name })}>
                           <Trash2 className="h-3.5 w-3.5" />
                         </Button>
                       </div>
@@ -686,11 +702,18 @@ export default function AdminModules() {
                       )}
                     </div>
                   )}
+                  {mod.slug === "contabilidade" && (
+                    <div className="mt-4 flex justify-end">
+                      <Button variant="outline" size="sm" onClick={() => setLocation(`/dashboard/module/${mod.slug}/admin`)}>
+                        Abrir admin do módulo
+                      </Button>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             );
           })}
-          {(!modules || modules.length === 0) && (
+          {modules.length === 0 && (
             <div className="col-span-2 text-center py-16 text-muted-foreground">
               <Puzzle className="h-16 w-16 mx-auto mb-4 opacity-20" />
               <p className="text-lg font-medium">Nenhum módulo registado</p>
@@ -723,9 +746,7 @@ export default function AdminModules() {
               <TabsTrigger value="integration">Integração</TabsTrigger>
             </TabsList>
 
-            {/* ─── Config Tab ──────────────────────────────────────── */}
             <TabsContent value="config" className="space-y-5 mt-4">
-              {/* Name → auto-generates slug */}
               <div className="space-y-2">
                 <Label className="text-sm font-medium">Nome do Módulo *</Label>
                 <Input
@@ -741,16 +762,10 @@ export default function AdminModules() {
                 )}
               </div>
 
-              {/* Slug (editable but auto-filled) */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label className="text-sm">Slug / module_key *</Label>
-                  <Input
-                    placeholder="contabilidade"
-                    value={form.slug}
-                    onChange={(e) => setForm(p => ({ ...p, slug: e.target.value }))}
-                    className="font-mono"
-                  />
+                  <Input placeholder="contabilidade" value={form.slug} onChange={(e) => setForm(p => ({ ...p, slug: e.target.value }))} className="font-mono" />
                   <p className="text-xs text-muted-foreground">Kebab-case, sem acentos. Usado em URLs e Docker.</p>
                 </div>
                 <div className="space-y-2">
@@ -760,11 +775,7 @@ export default function AdminModules() {
                     value={form.port}
                     onChange={(e) => {
                       const port = parseInt(e.target.value) || 4004;
-                      setForm(p => ({
-                        ...p,
-                        port,
-                        backendUrl: p.slug ? `http://mod-${p.slug}:${port}` : p.backendUrl,
-                      }));
+                      setForm(p => ({ ...p, port, backendUrl: p.slug ? `http://mod-${p.slug}:${port}` : p.backendUrl }));
                     }}
                   />
                   <p className="text-xs text-muted-foreground">Próxima porta disponível: {nextPort}</p>
@@ -773,12 +784,7 @@ export default function AdminModules() {
 
               <div className="space-y-2">
                 <Label className="text-sm">Descrição</Label>
-                <Textarea
-                  placeholder="Descrição do módulo em português..."
-                  value={form.description}
-                  onChange={(e) => setForm(p => ({ ...p, description: e.target.value }))}
-                  rows={2}
-                />
+                <Textarea placeholder="Descrição do módulo em português..." value={form.description} onChange={(e) => setForm(p => ({ ...p, description: e.target.value }))} rows={2} />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -796,10 +802,7 @@ export default function AdminModules() {
                         const I = iconMap[i.value] || Puzzle;
                         return (
                           <SelectItem key={i.value} value={i.value}>
-                            <div className="flex items-center gap-2">
-                              <I className="h-4 w-4" />
-                              <span>{i.label}</span>
-                            </div>
+                            <div className="flex items-center gap-2"><I className="h-4 w-4" /><span>{i.label}</span></div>
                           </SelectItem>
                         );
                       })}
@@ -811,9 +814,7 @@ export default function AdminModules() {
                   <Select value={form.mountType} onValueChange={updateMountType}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      {mountTypes.map(m => (
-                        <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
-                      ))}
+                      {mountTypes.map(m => (<SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>))}
                     </SelectContent>
                   </Select>
                 </div>
@@ -825,9 +826,7 @@ export default function AdminModules() {
                   <Select value={form.backendLanguage} onValueChange={(v) => setForm(p => ({ ...p, backendLanguage: v }))}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      {backendLanguages.map(l => (
-                        <SelectItem key={l.value} value={l.value}>{l.label}</SelectItem>
-                      ))}
+                      {backendLanguages.map(l => (<SelectItem key={l.value} value={l.value}>{l.label}</SelectItem>))}
                     </SelectContent>
                   </Select>
                 </div>
@@ -836,15 +835,12 @@ export default function AdminModules() {
                   <Select value={form.databaseMode} onValueChange={(v) => setForm(p => ({ ...p, databaseMode: v }))}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      {databaseModes.map(d => (
-                        <SelectItem key={d.value} value={d.value}>{d.label}</SelectItem>
-                      ))}
+                      {databaseModes.map(d => (<SelectItem key={d.value} value={d.value}>{d.label}</SelectItem>))}
                     </SelectContent>
                   </Select>
                 </div>
               </div>
 
-              {/* Capabilities */}
               <div className="space-y-2">
                 <Label className="text-sm">Capacidades</Label>
                 <div className="flex flex-wrap gap-2">
@@ -870,7 +866,6 @@ export default function AdminModules() {
                 </div>
               </div>
 
-              {/* Generated URLs (read-only preview) */}
               <div className="space-y-3 rounded-lg border border-border/50 p-4 bg-muted/20">
                 <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">URLs Geradas</h4>
                 <div className="space-y-2">
@@ -907,7 +902,6 @@ export default function AdminModules() {
               </div>
             </TabsContent>
 
-            {/* ─── Integration Tab ─────────────────────────────────── */}
             <TabsContent value="integration" className="space-y-5 mt-4">
               {!form.slug ? (
                 <div className="text-center py-8 text-muted-foreground">
@@ -921,7 +915,6 @@ export default function AdminModules() {
                   <NginxPreview form={form} />
                   <RegistrySQL form={form} />
                   <ShellIntegrationPreview form={form} />
-
                   <div className="rounded-lg border border-border/50 p-4">
                     <h4 className="text-sm font-semibold mb-3 flex items-center gap-2">
                       <CheckCircle2 className="h-4 w-4 text-primary" />
@@ -937,17 +930,13 @@ export default function AdminModules() {
           <DialogFooter className="mt-4">
             <Button variant="outline" onClick={() => setFormDialog(p => ({ ...p, open: false }))}>Cancelar</Button>
             {form.slug && (
-              <Button
-                variant="outline"
-                onClick={() => handleDownloadScaffold(form)}
-                disabled={scaffoldMut.isPending}
-              >
+              <Button variant="outline" onClick={() => handleDownloadScaffold(form)} disabled={scaffoldPending}>
                 <Download className="h-4 w-4 mr-2" />
-                {scaffoldMut.isPending ? "A gerar..." : "Scaffold ZIP"}
+                {scaffoldPending ? "A gerar..." : "Scaffold ZIP"}
               </Button>
             )}
-            <Button onClick={handleSave} disabled={createMut.isPending || updateMut.isPending}>
-              {createMut.isPending || updateMut.isPending ? "A guardar..." : formDialog.editId ? "Guardar" : "Criar Módulo"}
+            <Button onClick={handleSave} disabled={createMut.isPending || updateDynMut.isPending}>
+              {createMut.isPending || updateDynMut.isPending ? "A guardar..." : formDialog.editId ? "Guardar" : "Criar Módulo"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -961,18 +950,14 @@ export default function AdminModules() {
               {(() => { const I = iconMap[detailDialog.module?.icon || ""] || Puzzle; return <I className="h-5 w-5" />; })()}
               {detailDialog.module?.name} — Configuração
             </DialogTitle>
-            <DialogDescription>
-              Configuração gerada e checklist de integração para este módulo
-            </DialogDescription>
+            <DialogDescription>Configuração gerada e checklist de integração para este módulo</DialogDescription>
           </DialogHeader>
           {detailDialog.module && (
             <div className="space-y-5 mt-2">
               <div className="flex flex-wrap gap-2">
                 <Badge variant="outline" className="font-mono">{detailDialog.module.slug}</Badge>
                 <Badge>{detailDialog.module.mountType}</Badge>
-                <Badge variant={detailDialog.module.status === "active" ? "default" : "secondary"}>
-                  {detailDialog.module.status}
-                </Badge>
+                <Badge variant={detailDialog.module.status === "active" ? "default" : "secondary"}>{detailDialog.module.status}</Badge>
               </div>
               <ManifestPreview form={detailDialog.module} />
               <DockerComposePreview form={detailDialog.module} />
@@ -990,13 +975,9 @@ export default function AdminModules() {
           )}
           <DialogFooter>
             {detailDialog.module && (
-              <Button
-                variant="outline"
-                onClick={() => handleDownloadScaffold(detailDialog.module)}
-                disabled={scaffoldMut.isPending}
-              >
+              <Button variant="outline" onClick={() => handleDownloadScaffold(detailDialog.module)} disabled={scaffoldPending}>
                 <Download className="h-4 w-4 mr-2" />
-                {scaffoldMut.isPending ? "A gerar..." : "Transferir Scaffold ZIP"}
+                {scaffoldPending ? "A gerar..." : "Transferir Scaffold ZIP"}
               </Button>
             )}
             <Button variant="outline" onClick={() => setDetailDialog(p => ({ ...p, open: false }))}>Fechar</Button>
@@ -1018,10 +999,10 @@ export default function AdminModules() {
             <Button
               variant="destructive"
               onClick={async () => {
-                await deleteMut.mutateAsync({ id: deleteDialog.moduleId });
+                await deleteDynMut.mutateAsync(`/api/platform/registry/modules/${deleteDialog.moduleKey}`);
                 setDeleteDialog(p => ({ ...p, open: false }));
               }}
-              disabled={deleteMut.isPending}
+              disabled={deleteDynMut.isPending}
             >
               Eliminar
             </Button>

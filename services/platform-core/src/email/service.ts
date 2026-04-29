@@ -7,7 +7,7 @@
 import nodemailer from "nodemailer";
 
 const SMTP_HOST = process.env.SMTP_HOST || "mail.viaoceanica.com";
-const SMTP_PORT = parseInt(process.env.SMTP_PORT || "465");
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || "587");
 const SMTP_USER = process.env.SMTP_USER || "";
 const SMTP_PASS = process.env.SMTP_PASS || "";
 const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
@@ -20,7 +20,7 @@ function getTransporter(): nodemailer.Transporter {
     _transporter = nodemailer.createTransport({
       host: SMTP_HOST,
       port: SMTP_PORT,
-      secure: SMTP_PORT === 465,
+      secure: SMTP_PORT === 465, // 465=implicit TLS, 587=STARTTLS
       auth: {
         user: SMTP_USER,
         pass: SMTP_PASS,

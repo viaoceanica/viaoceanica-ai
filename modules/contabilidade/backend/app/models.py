@@ -220,3 +220,23 @@ class StorageUploadQueue(Base):
     next_retry_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class InvoiceImportEvent(Base):
+    __tablename__ = "invoice_import_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(String(64), nullable=False, index=True)
+    invoice_id = Column(UUID(as_uuid=True), ForeignKey("invoices.id", ondelete="SET NULL"), nullable=True, index=True)
+    filename = Column(String(255), nullable=False, index=True)
+    storage_object_key = Column(String(1024), nullable=True)
+    status = Column(String(32), nullable=False, index=True)
+    source = Column(String(32), nullable=False, default="upload")
+    reason = Column(Text, nullable=True)
+    detected_type = Column(String(128), nullable=True)
+    supplier_nif = Column(String(128), nullable=True)
+    invoice_number = Column(String(128), nullable=True)
+    total = Column(Numeric(12, 2), nullable=True)
+    duplicate_candidate_invoice_id = Column(UUID(as_uuid=True), nullable=True)
+    payload_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

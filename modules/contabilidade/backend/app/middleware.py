@@ -25,6 +25,7 @@ class ModuleContext:
     tenant_id: str
     session_id: str
     platform_roles: str
+    company_role: str
     module_entitlements: str
     request_id: str
 
@@ -75,6 +76,7 @@ class ViaoContextMiddleware(BaseHTTPMiddleware):
         tenant_id = request.headers.get("x-viao-tenant-id", "")
         session_id = request.headers.get("x-viao-session-id", "")
         platform_roles = request.headers.get("x-viao-platform-roles", "")
+        company_role = request.headers.get("x-viao-company-role", "")
         module_entitlements = request.headers.get("x-viao-module-entitlements", "")
         request_id = request.headers.get("x-viao-request-id", "")
 
@@ -90,6 +92,7 @@ class ViaoContextMiddleware(BaseHTTPMiddleware):
             tenant_id=tenant_id,
             session_id=session_id or request_id or "unknown",
             platform_roles=platform_roles,
+            company_role=company_role,
             module_entitlements=module_entitlements,
             request_id=request_id or "unknown",
         )

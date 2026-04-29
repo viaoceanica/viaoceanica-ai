@@ -18,6 +18,7 @@ import { registryRouter } from "./registry/routes.js";
 import { tenantsRouter } from "./tenants/routes.js";
 import { entitlementsRouter } from "./entitlements/routes.js";
 import { passwordResetRouter } from "./auth/password-reset.js";
+import { billingRouter } from "./billing/routes.js";
 import { getDb } from "./db.js";
 
 const PORT = parseInt(process.env.PLATFORM_CORE_PORT || "4000");
@@ -66,6 +67,7 @@ app.use("/api/auth", passwordResetRouter);
 app.use("/api/v1/registry", registryRouter);
 app.use("/api/v1/tenants", tenantsRouter);
 app.use("/api/v1/entitlements", entitlementsRouter);
+app.use("/api/v1/tenants", billingRouter);
 
 // ─── Start ──────────────────────────────────────────────────────────
 

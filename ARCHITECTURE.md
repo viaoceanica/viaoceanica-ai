@@ -74,8 +74,6 @@ Each module:
 
 - **platform_db**: Users, companies, teams, plans, tokens, registry, entitlements
 - **billing_db**: Invoices, payment history (can share platform_db initially)
-- **restauracao_db**: Module-specific data (menus, reservations, etc.)
-- **gestao_email_db**: Module-specific data (campaigns, lists, templates)
 
 All databases are PostgreSQL hosted on Supabase.
 

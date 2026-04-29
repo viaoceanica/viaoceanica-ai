@@ -15,7 +15,6 @@ import requests
 from pathlib import Path
 from typing import Any, List
 
-from openai import OpenAI
 from pypdf import PdfReader
 import fitz
 from PIL import Image, ImageOps
@@ -40,6 +39,7 @@ except ImportError:  # pragma: no cover - depends on host shared library availab
         return []
 
 from .config import get_settings
+from .llm_client import complete_prompt, vision_text
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -84,47 +84,24 @@ def _usage_from_response(response: Any) -> dict[str, int]:
     input_tokens = getattr(usage, "input_tokens", None)
     output_tokens = getattr(usage, "output_tokens", None)
     total_tokens = getattr(usage, "total_tokens", None)
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    completion_tokens = getattr(usage, "completion_tokens", None)
     if isinstance(usage, dict):
         input_tokens = usage.get("input_tokens", input_tokens)
         output_tokens = usage.get("output_tokens", output_tokens)
         total_tokens = usage.get("total_tokens", total_tokens)
-    input_tokens = int(input_tokens or 0)
-    output_tokens = int(output_tokens or 0)
+        prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+        completion_tokens = usage.get("completion_tokens", completion_tokens)
+    input_tokens = int(input_tokens or prompt_tokens or 0)
+    output_tokens = int(output_tokens or completion_tokens or 0)
     total_tokens = int(total_tokens or (input_tokens + output_tokens))
     return {"input": input_tokens, "output": output_tokens, "total": total_tokens}
 
-OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "45"))
-MAX_QR_SCAN_SECONDS = float(os.getenv("MAX_QR_SCAN_SECONDS", "12"))
-MAX_QR_SCAN_PAGES = int(os.getenv("MAX_QR_SCAN_PAGES", "4"))
-
-
-def _model_candidates() -> list[str]:
-    primary = (settings.extraction_model or "").strip()
-    candidates: list[str] = []
-    if primary:
-        candidates.append(primary)
-        if primary.startswith("openai/"):
-            candidates.append(primary.split("/", 1)[1])
-    if "gpt-5-mini" not in candidates:
-        candidates.append("gpt-5-mini")
-    return candidates
-
-
-def _responses_create_with_model_fallback(client: OpenAI, **kwargs):
-    last_error: Exception | None = None
-    for model in _model_candidates():
-        try:
-            return client.responses.create(model=model, **kwargs)
-        except Exception as exc:
-            message = str(exc)
-            if "model_not_found" in message or "does not exist" in message:
-                logger.warning("Extraction model unavailable: %s; trying fallback", model)
-                last_error = exc
-                continue
-            raise
-    if last_error:
-        raise last_error
-    raise RuntimeError("No model candidates available for extraction")
+OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "120"))
+MAX_QR_SCAN_SECONDS = float(os.getenv("MAX_QR_SCAN_SECONDS", "8"))
+MAX_QR_SCAN_PAGES = int(os.getenv("MAX_QR_SCAN_PAGES", "2"))
+MAX_VISION_SCAN_PAGES = int(os.getenv("MAX_VISION_SCAN_PAGES", "3"))
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
 
 def _extract_vendor_nif_from_text(text: str) -> str | None:
     compact = re.sub(r"(?<=\w)\s+(?=\w)", "", text or "")
@@ -349,7 +326,7 @@ def _build_qr_first_extraction(qr_data: dict[str, Any], text: str, file_name: st
         "currency": "EUR",
         "raw_text": text,
         "ai_payload": json.dumps({"source": "qr_fallback", "qr_data": qr_data}, ensure_ascii=False),
-        "extraction_model": settings.extraction_model,
+        "extraction_model": extraction_model,
         "notes": notes,
         "line_items": [],
     }
@@ -394,10 +371,11 @@ def _decode_qr_from_pil(image: Image.Image) -> str | None:
             continue
 
         bgr_variants = [bgr]
-        try:
-            bgr_variants.append(cv2.resize(bgr, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC))
-        except Exception:
-            pass
+        for scale in (1.5, 2.0, 3.0, 4.0):
+            try:
+                bgr_variants.append(cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC))
+            except Exception:
+                pass
 
         for candidate_img in bgr_variants:
             value, _, _ = _qr_detector.detectAndDecode(candidate_img)
@@ -447,7 +425,7 @@ def _extract_qr_payload_from_pdf(raw: bytes) -> str | None:
                 page = document.load_page(page_index)
 
                 # Render-first scan is more robust on malformed PDFs where get_images can be slow/noisy.
-                for zoom in (3, 4, 5, 2, 6):
+                for zoom in (2, 3, 4):
                     if time.monotonic() - started_at > MAX_QR_SCAN_SECONDS:
                         logger.info("QR render scan timeout after %.2fs", time.monotonic() - started_at)
                         return None
@@ -466,6 +444,9 @@ def _extract_qr_payload_from_pdf(raw: bytes) -> str | None:
                         (0, height // 2, width // 2, height),
                         (width // 2, height // 2, width, height),
                         (width // 4, height // 4, (width * 3) // 4, (height * 3) // 4),
+                        ((width * 2) // 3, 0, width, height // 3),
+                        ((width * 3) // 5, 0, width, height // 2),
+                        ((width * 2) // 3, height // 12, width, (height * 5) // 12),
                     ]
                     for box in crops:
                         if time.monotonic() - started_at > MAX_QR_SCAN_SECONDS:
@@ -577,33 +558,71 @@ def parse_portuguese_qr_payload(payload: str | None) -> dict[str, Any]:
 
     return result
 
-def _extract_text_from_pdf_with_openai(raw: bytes, file_name: str) -> tuple[str, dict[str, int]]:
+def _is_image_upload(filename: str, content_type: str | None = None) -> bool:
+    lowered = (filename or "").lower()
+    if lowered.endswith(IMAGE_SUFFIXES):
+        return True
+    return bool(content_type and content_type.lower().startswith("image/"))
+
+
+def _pil_to_data_url(image: Image.Image) -> str:
+    buffer = io.BytesIO()
+    image = ImageOps.exif_transpose(image).convert("RGB")
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _render_pdf_pages_for_vision(raw: bytes, max_pages: int = MAX_VISION_SCAN_PAGES) -> list[str]:
+    data_urls: list[str] = []
+    with fitz.open(stream=raw, filetype="pdf") as document:
+        for page_index in range(min(max_pages, len(document))):
+            page = document.load_page(page_index)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            data_urls.append(_pil_to_data_url(image))
+    return data_urls
+
+
+def _extract_text_from_pdf_with_vision(raw: bytes, file_name: str) -> tuple[str, dict[str, int]]:
     if not settings.openai_api_key:
         return "", _usage_dict()
-
-    client = OpenAI(api_key=settings.openai_api_key, timeout=OPENAI_TIMEOUT_SECONDS)
-    data_url = f"data:application/pdf;base64,{base64.b64encode(raw).decode('ascii')}"
+    image_data_urls = _render_pdf_pages_for_vision(raw)
+    if not image_data_urls:
+        return "", _usage_dict()
     prompt = (
-        "Extract all readable text from this invoice PDF. "
+        "Extract all readable text from these invoice pages. "
         "Return plain text only, preserving key invoice identifiers, vendor/customer names, dates, totals, tax amounts, NIFs, "
         "and line items when visible. Do not summarize."
     )
-
-    response = _responses_create_with_model_fallback(
-        client,
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": prompt},
-                    {"type": "input_file", "filename": Path(file_name).name, "file_data": data_url},
-                ],
-            }
-        ],
+    response = vision_text(
+        model=settings.vision_model,
+        prompt=prompt,
+        image_data_urls=image_data_urls,
         max_output_tokens=4000,
-        timeout=OPENAI_TIMEOUT_SECONDS,
     )
-    return (getattr(response, "output_text", "") or "", _usage_from_response(response))
+    return response.text, response.usage
+
+
+def _extract_text_from_image_with_vision(raw: bytes, file_name: str) -> tuple[str, dict[str, int]]:
+    if not settings.openai_api_key:
+        return "", _usage_dict()
+    try:
+        image = Image.open(io.BytesIO(raw))
+    except Exception as exc:
+        raise InvalidDocumentError("Imagem inválida ou corrompida") from exc
+    prompt = (
+        "Extract all readable text from this invoice image. "
+        "Return plain text only, preserving key invoice identifiers, vendor/customer names, dates, totals, tax amounts, NIFs, "
+        "and line items when visible. Do not summarize."
+    )
+    response = vision_text(
+        model=settings.vision_model,
+        prompt=prompt,
+        image_data_urls=[_pil_to_data_url(image)],
+        max_output_tokens=4000,
+    )
+    return response.text, response.usage
 
 
 def extract_text_from_upload(upload) -> tuple[str, bytes, dict[str, int]]:
@@ -611,6 +630,7 @@ def extract_text_from_upload(upload) -> tuple[str, bytes, dict[str, int]]:
     raw = upload.file.read()
     upload.file.seek(0)
     usage = _usage_dict()
+    content_type = getattr(upload, "content_type", None)
 
     if filename.endswith(".pdf"):
         text = ""
@@ -635,12 +655,18 @@ def extract_text_from_upload(upload) -> tuple[str, bytes, dict[str, int]]:
         )
         if should_use_pdf_ocr:
             try:
-                logger.info("Running PDF OCR fallback for %s", upload.filename or "documento")
-                ocr_text, ocr_usage = _extract_text_from_pdf_with_openai(raw, upload.filename or "documento")
+                logger.info("Running PDF vision fallback for %s", upload.filename or "documento")
+                ocr_text, ocr_usage = _extract_text_from_pdf_with_vision(raw, upload.filename or "documento")
                 _accumulate_usage(usage, ocr_usage)
                 text = ocr_text or text
             except Exception as exc:
-                logger.warning("PDF OCR fallback failed for %s: %s", upload.filename or "documento", exc)
+                logger.warning("PDF vision fallback failed for %s: %s", upload.filename or "documento", exc)
+    elif _is_image_upload(filename, content_type):
+        try:
+            text, vision_usage = _extract_text_from_image_with_vision(raw, upload.filename or "documento")
+            _accumulate_usage(usage, vision_usage)
+        except Exception as exc:
+            raise InvalidDocumentError("Imagem inválida ou OCR indisponível") from exc
     else:
         try:
             text = raw.decode("utf-8")
@@ -738,16 +764,15 @@ def _maybe_correct_parties(
     return vendor, customer, supplier_nif, customer_nif
 
 
-def _extract_with_openai(
+def _extract_with_llm(
     text: str,
     file_name: str,
     correction_message: str | None = None,
     previous_payload: str | None = None,
-) -> tuple[dict[str, Any], dict[str, int]]:
+) -> tuple[dict[str, Any], dict[str, int], str]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY não configurada")
 
-    client = OpenAI(api_key=settings.openai_api_key, timeout=OPENAI_TIMEOUT_SECONDS)
     usage_total = _usage_dict()
     prompt = (
         f"{EXTRACTION_PROMPT_BASE}\n\n"
@@ -761,14 +786,14 @@ def _extract_with_openai(
             prompt += "Previous JSON output:\n" + trimmed + "\n"
         prompt += CORRECTION_PROMPT_SUFFIX + "\n"
 
-    response = _responses_create_with_model_fallback(
-        client,
-        input=prompt,
+    response = complete_prompt(
+        model=settings.extraction_model,
+        prompt=prompt,
         max_output_tokens=550,
-        timeout=OPENAI_TIMEOUT_SECONDS,
+        temperature=0.0,
     )
-    _accumulate_usage(usage_total, _usage_from_response(response))
-    content = getattr(response, "output_text", "") or ""
+    _accumulate_usage(usage_total, response.usage)
+    content = response.text or ""
     if not content:
         raise RuntimeError("Modelo não devolveu conteúdo")
 
@@ -778,14 +803,14 @@ def _extract_with_openai(
         data = json.loads(payload)
     except json.JSONDecodeError:
         repair_prompt = f"{JSON_REPAIR_PROMPT}\n\n{payload[:8000]}"
-        repair_response = _responses_create_with_model_fallback(
-            client,
-            input=repair_prompt,
+        repair_response = complete_prompt(
+            model=settings.repair_model,
+            prompt=repair_prompt,
             max_output_tokens=700,
-            timeout=OPENAI_TIMEOUT_SECONDS,
+            temperature=0.0,
         )
-        _accumulate_usage(usage_total, _usage_from_response(repair_response))
-        repaired = getattr(repair_response, "output_text", "") or ""
+        _accumulate_usage(usage_total, repair_response.usage)
+        repaired = repair_response.text or ""
         repaired_match = re.search(r"\{.*\}", repaired, re.S)
         repaired_payload = repaired_match.group(0) if repaired_match else repaired
         try:
@@ -793,7 +818,7 @@ def _extract_with_openai(
         except json.JSONDecodeError as exc:
             raise InvalidDocumentError("Resposta do modelo não pôde ser convertida em JSON válido") from exc
     data["notes"] = data.get("notes") or f"Documento processado por IA: {Path(file_name).name}"
-    return data, usage_total
+    return data, usage_total, (response.model or settings.extraction_model)
 
 
 def _determine_document_type(text: str, extraction: dict[str, Any], qr_data: dict[str, Any]) -> tuple[bool, str, str]:
@@ -1098,7 +1123,7 @@ def build_extraction_from_text(
     correction_message: str | None = None,
     previous_payload: str | None = None,
 ) -> dict[str, Any]:
-    ai_data, usage = _extract_with_openai(
+    ai_data, usage, extraction_model = _extract_with_llm(
         text=text,
         file_name=file_name,
         correction_message=correction_message,
@@ -1152,7 +1177,7 @@ def build_extraction_from_text(
         "currency": ai_data.get("currency") or "EUR",
         "raw_text": text,
         "ai_payload": json.dumps(ai_data, ensure_ascii=False),
-        "extraction_model": settings.extraction_model,
+        "extraction_model": extraction_model,
         "token_input": usage["input"],
         "token_output": usage["output"],
         "token_total": usage["total"],

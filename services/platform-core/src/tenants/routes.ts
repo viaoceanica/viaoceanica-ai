@@ -471,3 +471,119 @@ router.put("/admin/assign-plan", requireAdmin, async (req: Request, res: Respons
 });
 
 export { router as tenantsRouter };
+// ─── Admin: Create Plan ─────────────────────────────────────────────
+router.post("/admin/plans", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+    const { name, description, monthlyPrice, yearlyPrice, tokensPerMonth, maxMembers, maxTeams, maxModules, features, isActive, sortOrder } = req.body;
+    if (!name) return res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "name é obrigatório" } });
+    const result = await db.insert(plans).values({
+      name,
+      description: description || null,
+      monthlyPrice: monthlyPrice || 0,
+      yearlyPrice: yearlyPrice || 0,
+      tokensPerMonth: tokensPerMonth || 0,
+      maxMembers: maxMembers || 5,
+      maxTeams: maxTeams || 1,
+      maxModules: maxModules || 2,
+      features: features || null,
+      isActive: isActive !== undefined ? isActive : true,
+      sortOrder: sortOrder || 0,
+    }).returning();
+    return res.status(201).json({ success: true, data: result[0] });
+  } catch (error) {
+    console.error("[Tenants] Create plan error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
+// ─── Admin: Update Plan ─────────────────────────────────────────────
+router.put("/admin/plans/:planId", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+    const planId = Number(req.params.planId);
+    const updateData: Record<string, unknown> = { updatedAt: new Date() };
+    const fields = ["name", "description", "monthlyPrice", "yearlyPrice", "tokensPerMonth", "maxMembers", "maxTeams", "maxModules", "features", "isActive", "sortOrder"];
+    for (const field of fields) {
+      if (req.body[field] !== undefined) updateData[field] = req.body[field];
+    }
+    await db.update(plans).set(updateData).where(eq(plans.id, planId));
+    const updated = await db.select().from(plans).where(eq(plans.id, planId)).limit(1);
+    if (updated.length === 0) return res.status(404).json({ success: false, error: { code: "NOT_FOUND" } });
+    return res.json({ success: true, data: updated[0] });
+  } catch (error) {
+    console.error("[Tenants] Update plan error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
+// ─── Admin: Delete Plan ─────────────────────────────────────────────
+router.delete("/admin/plans/:planId", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+    const planId = Number(req.params.planId);
+    await db.update(companies).set({ planId: null, updatedAt: new Date() }).where(eq(companies.planId, planId));
+    await db.delete(plans).where(eq(plans.id, planId));
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("[Tenants] Delete plan error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
+// ─── Admin: Create Company ──────────────────────────────────────────
+router.post("/admin/companies", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+    const { name, sector, email, phone, address, website, nif } = req.body;
+    if (!name) return res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "name é obrigatório" } });
+    const result = await db.insert(companies).values({
+      name,
+      sector: sector || null,
+      email: email || null,
+      phone: phone || null,
+      address: address || null,
+      website: website || null,
+      nif: nif || null,
+    }).returning();
+    return res.status(201).json({ success: true, data: result[0] });
+  } catch (error) {
+    console.error("[Tenants] Create company error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
+// ─── Admin: Update Company ──────────────────────────────────────────
+router.put("/admin/companies/:companyId", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+    const companyId = Number(req.params.companyId);
+    const updateData: Record<string, unknown> = { updatedAt: new Date() };
+    const fields = ["name", "sector", "email", "phone", "address", "website", "nif", "planId"];
+    for (const field of fields) {
+      if (req.body[field] !== undefined) updateData[field] = req.body[field];
+    }
+    await db.update(companies).set(updateData).where(eq(companies.id, companyId));
+    const updated = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
+    if (updated.length === 0) return res.status(404).json({ success: false, error: { code: "NOT_FOUND" } });
+    return res.json({ success: true, data: updated[0] });
+  } catch (error) {
+    console.error("[Tenants] Update company error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
+// ─── Admin: Delete Company ──────────────────────────────────────────
+router.delete("/admin/companies/:companyId", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+    const companyId = Number(req.params.companyId);
+    await db.update(users).set({ companyId: null, companyRole: null }).where(eq(users.companyId, companyId));
+    await db.delete(companies).where(eq(companies.id, companyId));
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("[Tenants] Delete company error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});

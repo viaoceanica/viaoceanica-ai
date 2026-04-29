@@ -13,6 +13,7 @@ import { Router, Request, Response } from "express";
 import { getDb } from "../db.js";
 import { moduleRegistry } from "../../drizzle/schema.js";
 import { eq } from "drizzle-orm";
+import { generateScaffoldZip } from "./scaffold.js";
 
 const router = Router();
 
@@ -165,4 +166,23 @@ router.delete("/modules/:key", requireAdmin, async (req: Request, res: Response)
   }
 });
 
+// ─── POST /modules/scaffold — Generate scaffold ZIP ────────────────
+router.post("/modules/scaffold", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { slug, name, description, icon, mountType, backendLanguage, databaseMode, capabilities, port } = req.body;
+    if (!slug || !name) {
+      return res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "slug e name são obrigatórios" } });
+    }
+    const zipBuffer = await generateScaffoldZip({
+      slug, name, description, icon, mountType: mountType || "iframe",
+      backendLanguage: backendLanguage || "python", databaseMode: databaseMode || "shared",
+      capabilities: capabilities || [], port: port || 4004,
+    });
+    const base64 = zipBuffer.toString("base64");
+    return res.json({ success: true, data: { base64, filename: `scaffold-${slug}.tar.gz` } });
+  } catch (error) {
+    console.error("[Registry] Scaffold error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
 export { router as registryRouter };

@@ -24,6 +24,7 @@ from sqlalchemy import text
 from .main import app  # Import the original ViaContab app
 from .database import get_session
 from .middleware import ViaoContextMiddleware
+from .admin_routes import router as admin_router
 
 _start_time = time.time()
 
@@ -82,6 +83,9 @@ for original_path, routes in _path_routes.items():
                 dependencies=route.dependencies,
             )
             _existing_v1_paths.add(key)
+
+# ─── Admin routes ───────────────────────────────────────────────────
+app.include_router(admin_router)
 
 # ─── Override the app title ──────────────────────────────────────────
 app.title = "Via Oceânica — Módulo Contabilidade"

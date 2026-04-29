@@ -13,18 +13,25 @@ import {
 } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { useQuery, useDynamicMutation, apiFetch } from "@/hooks/useApi";
-import { Receipt, Puzzle, Users, UserCircle, Shield } from "lucide-react";
+import { UtensilsCrossed, Mail, Puzzle, Users, UserCircle, Shield } from "lucide-react";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useState, useEffect } from "react";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { useLocation } from "wouter";
 
 const iconMap: Record<string, React.ElementType> = {
-  Receipt,
+  UtensilsCrossed,
+  Mail,
 };
 
 type PermissionEntry = { teamId?: number; userId?: number };
 
 export default function Modules() {
+  const { user } = useAuth();
+  const [, setLocation] = useLocation();
+  const canAdminModules = user?.companyRole === "owner" || user?.companyRole === "admin";
+
   // Registry: all available modules
   const { data: allModules, isLoading } = useQuery<any[]>("/api/platform/registry/modules");
   // Entitlements: tenant's modules (enabled/disabled)
@@ -157,7 +164,7 @@ export default function Modules() {
                   />
                 </CardHeader>
                 <CardContent>
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
                     <div className="flex items-center gap-2">
                       <Badge variant={enabled ? "default" : "secondary"} className="text-xs">
                         {enabled ? "Ativo" : "Inativo"}
@@ -167,15 +174,27 @@ export default function Modules() {
                       )}
                     </div>
                     {enabled && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-xs h-8"
-                        onClick={() => handleOpenPermissions(mod.moduleKey, mod.name)}
-                      >
-                        <Shield className="h-3.5 w-3.5 mr-1.5" />
-                        Gerir acessos
-                      </Button>
+                      <div className="flex items-center gap-2 ml-auto">
+                        {canAdminModules && mod.moduleKey === "contabilidade" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-xs h-8"
+                            onClick={() => setLocation(`/dashboard/module/${mod.moduleKey}/admin`)}
+                          >
+                            Administração
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-xs h-8"
+                          onClick={() => handleOpenPermissions(mod.moduleKey, mod.name)}
+                        >
+                          <Shield className="h-3.5 w-3.5 mr-1.5" />
+                          Gerir acessos
+                        </Button>
+                      </div>
                     )}
                   </div>
                 </CardContent>

@@ -9,27 +9,53 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart";
 import { Brain, Zap, DollarSign, Activity, BarChart3, Clock, TrendingUp, Layers, AlertCircle, CheckCircle2 } from "lucide-react";
-import { useMemo } from "react";
-import { trpc } from "@/lib/trpc";
+import { useMemo, useEffect, useState, useCallback } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  PieChart, Pie, Cell, ResponsiveContainer,
+  PieChart, Pie, Cell,
   AreaChart, Area,
 } from "recharts";
 
+// ─── REST API fetch helper ────────────────────────────────────────────
+async function apiFetch(path: string) {
+  const res = await fetch(path, { credentials: "include" });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  const json = await res.json();
+  return json.data ?? json;
+}
+
+function useApiQuery<T>(path: string) {
+  const [data, setData] = useState<T | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+
+  const refetch = useCallback(() => {
+    setIsLoading(true);
+    apiFetch(path)
+      .then((d) => { setData(d); setError(null); })
+      .catch((e) => setError(e))
+      .finally(() => setIsLoading(false));
+  }, [path]);
+
+  useEffect(() => { refetch(); }, [refetch]);
+
+  return { data, isLoading, error, refetch };
+}
+
 // ─── Module display names & colors ────────────────────────────────────
 const MODULE_LABELS: Record<string, string> = {
+  platform: "Plataforma",
   contabilidade: "Contabilidade",
   unknown: "Desconhecido",
 };
 
 const MODULE_COLORS = [
-  "oklch(0.65 0.2 160)",   // teal
-  "oklch(0.65 0.2 250)",   // blue
-  "oklch(0.65 0.2 30)",    // orange
-  "oklch(0.65 0.2 310)",   // purple
-  "oklch(0.65 0.15 80)",   // yellow-green
-  "oklch(0.55 0.15 0)",    // red
+  "oklch(0.65 0.2 160)",
+  "oklch(0.65 0.2 250)",
+  "oklch(0.65 0.2 30)",
+  "oklch(0.65 0.2 310)",
+  "oklch(0.65 0.15 80)",
+  "oklch(0.55 0.15 0)",
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -46,12 +72,70 @@ const formatDay = (dateStr: string) => {
   return `${d.getDate()}/${d.getMonth() + 1}`;
 };
 
+// ─── Types ────────────────────────────────────────────────────────────
+interface TenantUsage {
+  tenant_id: number;
+  total_requests: number;
+  total_tokens: number;
+  total_cost_usd: number;
+}
+
+interface DailyUsage {
+  day: string;
+  total_requests: number;
+  total_tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_cost_usd: number;
+  active_tenants: number;
+}
+
+interface ModuleUsage {
+  module_key: string;
+  total_requests: number;
+  total_tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_cost_usd: number;
+  unique_tenants: number;
+}
+
+interface RecentEvent {
+  id: number;
+  tenant_id: number;
+  company_name: string;
+  user_name: string | null;
+  module_key: string;
+  model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  estimated_cost_usd: number;
+  status: string;
+  duration_ms: number;
+  created_at: string;
+}
+
 export default function AdminAIUsage() {
-  // ─── Data queries ─────────────────────────────────────────────────
-  const { data: usageData, isLoading: usageLoading } = trpc.admin.aiUsage.useQuery();
-  const { data: dailyData, isLoading: dailyLoading } = trpc.admin.aiUsageDaily.useQuery();
-  const { data: modulesData, isLoading: modulesLoading } = trpc.admin.aiUsageModules.useQuery();
-  const { data: recentData, isLoading: recentLoading } = trpc.admin.aiUsageRecent.useQuery();
+  const { data: usageData, isLoading: usageLoading } = useApiQuery<{
+    period: string;
+    period_start: string;
+    tenants: TenantUsage[];
+  }>("/api/platform/ai/usage/admin");
+
+  const { data: dailyData, isLoading: dailyLoading } = useApiQuery<{
+    period_start: string;
+    days: DailyUsage[];
+  }>("/api/platform/ai/usage/admin/daily");
+
+  const { data: modulesData, isLoading: modulesLoading } = useApiQuery<{
+    period_start: string;
+    modules: ModuleUsage[];
+  }>("/api/platform/ai/usage/admin/modules");
+
+  const { data: recentData, isLoading: recentLoading } = useApiQuery<{
+    events: RecentEvent[];
+  }>("/api/platform/ai/usage/admin/recent");
 
   // ─── Computed totals ──────────────────────────────────────────────
   const totals = useMemo(() => {
@@ -77,7 +161,6 @@ export default function AdminAIUsage() {
     total_requests: { label: "Pedidos", color: "oklch(0.65 0.2 30)" },
   };
 
-  // Prepare daily chart data
   const dailyChartData = useMemo(() => {
     if (!dailyData?.days) return [];
     return dailyData.days.map(d => ({
@@ -89,7 +172,6 @@ export default function AdminAIUsage() {
     }));
   }, [dailyData]);
 
-  // Prepare module pie data
   const modulePieData = useMemo(() => {
     if (!modulesData?.modules) return [];
     return modulesData.modules.map((m, i) => ({
@@ -127,50 +209,19 @@ export default function AdminAIUsage() {
 
       {/* Summary Cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <SummaryCard
-          title="Total Pedidos"
-          icon={<Activity className="h-4 w-4 text-primary" />}
-          value={totals.requests.toLocaleString("pt-PT")}
-          subtitle="este mês"
-          loading={usageLoading}
-        />
-        <SummaryCard
-          title="Total Tokens"
-          icon={<Zap className="h-4 w-4 text-chart-2" />}
-          value={formatTokens(totals.tokens)}
-          subtitle="consumidos"
-          loading={usageLoading}
-        />
-        <SummaryCard
-          title="Custo Estimado"
-          icon={<DollarSign className="h-4 w-4 text-chart-3" />}
-          value={formatCost(totals.cost)}
-          subtitle="USD este mês"
-          loading={usageLoading}
-        />
-        <SummaryCard
-          title="Tenants Ativos"
-          icon={<BarChart3 className="h-4 w-4 text-chart-4" />}
-          value={totals.tenants.toString()}
-          subtitle="com consumo AI"
-          loading={usageLoading}
-        />
+        <SummaryCard title="Total Pedidos" icon={<Activity className="h-4 w-4 text-primary" />} value={totals.requests.toLocaleString("pt-PT")} subtitle="este mês" loading={usageLoading} />
+        <SummaryCard title="Total Tokens" icon={<Zap className="h-4 w-4 text-chart-2" />} value={formatTokens(totals.tokens)} subtitle="consumidos" loading={usageLoading} />
+        <SummaryCard title="Custo Estimado" icon={<DollarSign className="h-4 w-4 text-chart-3" />} value={formatCost(totals.cost)} subtitle="USD este mês" loading={usageLoading} />
+        <SummaryCard title="Tenants Ativos" icon={<BarChart3 className="h-4 w-4 text-chart-4" />} value={totals.tenants.toString()} subtitle="com consumo AI" loading={usageLoading} />
       </div>
 
       {/* Charts Section */}
       <Tabs defaultValue="daily" className="space-y-4">
         <TabsList>
-          <TabsTrigger value="daily" className="gap-1.5">
-            <TrendingUp className="h-3.5 w-3.5" />
-            Tendência Diária
-          </TabsTrigger>
-          <TabsTrigger value="modules" className="gap-1.5">
-            <Layers className="h-3.5 w-3.5" />
-            Por Módulo
-          </TabsTrigger>
+          <TabsTrigger value="daily" className="gap-1.5"><TrendingUp className="h-3.5 w-3.5" />Tendência Diária</TabsTrigger>
+          <TabsTrigger value="modules" className="gap-1.5"><Layers className="h-3.5 w-3.5" />Por Módulo</TabsTrigger>
         </TabsList>
 
-        {/* Daily Trend Chart */}
         <TabsContent value="daily">
           <div className="grid gap-4 lg:grid-cols-2">
             <Card className="border-border/50">
@@ -224,7 +275,6 @@ export default function AdminAIUsage() {
           </div>
         </TabsContent>
 
-        {/* Module Breakdown */}
         <TabsContent value="modules">
           <div className="grid gap-4 lg:grid-cols-2">
             <Card className="border-border/50">
@@ -239,18 +289,7 @@ export default function AdminAIUsage() {
                   <ChartContainer config={moduleChartConfig} className="h-[280px] w-full">
                     <PieChart>
                       <ChartTooltip content={<ChartTooltipContent nameKey="name" />} />
-                      <Pie
-                        data={modulePieData}
-                        dataKey="value"
-                        nameKey="name"
-                        cx="50%"
-                        cy="50%"
-                        outerRadius={100}
-                        innerRadius={50}
-                        paddingAngle={2}
-                        label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                        labelLine={false}
-                      >
+                      <Pie data={modulePieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={100} innerRadius={50} paddingAngle={2} label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`} labelLine={false}>
                         {modulePieData.map((entry, index) => (
                           <Cell key={`cell-${index}`} fill={entry.fill} />
                         ))}
@@ -270,9 +309,7 @@ export default function AdminAIUsage() {
               </CardHeader>
               <CardContent>
                 {modulesLoading ? (
-                  <div className="space-y-3">
-                    {[1, 2, 3].map(i => <Skeleton key={i} className="h-14 w-full" />)}
-                  </div>
+                  <div className="space-y-3">{[1, 2, 3].map(i => <Skeleton key={i} className="h-14 w-full" />)}</div>
                 ) : modulesData?.modules && modulesData.modules.length > 0 ? (
                   <div className="space-y-3">
                     {modulesData.modules.map((m, i) => {
@@ -280,25 +317,14 @@ export default function AdminAIUsage() {
                       const pct = totalReqs > 0 ? (m.total_requests / totalReqs) * 100 : 0;
                       return (
                         <div key={m.module_key} className="flex items-center gap-3 p-3 rounded-lg border border-border/50">
-                          <div
-                            className="h-3 w-3 rounded-full shrink-0"
-                            style={{ backgroundColor: MODULE_COLORS[i % MODULE_COLORS.length] }}
-                          />
+                          <div className="h-3 w-3 rounded-full shrink-0" style={{ backgroundColor: MODULE_COLORS[i % MODULE_COLORS.length] }} />
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center justify-between">
-                              <span className="text-sm font-medium">
-                                {MODULE_LABELS[m.module_key] || m.module_key}
-                              </span>
+                              <span className="text-sm font-medium">{MODULE_LABELS[m.module_key] || m.module_key}</span>
                               <span className="text-xs text-muted-foreground">{pct.toFixed(0)}%</span>
                             </div>
                             <div className="mt-1 h-1.5 rounded-full bg-muted overflow-hidden">
-                              <div
-                                className="h-full rounded-full transition-all"
-                                style={{
-                                  width: `${Math.max(pct, 3)}%`,
-                                  backgroundColor: MODULE_COLORS[i % MODULE_COLORS.length],
-                                }}
-                              />
+                              <div className="h-full rounded-full transition-all" style={{ width: `${Math.max(pct, 3)}%`, backgroundColor: MODULE_COLORS[i % MODULE_COLORS.length] }} />
                             </div>
                             <div className="flex gap-4 mt-1.5 text-xs text-muted-foreground">
                               <span>{m.total_requests} pedidos</span>
@@ -322,17 +348,12 @@ export default function AdminAIUsage() {
       {/* Tenant Breakdown Table */}
       <Card className="border-border/50">
         <CardHeader>
-          <CardTitle className="text-lg flex items-center gap-2">
-            <BarChart3 className="h-5 w-5 text-primary" />
-            Consumo por Tenant
-          </CardTitle>
+          <CardTitle className="text-lg flex items-center gap-2"><BarChart3 className="h-5 w-5 text-primary" />Consumo por Tenant</CardTitle>
           <CardDescription>Distribuição do consumo de IA por empresa</CardDescription>
         </CardHeader>
         <CardContent>
           {usageLoading ? (
-            <div className="space-y-3">
-              {[1, 2, 3].map(i => <Skeleton key={i} className="h-16 w-full" />)}
-            </div>
+            <div className="space-y-3">{[1, 2, 3].map(i => <Skeleton key={i} className="h-16 w-full" />)}</div>
           ) : usageData?.tenants && usageData.tenants.some(t => t.total_requests > 0) ? (
             <div className="space-y-3">
               <div className="grid grid-cols-5 gap-4 px-4 py-2 text-xs font-medium text-muted-foreground uppercase tracking-wider">
@@ -341,39 +362,22 @@ export default function AdminAIUsage() {
                 <div className="text-right">Tokens</div>
                 <div className="text-right">Custo (USD)</div>
               </div>
-              {usageData.tenants
-                .filter(t => t.total_requests > 0)
-                .sort((a, b) => b.total_tokens - a.total_tokens)
-                .map(tenant => {
-                  const pct = totals.tokens > 0 ? (tenant.total_tokens / totals.tokens) * 100 : 0;
-                  return (
-                    <div
-                      key={tenant.tenant_id}
-                      className="grid grid-cols-5 gap-4 items-center p-4 rounded-lg border border-border/50 hover:border-border transition-colors"
-                    >
-                      <div className="col-span-2">
-                        <p className="font-medium text-sm">
-                          {tenant.company_name || `Tenant #${tenant.tenant_id}`}
-                        </p>
-                        <div className="mt-1 h-1.5 rounded-full bg-muted overflow-hidden">
-                          <div
-                            className="h-full rounded-full bg-primary transition-all"
-                            style={{ width: `${Math.max(pct, 2)}%` }}
-                          />
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <span className="text-sm font-medium">{tenant.total_requests.toLocaleString("pt-PT")}</span>
-                      </div>
-                      <div className="text-right">
-                        <span className="text-sm font-medium">{formatTokens(tenant.total_tokens)}</span>
-                      </div>
-                      <div className="text-right">
-                        <span className="text-sm font-medium">{formatCost(tenant.total_cost_usd)}</span>
+              {usageData.tenants.filter(t => t.total_requests > 0).sort((a, b) => b.total_tokens - a.total_tokens).map(tenant => {
+                const pct = totals.tokens > 0 ? (tenant.total_tokens / totals.tokens) * 100 : 0;
+                return (
+                  <div key={tenant.tenant_id} className="grid grid-cols-5 gap-4 items-center p-4 rounded-lg border border-border/50 hover:border-border transition-colors">
+                    <div className="col-span-2">
+                      <p className="font-medium text-sm">Tenant #{tenant.tenant_id}</p>
+                      <div className="mt-1 h-1.5 rounded-full bg-muted overflow-hidden">
+                        <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.max(pct, 2)}%` }} />
                       </div>
                     </div>
-                  );
-                })}
+                    <div className="text-right"><span className="text-sm font-medium">{tenant.total_requests.toLocaleString("pt-PT")}</span></div>
+                    <div className="text-right"><span className="text-sm font-medium">{formatTokens(tenant.total_tokens)}</span></div>
+                    <div className="text-right"><span className="text-sm font-medium">{formatCost(tenant.total_cost_usd)}</span></div>
+                  </div>
+                );
+              })}
               <div className="grid grid-cols-5 gap-4 items-center p-4 rounded-lg bg-muted/50 font-semibold text-sm">
                 <div className="col-span-2">Total</div>
                 <div className="text-right">{totals.requests.toLocaleString("pt-PT")}</div>
@@ -390,17 +394,12 @@ export default function AdminAIUsage() {
       {/* Recent Events */}
       <Card className="border-border/50">
         <CardHeader>
-          <CardTitle className="text-lg flex items-center gap-2">
-            <Clock className="h-5 w-5 text-primary" />
-            Eventos Recentes
-          </CardTitle>
+          <CardTitle className="text-lg flex items-center gap-2"><Clock className="h-5 w-5 text-primary" />Eventos Recentes</CardTitle>
           <CardDescription>Últimas chamadas ao serviço de IA</CardDescription>
         </CardHeader>
         <CardContent>
           {recentLoading ? (
-            <div className="space-y-2">
-              {[1, 2, 3, 4, 5].map(i => <Skeleton key={i} className="h-12 w-full" />)}
-            </div>
+            <div className="space-y-2">{[1, 2, 3, 4, 5].map(i => <Skeleton key={i} className="h-12 w-full" />)}</div>
           ) : recentData?.events && recentData.events.length > 0 ? (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -419,32 +418,17 @@ export default function AdminAIUsage() {
                   {recentData.events.map(event => (
                     <tr key={event.id} className="border-b border-border/30 hover:bg-muted/30 transition-colors">
                       <td className="py-2.5 px-3 text-xs text-muted-foreground whitespace-nowrap">
-                        {new Date(event.created_at).toLocaleString("pt-PT", {
-                          day: "2-digit",
-                          month: "2-digit",
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
+                        {new Date(event.created_at).toLocaleString("pt-PT", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
                       </td>
                       <td className="py-2.5 px-3 font-medium">{event.company_name}</td>
                       <td className="py-2.5 px-3">
-                        <Badge variant="outline" className="text-xs">
-                          {MODULE_LABELS[event.module_key] || event.module_key}
-                        </Badge>
+                        <Badge variant="outline" className="text-xs">{MODULE_LABELS[event.module_key] || event.module_key}</Badge>
                       </td>
                       <td className="py-2.5 px-3 text-xs text-muted-foreground font-mono">{event.model}</td>
-                      <td className="py-2.5 px-3 text-right font-mono text-xs">
-                        {event.total_tokens > 0 ? formatTokens(event.total_tokens) : "—"}
-                      </td>
-                      <td className="py-2.5 px-3 text-right text-xs text-muted-foreground">
-                        {event.duration_ms > 0 ? `${(event.duration_ms / 1000).toFixed(1)}s` : "—"}
-                      </td>
+                      <td className="py-2.5 px-3 text-right font-mono text-xs">{event.total_tokens > 0 ? formatTokens(event.total_tokens) : "—"}</td>
+                      <td className="py-2.5 px-3 text-right text-xs text-muted-foreground">{event.duration_ms > 0 ? `${(event.duration_ms / 1000).toFixed(1)}s` : "—"}</td>
                       <td className="py-2.5 px-3 text-center">
-                        {event.status === "success" ? (
-                          <CheckCircle2 className="h-4 w-4 text-green-500 mx-auto" />
-                        ) : (
-                          <AlertCircle className="h-4 w-4 text-red-500 mx-auto" />
-                        )}
+                        {event.status === "success" ? <CheckCircle2 className="h-4 w-4 text-green-500 mx-auto" /> : <AlertCircle className="h-4 w-4 text-red-500 mx-auto" />}
                       </td>
                     </tr>
                   ))}
@@ -460,10 +444,7 @@ export default function AdminAIUsage() {
       {/* Info footer */}
       <Card className="border-border/50 bg-muted/20">
         <CardHeader>
-          <CardTitle className="text-sm flex items-center gap-2">
-            <Clock className="h-4 w-4 text-muted-foreground" />
-            Sobre os custos estimados
-          </CardTitle>
+          <CardTitle className="text-sm flex items-center gap-2"><Clock className="h-4 w-4 text-muted-foreground" />Sobre os custos estimados</CardTitle>
         </CardHeader>
         <CardContent>
           <p className="text-xs text-muted-foreground leading-relaxed">
@@ -478,14 +459,8 @@ export default function AdminAIUsage() {
   );
 }
 
-// ─── Reusable sub-components ──────────────────────────────────────────
-
 function SummaryCard({ title, icon, value, subtitle, loading }: {
-  title: string;
-  icon: React.ReactNode;
-  value: string;
-  subtitle: string;
-  loading: boolean;
+  title: string; icon: React.ReactNode; value: string; subtitle: string; loading: boolean;
 }) {
   return (
     <Card className="border-border/50">
@@ -494,11 +469,7 @@ function SummaryCard({ title, icon, value, subtitle, loading }: {
         {icon}
       </CardHeader>
       <CardContent>
-        {loading ? (
-          <Skeleton className="h-8 w-16" />
-        ) : (
-          <div className="text-2xl font-bold">{value}</div>
-        )}
+        {loading ? <Skeleton className="h-8 w-16" /> : <div className="text-2xl font-bold">{value}</div>}
         <p className="text-xs text-muted-foreground mt-1">{subtitle}</p>
       </CardContent>
     </Card>
@@ -510,9 +481,7 @@ function EmptyState({ message }: { message: string }) {
     <div className="text-center py-12">
       <Brain className="h-12 w-12 text-muted-foreground/30 mx-auto mb-3" />
       <p className="text-muted-foreground">{message}</p>
-      <p className="text-xs text-muted-foreground mt-1">
-        O consumo será registado quando os módulos utilizarem o serviço de IA
-      </p>
+      <p className="text-xs text-muted-foreground mt-1">O consumo será registado quando os módulos utilizarem o serviço de IA</p>
     </div>
   );
 }

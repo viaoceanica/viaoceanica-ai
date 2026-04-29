@@ -39,6 +39,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 interface UseQueryOptions {
   enabled?: boolean;
+  refetchIntervalMs?: number;
 }
 
 interface UseQueryResult<T> {
@@ -79,6 +80,14 @@ export function useQuery<T>(path: string | null, opts?: UseQueryOptions): UseQue
       setIsLoading(false);
     }
   }, [enabled, path]);
+
+  useEffect(() => {
+    if (!enabled || !opts?.refetchIntervalMs || opts.refetchIntervalMs <= 0) return;
+    const interval = window.setInterval(() => {
+      fetchData();
+    }, opts.refetchIntervalMs);
+    return () => window.clearInterval(interval);
+  }, [enabled, opts?.refetchIntervalMs, fetchData]);
 
   return { data, isLoading, error, refetch: fetchData };
 }
