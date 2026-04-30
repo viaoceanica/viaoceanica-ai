@@ -15,9 +15,10 @@ import os
 import re
 import ssl
 import time
+import unicodedata
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
 from email.utils import getaddresses, parsedate_to_datetime
@@ -25,11 +26,11 @@ from typing import Literal, Optional
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, delete as sql_delete, func, select
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, delete as sql_delete, func, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from ai_client import ask_assistant
@@ -44,13 +45,14 @@ DEFAULT_TENANT = os.getenv("DEFAULT_TENANT_ID", "")
 ALLOW_DEMO_TENANT = os.getenv("ALLOW_DEMO_TENANT", "false").lower() in {"1", "true", "yes", "on"}
 EMAIL_CREDENTIALS_SECRET = os.getenv("EMAIL_CREDENTIALS_SECRET", "email-module-dev-secret-change-me")
 SYNC_FETCH_LIMIT = int(os.getenv("EMAIL_SYNC_FETCH_LIMIT", "25"))
+MANUAL_SYNC_FETCH_LIMIT = int(os.getenv("EMAIL_MANUAL_SYNC_FETCH_LIMIT", "5"))
 _start_time = time.time()
 
 MailboxSecurityMode = Literal["ssl_tls", "starttls", "none"]
 MailboxAccessMode = Literal["read_only", "read_write"]
 CampaignStatus = Literal["draft", "scheduled", "sending", "sent"]
 AutomationStatus = Literal["active", "paused"]
-EmailAction = Literal["mark_read", "mark_unread", "delete", "move"]
+EmailAction = Literal["mark_read", "mark_unread", "delete", "move", "flag", "unflag"]
 
 
 def utc_now() -> datetime:
@@ -269,6 +271,26 @@ class ParsedEmailPayload(BaseModel):
     has_attachments: bool = False
 
 
+class AssistantContextRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    limit: int = Field(default=12, ge=1, le=25)
+    selected_email_id: Optional[str] = Field(default=None, max_length=64)
+    selected_email_ids: list[str] = Field(default_factory=list, max_length=25)
+
+
+class AssistantActionPreviewRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    limit: int = Field(default=5, ge=1, le=10)
+    selected_email_id: Optional[str] = Field(default=None, max_length=64)
+    selected_email_ids: list[str] = Field(default_factory=list, max_length=25)
+
+
+class AssistantActionExecuteRequest(BaseModel):
+    action: EmailAction
+    email_ids: list[str] = Field(min_length=1, max_length=50)
+    target_folder: Optional[str] = Field(default=None, max_length=255)
+
+
 def get_db_session() -> Session:
     if _SessionLocal is None:
         raise HTTPException(status_code=503, detail="A base de dados do módulo Email não está configurada")
@@ -354,6 +376,887 @@ def normalize_date(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value
     return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+ASSISTANT_QUERY_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "da",
+    "de",
+    "do",
+    "dos",
+    "das",
+    "emails",
+    "email",
+    "form",
+    "from",
+    "for",
+    "in",
+    "mails",
+    "message",
+    "messages",
+    "mensagem",
+    "mensagens",
+    "para",
+    "por",
+    "recipient",
+    "recipients",
+    "regarding",
+    "summarize",
+    "summary",
+    "than",
+    "sobre",
+    "to",
+    "o",
+    "or",
+    "the",
+}
+
+GENERIC_EMAIL_REFERENCES = {
+    "email",
+    "emails",
+    "latest",
+    "latest email",
+    "latest emails",
+    "last email",
+    "last emails",
+    "last",
+    "most recent email",
+    "most recent emails",
+    "most recent",
+    "recent",
+    "this email",
+    "these emails",
+    "o email mais recente",
+    "o ultimo email",
+    "o último email",
+}
+
+
+def truncate_text(value: str | None, max_length: int = 180) -> str:
+    cleaned = re.sub(r"\s+", " ", (value or "")).strip()
+    if len(cleaned) <= max_length:
+        return cleaned
+    return f"{cleaned[: max_length - 1].rstrip()}…"
+
+
+def normalize_assistant_query_phrase(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", value).strip(" '\".,;:!?()[]{}")
+    cleaned = re.sub(r"^(?:the|o|a|os|as)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:emails?|mails?|messages?|mensagens?)\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" '\".,;:!?()[]{}")
+    return cleaned[:120]
+
+
+def extract_sender_queries(question: str) -> list[str]:
+    candidates: list[str] = []
+    normalized = re.sub(r"\s+", " ", question).strip()
+
+    patterns = [
+        r"(?:emails?|mails?|messages?|mensagens?)\s+(?:from|form|de|do|da|remetente|sender)\s+(.+?)(?:$|[?!,;])",
+        r"(?:from|form|de|do|da|remetente|sender)\s+(.+?)(?:$|[?!,;])",
+    ]
+    for pattern in patterns:
+        for match in re.findall(pattern, normalized, flags=re.IGNORECASE):
+            cleaned = normalize_assistant_query_phrase(match)
+            if cleaned:
+                candidates.append(cleaned)
+
+    for match in re.findall(r'["“](.+?)["”]', normalized):
+        cleaned = normalize_assistant_query_phrase(match)
+        if cleaned:
+            candidates.append(cleaned)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = candidate.lower()
+        if normalize_search_text(candidate) in GENERIC_EMAIL_REFERENCES:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped[:3]
+
+
+def extract_recipient_queries(question: str) -> list[str]:
+    candidates: list[str] = []
+    normalized = re.sub(r"\s+", " ", question).strip()
+
+    patterns = [
+        r"(?:emails?|mails?|messages?|mensagens?)\s+(?:to|para|destinatario|destinatário|recipient)\s+(.+?)(?:$|[?!,;])",
+        r"(?:to|para|destinatario|destinatário|recipient)\s+(.+?)(?:$|[?!,;])",
+    ]
+    for pattern in patterns:
+        for match in re.findall(pattern, normalized, flags=re.IGNORECASE):
+            cleaned = normalize_assistant_query_phrase(match)
+            if cleaned:
+                candidates.append(cleaned)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = normalize_search_text(candidate)
+        if not key or key in GENERIC_EMAIL_REFERENCES or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped[:3]
+
+
+def build_sender_search_filters(term: str) -> list:
+    normalized = normalize_assistant_query_phrase(term).lower()
+    if not normalized:
+        return []
+
+    name_field = func.lower(func.coalesce(EmailMessage.from_name, ""))
+    address_field = func.lower(func.coalesce(EmailMessage.from_address, ""))
+    email_addresses = re.findall(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", normalized, flags=re.IGNORECASE)
+    if email_addresses:
+        return [address_field.like(f"%{email_address.lower()}%") for email_address in email_addresses]
+
+    tokens = [
+        token
+        for token in re.split(r"[^a-z0-9@._%+-]+", normalized)
+        if len(token) >= 2 and token not in ASSISTANT_QUERY_STOPWORDS
+    ][:4]
+    return [or_(name_field.like(f"%{token}%"), address_field.like(f"%{token}%")) for token in tokens]
+
+
+def build_recipient_search_filters(term: str) -> list:
+    normalized = normalize_assistant_query_phrase(term).lower()
+    if not normalized:
+        return []
+
+    recipient_field = func.lower(func.coalesce(EmailMessage.to_addresses, ""))
+    email_addresses = re.findall(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", normalized, flags=re.IGNORECASE)
+    if email_addresses:
+        return [recipient_field.like(f"%{email_address.lower()}%") for email_address in email_addresses]
+
+    tokens = [
+        token
+        for token in re.split(r"[^a-z0-9@._%+-]+", normalized)
+        if len(token) >= 2 and token not in ASSISTANT_QUERY_STOPWORDS
+    ][:4]
+    return [recipient_field.like(f"%{token}%") for token in tokens]
+
+
+def serialize_assistant_email_summary(item: EmailMessage) -> dict:
+    sender = item.from_name or item.from_address or "Remetente desconhecido"
+    return {
+        "id": item.id,
+        "subject": item.subject or "(Sem assunto)",
+        "from": sender,
+        "from_address": item.from_address,
+        "to_addresses": item.to_addresses,
+        "folder": item.folder or "INBOX",
+        "received_at": item.received_at.isoformat() if item.received_at else None,
+        "snippet": truncate_text(item.snippet or item.body_text or item.body_html or "", 180),
+        "is_seen": bool(item.is_seen),
+        "is_flagged": bool(item.is_flagged),
+        "has_attachments": bool(item.has_attachments),
+    }
+
+
+def serialize_assistant_email_detail(item: EmailMessage) -> dict:
+    payload = serialize_assistant_email_summary(item)
+    payload["body_preview"] = truncate_text(item.body_text or item.snippet or item.body_html or "", 1600)
+    return payload
+
+
+def normalize_selected_email_ids(selected_email_id: str | None, selected_email_ids: list[str] | None) -> list[str]:
+    unique_ids: list[str] = []
+    for candidate in [selected_email_id, *(selected_email_ids or [])]:
+        if not candidate or candidate in unique_ids:
+            continue
+        unique_ids.append(candidate)
+    return unique_ids[:25]
+
+
+def load_selected_emails_for_assistant(session: Session, tenant_id: str, selected_email_id: str | None, selected_email_ids: list[str] | None) -> list[EmailMessage]:
+    normalized_ids = normalize_selected_email_ids(selected_email_id, selected_email_ids)
+    if not normalized_ids:
+        return []
+
+    items = session.scalars(
+        select(EmailMessage)
+        .where(
+            EmailMessage.tenant_id == tenant_id,
+            EmailMessage.remote_deleted.is_(False),
+            EmailMessage.id.in_(normalized_ids),
+        )
+        .order_by(EmailMessage.received_at.desc(), EmailMessage.updated_at.desc())
+    ).all()
+    order_map = {email_id: index for index, email_id in enumerate(normalized_ids)}
+    return sorted(items, key=lambda item: order_map.get(item.id, len(order_map)))
+
+
+def build_participant_match_payload(
+    session: Session,
+    base_filters: list,
+    query_value: str,
+    filter_builder,
+    grouped_columns: tuple,
+    limit: int,
+) -> dict | None:
+    scoped_filters = [*base_filters, *filter_builder(query_value)]
+    if len(scoped_filters) == len(base_filters):
+        return None
+
+    total = int(session.scalar(select(func.count()).select_from(EmailMessage).where(*scoped_filters)) or 0)
+    grouped = session.execute(
+        select(*grouped_columns, func.count())
+        .where(*scoped_filters)
+        .group_by(*grouped_columns)
+        .order_by(func.count().desc())
+        .limit(5)
+    ).all()
+    recent_matches = session.scalars(
+        select(EmailMessage)
+        .where(*scoped_filters)
+        .order_by(EmailMessage.received_at.desc(), EmailMessage.updated_at.desc())
+        .limit(min(limit, 5))
+    ).all()
+    return {
+        "query": query_value,
+        "total": total,
+        "matches": grouped,
+        "recent_emails": [serialize_assistant_email_summary(item) for item in recent_matches],
+    }
+
+
+def extract_keyword_terms(message: str, sender_queries: list[str], recipient_queries: list[str], subject_queries: list[str]) -> list[str]:
+    normalized = normalize_search_text(message)
+    for phrase in [*sender_queries, *recipient_queries, *subject_queries]:
+        phrase_normalized = normalize_search_text(phrase)
+        if phrase_normalized:
+            normalized = normalized.replace(phrase_normalized, " ")
+
+    normalized = re.sub(
+        r"\b(delete|remove|remover|apagar|eliminar|trash|move|mover|transferir|archive|arquivar|flag|unflag|star|important|importante|mark|latest|last|most recent|ultimo|ultima|último|última|read|unread|lido|ler|week|semana|today|hoje|yesterday|ontem|days|day|dias|dia|older|mais antigo|older than|this week|past|ultimos|últimos)\b",
+        " ",
+        normalized,
+    )
+    tokens = [
+        token
+        for token in re.split(r"[^a-z0-9@._%+-]+", normalized)
+        if len(token) >= 3 and token not in ASSISTANT_QUERY_STOPWORDS and token not in GENERIC_EMAIL_REFERENCES
+    ]
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        deduped.append(token)
+    return deduped[:4]
+
+
+def extract_email_query_filters(message: str) -> dict:
+    normalized = normalize_search_text(message)
+    now = datetime.utcnow()
+    filters = {
+        "latest_only": request_targets_latest_email(message),
+        "unread_only": bool(re.search(r"\b(unread|por ler|nao lido|não lido)\b", normalized)),
+        "flagged_only": bool(re.search(r"\b(flagged|important|importantes|importante|starred|com estrela)\b", normalized)),
+        "attachments_only": bool(re.search(r"\b(with attachments|attachment|attachments|anexo|anexos)\b", normalized)),
+        "older_than_days": None,
+        "received_after": None,
+        "received_before": None,
+        "folder_query": None,
+    }
+
+    older_match = re.search(r"\b(?:older than|mais antigo que|mais antigas que)\s+(\d{1,3})\s+(?:days|day|dias|dia)\b", normalized)
+    if older_match:
+        filters["older_than_days"] = int(older_match.group(1))
+        filters["received_before"] = now - timedelta(days=int(older_match.group(1)))
+
+    last_days_match = re.search(r"\b(?:last|past|ultimos|últimos)\s+(\d{1,3})\s+(?:days|day|dias|dia)\b", normalized)
+    if last_days_match:
+        filters["received_after"] = now - timedelta(days=int(last_days_match.group(1)))
+
+    if re.search(r"\b(this week|esta semana)\b", normalized):
+        start_of_week = now - timedelta(days=now.weekday())
+        filters["received_after"] = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif re.search(r"\b(today|hoje)\b", normalized):
+        filters["received_after"] = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif re.search(r"\b(yesterday|ontem)\b", normalized):
+        start_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        filters["received_after"] = start_today - timedelta(days=1)
+        filters["received_before"] = start_today
+
+    folder_match = re.search(r"\b(?:in|na|no|para a pasta|pasta)\s+(inbox|archive|arquivo|spam|junk|trash|lixo|sent|enviados|drafts|rascunhos?)\b", normalized)
+    if folder_match:
+        filters["folder_query"] = folder_match.group(1)
+
+    return filters
+
+
+def apply_email_query_filters(filters: list, filter_info: dict) -> list:
+    scoped = [*filters]
+    if filter_info.get("unread_only"):
+        scoped.append(EmailMessage.is_seen.is_(False))
+    if filter_info.get("flagged_only"):
+        scoped.append(EmailMessage.is_flagged.is_(True))
+    if filter_info.get("attachments_only"):
+        scoped.append(EmailMessage.has_attachments.is_(True))
+    if filter_info.get("received_after") is not None:
+        scoped.append(EmailMessage.received_at >= normalize_date(filter_info["received_after"]))
+    if filter_info.get("received_before") is not None:
+        scoped.append(EmailMessage.received_at < normalize_date(filter_info["received_before"]))
+    if filter_info.get("folder_query"):
+        folder_field = func.lower(func.coalesce(EmailMessage.folder, ""))
+        normalized_folder = normalize_search_text(str(filter_info["folder_query"]))
+        scoped.append(folder_field.like(f"%{normalized_folder}%"))
+    return scoped
+
+
+def build_keyword_filters(keyword_terms: list[str]) -> list:
+    subject_field = func.lower(func.coalesce(EmailMessage.subject, ""))
+    snippet_field = func.lower(func.coalesce(EmailMessage.snippet, ""))
+    body_field = func.lower(func.coalesce(EmailMessage.body_text, ""))
+    html_field = func.lower(func.coalesce(EmailMessage.body_html, ""))
+    return [
+        or_(
+            subject_field.like(f"%{term}%"),
+            snippet_field.like(f"%{term}%"),
+            body_field.like(f"%{term}%"),
+            html_field.like(f"%{term}%"),
+        )
+        for term in keyword_terms
+    ]
+
+
+def build_email_assistant_context(
+    session: Session,
+    tenant_id: str,
+    question: str,
+    limit: int,
+    selected_email_id: str | None = None,
+    selected_email_ids: list[str] | None = None,
+) -> dict:
+    base_filters = [EmailMessage.tenant_id == tenant_id, EmailMessage.remote_deleted.is_(False)]
+    mailboxes = session.scalars(
+        select(Mailbox).where(Mailbox.tenant_id == tenant_id).order_by(Mailbox.updated_at.desc())
+    ).all()
+    mailbox_counts = get_mailbox_message_counts(session, tenant_id)
+
+    summary = {
+        "mailboxes_total": len(mailboxes),
+        "mailboxes_connected": sum(1 for item in mailboxes if item.status == "connected"),
+        "emails_total": int(session.scalar(select(func.count()).select_from(EmailMessage).where(*base_filters)) or 0),
+        "emails_unread": int(
+            session.scalar(
+                select(func.count()).select_from(EmailMessage).where(*base_filters, EmailMessage.is_seen.is_(False))
+            )
+            or 0
+        ),
+        "emails_flagged": int(
+            session.scalar(
+                select(func.count()).select_from(EmailMessage).where(*base_filters, EmailMessage.is_flagged.is_(True))
+            )
+            or 0
+        ),
+        "emails_with_attachments": int(
+            session.scalar(
+                select(func.count()).select_from(EmailMessage).where(*base_filters, EmailMessage.has_attachments.is_(True))
+            )
+            or 0
+        ),
+    }
+
+    recent_emails = session.scalars(
+        select(EmailMessage)
+        .where(*base_filters)
+        .order_by(EmailMessage.received_at.desc(), EmailMessage.updated_at.desc())
+        .limit(limit)
+    ).all()
+    selected_emails = load_selected_emails_for_assistant(session, tenant_id, selected_email_id, selected_email_ids)
+
+    sender_queries = extract_sender_queries(question)
+    recipient_queries = extract_recipient_queries(question)
+    keyword_terms = extract_keyword_terms(question, sender_queries, recipient_queries, extract_subject_queries(question))
+    query_filters, query_info = build_assistant_email_query(session, tenant_id, question)
+
+    sender_matches: list[dict] = []
+    for sender_query in sender_queries:
+        payload = build_participant_match_payload(
+            session,
+            base_filters,
+            sender_query,
+            build_sender_search_filters,
+            (EmailMessage.from_name, EmailMessage.from_address),
+            limit,
+        )
+        if payload:
+            sender_matches.append(
+                {
+                    "query": payload["query"],
+                    "total": payload["total"],
+                    "matches": [
+                        {
+                            "from_name": row[0],
+                            "from_address": row[1],
+                            "count": int(row[2] or 0),
+                        }
+                        for row in payload["matches"]
+                    ],
+                    "recent_emails": payload["recent_emails"],
+                }
+            )
+
+    recipient_matches: list[dict] = []
+    for recipient_query in recipient_queries:
+        payload = build_participant_match_payload(
+            session,
+            base_filters,
+            recipient_query,
+            build_recipient_search_filters,
+            (EmailMessage.to_addresses,),
+            limit,
+        )
+        if payload:
+            recipient_matches.append(
+                {
+                    "query": payload["query"],
+                    "total": payload["total"],
+                    "matches": [
+                        {
+                            "to_addresses": row[0],
+                            "count": int(row[1] or 0),
+                        }
+                        for row in payload["matches"]
+                    ],
+                    "recent_emails": payload["recent_emails"],
+                }
+            )
+
+    scoped_total = int(session.scalar(select(func.count()).select_from(EmailMessage).where(*query_filters)) or 0)
+    scoped_emails = session.scalars(
+        select(EmailMessage)
+        .where(*query_filters)
+        .order_by(EmailMessage.received_at.desc(), EmailMessage.updated_at.desc())
+        .limit(min(limit, 12))
+    ).all()
+
+    return {
+        "question": question,
+        "summary": summary,
+        "mailboxes": [
+            {
+                "id": item.id,
+                "name": item.name,
+                "email_address": item.email_address,
+                "status": item.status,
+                "stored_count": int(mailbox_counts.get(item.id, {}).get("stored_count", 0)),
+                "unread_count": int(mailbox_counts.get(item.id, {}).get("unread_count", 0)),
+                "flagged_count": int(mailbox_counts.get(item.id, {}).get("flagged_count", 0)),
+                "last_synced_at": item.last_synced_at.isoformat() if item.last_synced_at else None,
+            }
+            for item in mailboxes[:8]
+        ],
+        "recent_emails": [serialize_assistant_email_summary(item) for item in recent_emails],
+        "selected_email": serialize_assistant_email_detail(selected_emails[0]) if selected_emails else None,
+        "selected_emails": [serialize_assistant_email_detail(item) for item in selected_emails[:10]],
+        "sender_matches": sender_matches,
+        "recipient_matches": recipient_matches,
+        "query_scope": {
+            "total": scoped_total,
+            "filters": query_info,
+            "selected_email_count": len(selected_emails),
+            "recent_emails": [serialize_assistant_email_summary(item) for item in scoped_emails],
+            "keyword_terms": keyword_terms,
+        },
+    }
+
+
+def normalize_search_text(value: str | None) -> str:
+    normalized = unicodedata.normalize("NFKD", value or "")
+    ascii_text = "".join(char for char in normalized if not unicodedata.combining(char))
+    return re.sub(r"\s+", " ", ascii_text).strip().lower()
+
+
+def split_folder_segments_for_assistant(folder: str) -> list[str]:
+    return [segment.strip() for segment in re.split(r"[./]", folder or "") if segment.strip()]
+
+
+def trim_inbox_root_for_assistant(segments: list[str]) -> list[str]:
+    if len(segments) > 1 and normalize_search_text(segments[0]) == "inbox":
+        return segments[1:]
+    return segments
+
+
+def prettify_folder_segment_for_assistant(segment: str) -> str:
+    normalized = normalize_search_text(segment)
+    if normalized == "inbox":
+        return "Caixa de entrada"
+    if normalized in {"sent", "sent items", "enviados"}:
+        return "Enviados"
+    if normalized in {"draft", "drafts", "rascunho", "rascunhos"}:
+        return "Rascunhos"
+    if normalized in {"archive", "archives", "arquivo", "arquivos"}:
+        return "Arquivo"
+    if normalized in {"spam", "junk", "bulk mail"}:
+        return "Spam"
+    if normalized in {"trash", "bin", "lixo", "deleted"}:
+        return "Lixo"
+    return segment
+
+
+def folder_label_for_assistant(folder: str) -> str:
+    if not folder:
+        return "INBOX"
+    raw_segments = split_folder_segments_for_assistant(folder)
+    safe_segments = trim_inbox_root_for_assistant(raw_segments) or raw_segments
+    if not safe_segments:
+        return folder
+    return " / ".join(prettify_folder_segment_for_assistant(segment) for segment in safe_segments)
+
+
+def extract_subject_queries(question: str) -> list[str]:
+    candidates: list[str] = []
+    normalized = re.sub(r"\s+", " ", question).strip()
+    patterns = [
+        r"(?:subject|assunto)\s+(?:contains|contém|com|is|=)?\s*[\"“']?(.+?)[\"”']?(?:$|[?.!,;])",
+        r"(?:with subject|com assunto)\s*[\"“']?(.+?)[\"”']?(?:$|[?.!,;])",
+    ]
+    for pattern in patterns:
+        for match in re.findall(pattern, normalized, flags=re.IGNORECASE):
+            cleaned = truncate_text(normalize_assistant_query_phrase(match), 140)
+            if cleaned:
+                candidates.append(cleaned)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = normalize_search_text(candidate)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped[:3]
+
+
+def extract_email_action_intent(message: str) -> dict | None:
+    normalized = normalize_search_text(message)
+    if not normalized:
+        return None
+
+    if re.search(r"\b(unflag|remove important|remover importante|remove importante|tirar importante|desmarcar importante)\b", normalized):
+        return {"action": "unflag"}
+    if re.search(r"\b(mark unread|mark as unread|marcar por ler|marca por ler|marcar como por ler|marca como por ler|marcar nao lido|marca nao lido|nao lido|não lido|nao lidos|não lidos)\b", normalized):
+        return {"action": "mark_unread"}
+    if re.search(r"\b(mark|marcar|marca)\b", normalized) and re.search(r"\b(unread|por ler|nao lido|não lido|nao lidos|não lidos)\b", normalized):
+        return {"action": "mark_unread"}
+    if re.search(r"\b(mark read|mark as read|marcar lido|marca lido|marcar como lido|marca como lido|marcar lidos|marca lidos|marcar como lidos|marca como lidos)\b", normalized):
+        return {"action": "mark_read"}
+    if re.search(r"\b(mark|marcar|marca)\b", normalized) and re.search(r"\b(read|lido|lidos)\b", normalized):
+        return {"action": "mark_read"}
+    if re.search(r"\b(flag|star|important|importante|marcar importante|marca importante)\b", normalized):
+        return {"action": "flag"}
+    if re.search(r"\b(archive|arquivar|arquiva)\b", normalized):
+        return {"action": "move", "target_folder_query": "Arquivo"}
+    if re.search(r"\b(move|mover|move|mova|transferir|transfere)\b", normalized):
+        folder_match = re.search(r"\b(?:to|para)\s+(.+?)(?:$|[?.!,;])", message, flags=re.IGNORECASE)
+        target_folder_query = normalize_assistant_query_phrase(folder_match.group(1)) if folder_match else ""
+        return {"action": "move", "target_folder_query": target_folder_query}
+    if re.search(r"\b(delete|remove|remover|remove|apagar|apaga|eliminar|elimina|trash)\b", normalized):
+        return {"action": "delete"}
+    return None
+
+
+def action_label_for_assistant(action: str) -> str:
+    return {
+        "delete": "apagar",
+        "move": "mover",
+        "mark_read": "marcar como lido",
+        "mark_unread": "marcar como por ler",
+        "flag": "marcar como importante",
+        "unflag": "remover a marca de importante",
+    }.get(action, action)
+
+
+def request_targets_latest_email(message: str) -> bool:
+    normalized = normalize_search_text(message)
+    return bool(
+        re.search(r"\b(latest|last|most recent|ultimo|ultima|último|última|mais recente)\b", normalized)
+        and re.search(r"\b(email|emails|mail|mails|message|messages|mensagem|mensagens)\b", normalized)
+    )
+
+
+def request_targets_selected_email(message: str) -> bool:
+    normalized = normalize_search_text(message)
+    return bool(
+        re.search(r"\b(this|selected|opened|open|current|este|esta|isto|selecionado|selecionada|aberto|aberta|atual)\b", normalized)
+        and re.search(r"\b(email|mail|message|mensagem|resposta)\b", normalized)
+    )
+
+
+def request_targets_selected_emails(message: str) -> bool:
+    normalized = normalize_search_text(message)
+    return bool(
+        re.search(r"\b(these|selected|selection|current|bulk|estas|estes|selecao|seleção|selecionados|selecionadas|atuais|todos os selecionados|todas as selecionadas)\b", normalized)
+        and re.search(r"\b(emails|mails|messages|mensagens|selecao|seleção|selecionados|selecionadas)\b", normalized)
+    )
+
+
+def build_assistant_email_query(session: Session, tenant_id: str, message: str):
+    filters = [EmailMessage.tenant_id == tenant_id, EmailMessage.remote_deleted.is_(False)]
+    sender_queries = extract_sender_queries(message)
+    recipient_queries = extract_recipient_queries(message)
+    subject_queries = extract_subject_queries(message)
+    filter_info = extract_email_query_filters(message)
+    keyword_terms = extract_keyword_terms(message, sender_queries, recipient_queries, subject_queries)
+
+    for sender_query in sender_queries[:1]:
+        sender_filters = build_sender_search_filters(sender_query)
+        if sender_filters:
+            filters.extend(sender_filters)
+
+    for recipient_query in recipient_queries[:1]:
+        recipient_filters = build_recipient_search_filters(recipient_query)
+        if recipient_filters:
+            filters.extend(recipient_filters)
+
+    subject_field = func.lower(func.coalesce(EmailMessage.subject, ""))
+    for subject_query in subject_queries[:2]:
+        normalized_subject = normalize_search_text(subject_query)
+        if normalized_subject:
+            filters.append(subject_field.like(f"%{normalized_subject}%"))
+
+    if keyword_terms and not sender_queries and not recipient_queries and not subject_queries:
+        filters.extend(build_keyword_filters(keyword_terms))
+
+    filters = apply_email_query_filters(filters, filter_info)
+
+    return filters, {
+        "sender_queries": sender_queries,
+        "recipient_queries": recipient_queries,
+        "subject_queries": subject_queries,
+        "keyword_terms": keyword_terms,
+        "latest_only": bool(filter_info.get("latest_only")),
+        "unread_only": bool(filter_info.get("unread_only")),
+        "flagged_only": bool(filter_info.get("flagged_only")),
+        "attachments_only": bool(filter_info.get("attachments_only")),
+        "older_than_days": filter_info.get("older_than_days"),
+        "folder_query": filter_info.get("folder_query"),
+        "received_after": normalize_date(filter_info.get("received_after")).isoformat() if filter_info.get("received_after") else None,
+        "received_before": normalize_date(filter_info.get("received_before")).isoformat() if filter_info.get("received_before") else None,
+        "has_targeting": bool(sender_queries or recipient_queries or subject_queries or keyword_terms or filter_info.get("latest_only") or filter_info.get("unread_only") or filter_info.get("flagged_only") or filter_info.get("attachments_only") or filter_info.get("older_than_days") or filter_info.get("received_after") or filter_info.get("received_before") or filter_info.get("folder_query")),
+    }
+
+
+def folder_aliases_for_assistant(folder: str) -> set[str]:
+    aliases = {normalize_search_text(folder), normalize_search_text(folder_label_for_assistant(folder))}
+    raw_segments = split_folder_segments_for_assistant(folder)
+    safe_segments = trim_inbox_root_for_assistant(raw_segments) or raw_segments
+    if safe_segments:
+        aliases.add(normalize_search_text(safe_segments[-1]))
+        aliases.add(normalize_search_text(" ".join(safe_segments)))
+        aliases.add(normalize_search_text(" / ".join(prettify_folder_segment_for_assistant(segment) for segment in safe_segments)))
+    aliases.discard("")
+    return aliases
+
+
+def resolve_target_folder_for_assistant(target_folder_query: str, folders: list[str]) -> tuple[str | None, list[str]]:
+    normalized_target = normalize_search_text(target_folder_query)
+    if not normalized_target:
+        return None, []
+
+    exact_matches = [folder for folder in folders if normalized_target in folder_aliases_for_assistant(folder)]
+    if len(exact_matches) == 1:
+        return exact_matches[0], []
+    if len(exact_matches) > 1:
+        return None, [folder_label_for_assistant(folder) for folder in exact_matches[:5]]
+
+    partial_matches = [
+        folder
+        for folder in folders
+        if any(normalized_target in alias for alias in folder_aliases_for_assistant(folder))
+    ]
+    if len(partial_matches) == 1:
+        return partial_matches[0], []
+    return None, [folder_label_for_assistant(folder) for folder in partial_matches[:5]]
+
+
+def build_email_action_confirmation(action: str, emails: list[EmailMessage], total: int, target_folder: str | None = None) -> str:
+    verb = {
+        "delete": "apague",
+        "move": "mova",
+        "mark_read": "marque como lido",
+        "mark_unread": "marque como por ler",
+        "flag": "marque como importante",
+        "unflag": "remova a marca de importante de",
+    }.get(action, action_label_for_assistant(action))
+    target_suffix = f" para \"{folder_label_for_assistant(target_folder)}\"" if action == "move" and target_folder else ""
+    count_label = "este email" if total == 1 else f"estes {total} emails"
+    if action == "unflag":
+        count_label = "deste email" if total == 1 else f"destes {total} emails"
+    lines = [f"Encontrei {total} email(s). Queres que eu {verb} {count_label}{target_suffix}?"]
+    for item in emails[:5]:
+        sender = item.from_name or item.from_address or "Remetente desconhecido"
+        received = item.received_at.strftime("%Y-%m-%d %H:%M") if item.received_at else "sem data"
+        lines.append(f"- {received} | {sender} | {item.subject or '(Sem assunto)'}")
+    if total > len(emails[:5]):
+        lines.append(f"- … e mais {total - len(emails[:5])} email(s)")
+    lines.append("Responde 'confirmar' para executar ou 'cancelar' para abortar.")
+    return "\n".join(lines)
+
+
+def build_email_action_preview(
+    session: Session,
+    tenant_id: str,
+    message: str,
+    limit: int,
+    selected_email_id: str | None = None,
+    selected_email_ids: list[str] | None = None,
+) -> dict:
+    intent = extract_email_action_intent(message)
+    if not intent:
+        return {"matched": False}
+
+    action = str(intent["action"])
+    filters, query_info = build_assistant_email_query(session, tenant_id, message)
+    selected_items = load_selected_emails_for_assistant(session, tenant_id, selected_email_id, selected_email_ids)
+    targets_selected_single = bool(selected_items and request_targets_selected_email(message))
+    targets_selected_many = bool(selected_items and request_targets_selected_emails(message))
+
+    if targets_selected_single:
+        items = selected_items[:1]
+        total = len(items)
+        latest_only = True
+        query_info = {**query_info, "selected_email": True}
+    elif targets_selected_many:
+        items = selected_items[:25]
+        total = len(selected_items)
+        latest_only = False
+        query_info = {**query_info, "selected_emails": True}
+    else:
+        items = []
+        total = 0
+        latest_only = False
+
+    if not query_info.get("has_targeting") and not targets_selected_single and not targets_selected_many:
+        return {
+            "matched": True,
+            "ready": False,
+            "message": "Posso tratar disso, mas preciso que indiques melhor quais emails queres alterar. Diz-me um remetente, um destinatário, um endereço de email, um assunto, um tema como invoice/newsletter, um filtro como por ler/anexos, pede explicitamente o email mais recente, ou usa o email atualmente aberto/selecionado na interface.",
+        }
+
+    if not items:
+        query = select(EmailMessage).where(*filters).order_by(EmailMessage.received_at.desc(), EmailMessage.updated_at.desc())
+        latest_only = bool(query_info.get("latest_only"))
+        items = session.scalars(query.limit(1 if latest_only else 50)).all()
+        total = len(items) if latest_only else int(session.scalar(select(func.count()).select_from(EmailMessage).where(*filters)) or 0)
+
+    if not items or total == 0:
+        return {
+            "matched": True,
+            "ready": False,
+            "message": "Não encontrei emails que correspondam a esse pedido. Tenta indicar melhor o remetente, o destinatário, o assunto, o tema, a pasta, ou um intervalo temporal mais específico.",
+        }
+
+    if total > 25 and not latest_only:
+        return {
+            "matched": True,
+            "ready": False,
+            "message": f"Encontrei {total} emails para essa ação. Para segurança, afina o pedido com um remetente, assunto ou intervalo mais específico antes de eu executar alterações em massa.",
+        }
+
+    resolved_folder = None
+    target_folder_query = str(intent.get("target_folder_query") or "").strip()
+    if action == "move":
+        if not target_folder_query:
+            return {
+                "matched": True,
+                "ready": False,
+                "message": "Posso mover emails pelo assistente, mas preciso que indiques a pasta de destino, por exemplo: mover o email mais recente para Arquivo.",
+            }
+
+        mailbox_ids = {item.mailbox_id for item in items}
+        if len(mailbox_ids) != 1:
+            return {
+                "matched": True,
+                "ready": False,
+                "message": "Encontrei emails em várias mailboxes. Para mover pelo assistente, limita o pedido a uma única mailbox, remetente ou assunto.",
+            }
+
+        mailbox = get_mailbox_or_404(session, tenant_id, items[0].mailbox_id)
+        folders = list_mailbox_folders(mailbox)
+        resolved_folder, suggestions = resolve_target_folder_for_assistant(target_folder_query, folders)
+        if not resolved_folder:
+            suggestion_text = f" Sugestões: {', '.join(suggestions)}." if suggestions else ""
+            return {
+                "matched": True,
+                "ready": False,
+                "message": f"Não consegui resolver a pasta de destino \"{target_folder_query}\" nessa mailbox.{suggestion_text}",
+            }
+
+    actionable_items = items if latest_only else items[: min(total, 25)]
+    preview_items = actionable_items[: min(limit, len(actionable_items))]
+    return {
+        "matched": True,
+        "ready": True,
+        "action": action,
+        "target_folder": resolved_folder,
+        "target_folder_query": target_folder_query or None,
+        "email_ids": [item.id for item in actionable_items],
+        "email_count": len(actionable_items),
+        "emails": [serialize_assistant_email_summary(item) for item in preview_items],
+        "query_scope": query_info,
+        "confirmation_prompt": build_email_action_confirmation(action, preview_items, len(actionable_items), resolved_folder),
+    }
+
+
+def execute_email_assistant_action(session: Session, tenant_id: str, action: str, email_ids: list[str], target_folder: str | None) -> dict:
+    unique_ids = [email_id for index, email_id in enumerate(email_ids) if email_id and email_id not in email_ids[:index]]
+    if not unique_ids:
+        raise HTTPException(status_code=422, detail="Nenhum email foi indicado para a ação do assistente")
+
+    items = session.scalars(
+        select(EmailMessage)
+        .where(EmailMessage.tenant_id == tenant_id, EmailMessage.id.in_(unique_ids))
+        .order_by(EmailMessage.received_at.desc(), EmailMessage.updated_at.desc())
+    ).all()
+    if not items:
+        raise HTTPException(status_code=404, detail="Os emails pedidos já não estão disponíveis")
+
+    applied: list[dict] = []
+    errors: list[dict] = []
+    for item in items:
+        mailbox = get_mailbox_or_404(session, tenant_id, item.mailbox_id)
+        try:
+            result = apply_email_action(session, mailbox, item, action, target_folder)
+            applied.append(
+                {
+                    "id": item.id,
+                    "subject": item.subject or "(Sem assunto)",
+                    "from": item.from_name or item.from_address or "Remetente desconhecido",
+                    "mailbox_id": item.mailbox_id,
+                    "message": result.get("message"),
+                }
+            )
+        except HTTPException as exc:
+            errors.append(
+                {
+                    "id": item.id,
+                    "subject": item.subject or "(Sem assunto)",
+                    "detail": str(exc.detail),
+                }
+            )
+
+    return {
+        "action": action,
+        "target_folder": target_folder,
+        "applied_count": len(applied),
+        "failed_count": len(errors),
+        "applied": applied,
+        "errors": errors,
+    }
 
 
 def parse_message_date(value: str | None) -> datetime | None:
@@ -493,6 +1396,20 @@ def open_imap_connection(
         raise
 
 
+def close_imap_client(client: imaplib.IMAP4 | imaplib.IMAP4_SSL | None) -> None:
+    if client is None:
+        return
+    try:
+        client.logout()
+    except Exception:
+        pass
+
+
+def is_imap_disconnect_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(token in message for token in ("server shutting down", "socket error", "eof", "connection reset", "broken pipe"))
+
+
 def test_imap_connection(
     *, host: str, port: int, username: str, password: str, security_mode: str, validate_certificates: bool, folder: str
 ) -> dict:
@@ -513,10 +1430,7 @@ def test_imap_connection(
             "message_count": message_count,
         }
     finally:
-        try:
-            client.logout()
-        except Exception:
-            pass
+        close_imap_client(client)
 
 
 def parse_fetch_payload(fetch_data: list | tuple | None) -> tuple[str, bytes]:
@@ -557,6 +1471,62 @@ def decode_imap_folder_name(entry: bytes | str) -> str | None:
     return folder or None
 
 
+def sort_folder_names(folders: list[str], configured_folder: str | None = None) -> list[str]:
+    configured = (configured_folder or "INBOX").strip().lower()
+
+    def sort_key(folder: str) -> tuple[int, int, str]:
+        value = folder.strip().lower()
+        if value == configured:
+            return (0, 0, value)
+        if value == "inbox" or value.endswith("/inbox"):
+            return (0, 1, value)
+        if any(token in value for token in ("sent", "enviad")):
+            return (1, 0, value)
+        if any(token in value for token in ("draft", "rascun")):
+            return (2, 0, value)
+        if any(token in value for token in ("archive", "arquivo")):
+            return (3, 0, value)
+        if any(token in value for token in ("spam", "junk", "lixo eletr")):
+            return (4, 0, value)
+        if any(token in value for token in ("trash", "bin", "lixo")):
+            return (5, 0, value)
+        return (6, 0, value)
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for folder in folders:
+        normalized = folder.strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(normalized)
+
+    return sorted(unique, key=sort_key)
+
+
+def list_client_folders(client: imaplib.IMAP4 | imaplib.IMAP4_SSL, configured_folder: str | None = None) -> list[str]:
+    status, data = client.list()
+    if status != "OK":
+        raise RuntimeError(f"Falha ao listar as pastas da mailbox: {data}")
+
+    folders: list[str] = []
+    for entry in data or []:
+        if not entry:
+            continue
+        folder = decode_imap_folder_name(entry)
+        if folder:
+            folders.append(folder)
+
+    fallback_folder = configured_folder or "INBOX"
+    if fallback_folder and fallback_folder not in folders:
+        folders.append(fallback_folder)
+
+    return sort_folder_names(folders, configured_folder=fallback_folder)
+
+
 def list_mailbox_folders(mailbox: Mailbox) -> list[str]:
     if not mailbox.imap_password_encrypted:
         raise HTTPException(status_code=422, detail="A palavra-passe da mailbox não está guardada")
@@ -575,28 +1545,141 @@ def list_mailbox_folders(mailbox: Mailbox) -> list[str]:
         readonly=True,
     )
     try:
-        status, data = client.list()
-        if status != "OK":
-            raise RuntimeError(f"Falha ao listar as pastas da mailbox: {data}")
-
-        folders: list[str] = []
-        for entry in data or []:
-            if not entry:
-                continue
-            folder = decode_imap_folder_name(entry)
-            if folder and folder not in folders:
-                folders.append(folder)
-
-        configured_folder = mailbox.folder or "INBOX"
-        if configured_folder not in folders:
-            folders.insert(0, configured_folder)
-
-        return sorted(folders, key=lambda item: (item != configured_folder, item.lower()))
+        return list_client_folders(client, mailbox.folder or "INBOX")
     finally:
         try:
             client.logout()
         except Exception:
             pass
+
+
+def get_mailbox_folder_stats(session: Session, mailbox: Mailbox, folders: list[str]) -> list[dict]:
+    rows = session.execute(
+        select(EmailMessage.folder, EmailMessage.is_seen).where(
+            EmailMessage.tenant_id == mailbox.tenant_id,
+            EmailMessage.mailbox_id == mailbox.id,
+            EmailMessage.remote_deleted.is_(False),
+        )
+    ).all()
+
+    stats: dict[str, dict[str, int | str]] = {}
+    for folder_name, is_seen in rows:
+        key = folder_name or mailbox.folder or "INBOX"
+        if key not in stats:
+            stats[key] = {"folder": key, "stored": 0, "unread": 0}
+        stats[key]["stored"] = int(stats[key]["stored"]) + 1
+        if not is_seen:
+            stats[key]["unread"] = int(stats[key]["unread"]) + 1
+
+    for folder in folders:
+        stats.setdefault(folder, {"folder": folder, "stored": 0, "unread": 0})
+
+    return [stats[folder] for folder in sort_folder_names(list(stats.keys()), mailbox.folder or "INBOX")]
+
+
+def sync_selected_folder(
+    session: Session,
+    client: imaplib.IMAP4 | imaplib.IMAP4_SSL,
+    mailbox: Mailbox,
+    folder: str,
+    limit: int,
+) -> dict:
+    select_status, select_data = client.select(folder, readonly=True)
+    if select_status != "OK":
+        raise RuntimeError(f"Falha ao abrir a pasta '{folder}': {select_data}")
+
+    remote_total = 0
+    if select_data and select_data[0]:
+        try:
+            remote_total = int(select_data[0])
+        except (TypeError, ValueError):
+            remote_total = 0
+
+    search_status, search_data = client.uid("search", None, "ALL")
+    if search_status != "OK":
+        raise RuntimeError(f"Falha na pesquisa IMAP da pasta '{folder}': {search_data}")
+
+    all_uids: list[str] = []
+    if search_data and search_data[0]:
+        all_uids = [uid for uid in search_data[0].decode("utf-8", errors="ignore").split() if uid]
+    selected_uids = all_uids[-max(1, min(limit, 100)):]
+
+    existing = []
+    if selected_uids:
+        existing = session.scalars(
+            select(EmailMessage).where(
+                EmailMessage.tenant_id == mailbox.tenant_id,
+                EmailMessage.mailbox_id == mailbox.id,
+                EmailMessage.folder == folder,
+                EmailMessage.imap_uid.in_(selected_uids),
+            )
+        ).all()
+    existing_by_uid = {item.imap_uid: item for item in existing}
+
+    synced_count = 0
+    new_count = 0
+    updated_count = 0
+
+    for uid in reversed(selected_uids):
+        fetch_status, fetch_data = client.uid("fetch", uid, "(UID FLAGS BODY.PEEK[])")
+        if fetch_status != "OK":
+            logger.warning("[email] Failed to fetch UID %s for mailbox %s folder %s: %s", uid, mailbox.id, folder, fetch_data)
+            continue
+
+        meta, raw_bytes = parse_fetch_payload(fetch_data)
+        flags = parse_imap_flags(meta)
+        payload = parse_email_payload(raw_bytes)
+
+        item = existing_by_uid.get(uid)
+        if item is None and payload.message_id_header:
+            item = session.scalar(
+                select(EmailMessage).where(
+                    EmailMessage.tenant_id == mailbox.tenant_id,
+                    EmailMessage.mailbox_id == mailbox.id,
+                    EmailMessage.folder == folder,
+                    EmailMessage.message_id_header == payload.message_id_header,
+                )
+            )
+
+        if item is None:
+            item = EmailMessage(
+                id=str(uuid4()),
+                tenant_id=mailbox.tenant_id,
+                mailbox_id=mailbox.id,
+                imap_uid=uid,
+                folder=folder,
+            )
+            session.add(item)
+            new_count += 1
+        else:
+            updated_count += 1
+
+        item.imap_uid = uid
+        item.folder = folder
+        item.message_id_header = payload.message_id_header
+        item.subject = payload.subject
+        item.from_name = payload.from_name
+        item.from_address = payload.from_address
+        item.to_addresses = payload.to_addresses
+        item.snippet = payload.snippet
+        item.body_text = payload.body_text
+        item.body_html = payload.body_html
+        item.received_at = payload.received_at or item.received_at or utc_now()
+        item.has_attachments = payload.has_attachments
+        item.is_seen = "\\Seen" in flags
+        item.is_flagged = "\\Flagged" in flags
+        item.remote_deleted = "\\Deleted" in flags
+        item.last_synced_at = utc_now()
+        item.updated_at = utc_now()
+        synced_count += 1
+
+    return {
+        "folder": folder,
+        "fetched": synced_count,
+        "created": new_count,
+        "updated": updated_count,
+        "remote_total": remote_total,
+    }
 
 
 def sync_mailbox_messages(session: Session, mailbox: Mailbox, limit: int = SYNC_FETCH_LIMIT) -> dict:
@@ -608,86 +1691,63 @@ def sync_mailbox_messages(session: Session, mailbox: Mailbox, limit: int = SYNC_
         raise HTTPException(status_code=422, detail="É necessário configurar primeiro o host, a porta e o utilizador IMAP da mailbox")
 
     password = decrypt_secret(mailbox.imap_password_encrypted)
-    client, remote_total = open_imap_connection(
-        host=mailbox.imap_host,
-        port=int(mailbox.imap_port),
-        username=mailbox.imap_username,
-        password=password,
-        security_mode=mailbox.security_mode or "ssl_tls",
-        validate_certificates=bool(mailbox.validate_certificates),
-        folder=mailbox.folder or "INBOX",
-        readonly=True,
-    )
+
+    def connect(selected_folder: str) -> imaplib.IMAP4 | imaplib.IMAP4_SSL:
+        client, _ = open_imap_connection(
+            host=mailbox.imap_host,
+            port=int(mailbox.imap_port),
+            username=mailbox.imap_username,
+            password=password,
+            security_mode=mailbox.security_mode or "ssl_tls",
+            validate_certificates=bool(mailbox.validate_certificates),
+            folder=selected_folder,
+            readonly=True,
+        )
+        return client
+
+    client: imaplib.IMAP4 | imaplib.IMAP4_SSL | None = connect(mailbox.folder or "INBOX")
 
     try:
-        search_status, search_data = client.uid("search", None, "ALL")
-        if search_status != "OK":
-            raise RuntimeError(f"Falha na pesquisa IMAP da mailbox: {search_data}")
+        folders = list_client_folders(client, mailbox.folder or "INBOX")
+        folder_results: list[dict] = []
+        folder_failures: list[dict] = []
 
-        all_uids = []
-        if search_data and search_data[0]:
-            all_uids = [uid for uid in search_data[0].decode("utf-8", errors="ignore").split() if uid]
-        selected_uids = all_uids[-max(1, min(limit, 100)):]
+        for folder in folders:
+            disconnected_retry = False
+            while True:
+                try:
+                    if client is None:
+                        client = connect(folder)
+                    folder_results.append(sync_selected_folder(session, client, mailbox, folder, limit))
+                    break
+                except Exception as exc:
+                    disconnected = is_imap_disconnect_error(exc)
+                    if disconnected:
+                        close_imap_client(client)
+                        client = None
+                        if not disconnected_retry:
+                            disconnected_retry = True
+                            logger.warning(
+                                "[email] IMAP connection dropped while syncing folder %s for mailbox %s, reconnecting once",
+                                folder,
+                                mailbox.id,
+                            )
+                            continue
+                    logger.warning("[email] Failed to sync folder %s for mailbox %s: %s", folder, mailbox.id, exc)
+                    folder_failures.append({"folder": folder, "error": str(exc)})
+                    break
 
-        existing = []
-        if selected_uids:
-            existing = session.scalars(
-                select(EmailMessage).where(
-                    EmailMessage.tenant_id == mailbox.tenant_id,
-                    EmailMessage.mailbox_id == mailbox.id,
-                    EmailMessage.imap_uid.in_(selected_uids),
-                )
-            ).all()
-        existing_by_uid = {item.imap_uid: item for item in existing}
+        if not folder_results:
+            failure_message = "; ".join(f"{entry['folder']}: {entry['error']}" for entry in folder_failures) or "Não foi possível sincronizar nenhuma pasta"
+            raise RuntimeError(failure_message)
 
-        synced_count = 0
-        new_count = 0
-        updated_count = 0
-
-        for uid in reversed(selected_uids):
-            fetch_status, fetch_data = client.uid("fetch", uid, "(UID FLAGS BODY.PEEK[])")
-            if fetch_status != "OK":
-                logger.warning("[email] Failed to fetch UID %s for mailbox %s: %s", uid, mailbox.id, fetch_data)
-                continue
-
-            meta, raw_bytes = parse_fetch_payload(fetch_data)
-            flags = parse_imap_flags(meta)
-            payload = parse_email_payload(raw_bytes)
-
-            item = existing_by_uid.get(uid)
-            if item is None:
-                item = EmailMessage(
-                    id=str(uuid4()),
-                    tenant_id=mailbox.tenant_id,
-                    mailbox_id=mailbox.id,
-                    imap_uid=uid,
-                    folder=mailbox.folder or "INBOX",
-                )
-                session.add(item)
-                new_count += 1
-            else:
-                updated_count += 1
-
-            item.folder = mailbox.folder or "INBOX"
-            item.message_id_header = payload.message_id_header
-            item.subject = payload.subject
-            item.from_name = payload.from_name
-            item.from_address = payload.from_address
-            item.to_addresses = payload.to_addresses
-            item.snippet = payload.snippet
-            item.body_text = payload.body_text
-            item.body_html = payload.body_html
-            item.received_at = payload.received_at or item.received_at or utc_now()
-            item.has_attachments = payload.has_attachments
-            item.is_seen = "\\Seen" in flags
-            item.is_flagged = "\\Flagged" in flags
-            item.remote_deleted = "\\Deleted" in flags
-            item.last_synced_at = utc_now()
-            item.updated_at = utc_now()
-            synced_count += 1
+        synced_count = sum(int(item.get("fetched", 0)) for item in folder_results)
+        new_count = sum(int(item.get("created", 0)) for item in folder_results)
+        updated_count = sum(int(item.get("updated", 0)) for item in folder_results)
+        remote_total = sum(int(item.get("remote_total", 0)) for item in folder_results)
 
         mailbox.status = "connected"
-        mailbox.last_error = None
+        mailbox.last_error = "; ".join(f"{entry['folder']}: {entry['error']}" for entry in folder_failures) if folder_failures else None
         mailbox.last_synced_at = utc_now()
         mailbox.updated_at = utc_now()
         session.add(mailbox)
@@ -719,6 +1779,10 @@ def sync_mailbox_messages(session: Session, mailbox: Mailbox, limit: int = SYNC_
             "mailbox_id": mailbox.id,
             "mailbox_name": mailbox.name,
             "folder": mailbox.folder,
+            "folders": [item.get("folder") for item in folder_results],
+            "folders_synced": len(folder_results),
+            "folder_results": folder_results,
+            "folder_failures": folder_failures,
             "fetched": synced_count,
             "created": new_count,
             "updated": updated_count,
@@ -736,10 +1800,28 @@ def sync_mailbox_messages(session: Session, mailbox: Mailbox, limit: int = SYNC_
         session.commit()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
+        close_imap_client(client)
+
+
+def queue_mailbox_sync(tenant_id: str, mailbox_id: str, limit: int) -> None:
+    with get_db_session() as session:
+        mailbox = session.scalar(select(Mailbox).where(Mailbox.tenant_id == tenant_id, Mailbox.id == mailbox_id))
+        if mailbox is None:
+            logger.warning("[email] Skipping queued sync for missing mailbox %s tenant %s", mailbox_id, tenant_id)
+            return
         try:
-            client.logout()
-        except Exception:
-            pass
+            result = sync_mailbox_messages(session, mailbox, limit=limit)
+            logger.info(
+                "[email] queued sync complete mailbox=%s tenant=%s fetched=%s created=%s updated=%s folders=%s",
+                mailbox_id,
+                tenant_id,
+                result.get("fetched", 0),
+                result.get("created", 0),
+                result.get("updated", 0),
+                result.get("folders_synced", 0),
+            )
+        except Exception as exc:
+            logger.exception("[email] queued sync failed mailbox=%s tenant=%s: %s", mailbox_id, tenant_id, exc)
 
 
 def apply_email_action(
@@ -805,6 +1887,16 @@ def apply_email_action(
                 raise RuntimeError(f"Falha ao executar expunge na mailbox: {expunge_data}")
             item.folder = target_folder
             item.is_seen = True
+        elif action == "flag":
+            status, data = client.uid("store", item.imap_uid, "+FLAGS", "(\\Flagged)")
+            if status != "OK":
+                raise RuntimeError(f"Não foi possível marcar o email como importante: {data}")
+            item.is_flagged = True
+        elif action == "unflag":
+            status, data = client.uid("store", item.imap_uid, "-FLAGS", "(\\Flagged)")
+            if status != "OK":
+                raise RuntimeError(f"Não foi possível remover a marcação de importante: {data}")
+            item.is_flagged = False
         else:
             raise HTTPException(status_code=422, detail="Ação de email não suportada")
 
@@ -824,6 +1916,8 @@ def apply_email_action(
                 "mark_unread": "Email marcado como por ler",
                 "delete": "Email apagado da mailbox",
                 "move": f"Email movido para {target_folder}",
+                "flag": "Email marcado como importante",
+                "unflag": "Marcação de importante removida",
             }[action]
         }
     except HTTPException:
@@ -842,7 +1936,45 @@ def apply_email_action(
             pass
 
 
-def serialize_mailbox(item: Mailbox) -> dict:
+def get_mailbox_message_counts(session: Session, tenant_id: str) -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {}
+
+    stored_rows = session.execute(
+        select(EmailMessage.mailbox_id, func.count())
+        .where(EmailMessage.tenant_id == tenant_id, EmailMessage.remote_deleted.is_(False))
+        .group_by(EmailMessage.mailbox_id)
+    ).all()
+    unread_rows = session.execute(
+        select(EmailMessage.mailbox_id, func.count())
+        .where(
+            EmailMessage.tenant_id == tenant_id,
+            EmailMessage.remote_deleted.is_(False),
+            EmailMessage.is_seen.is_(False),
+        )
+        .group_by(EmailMessage.mailbox_id)
+    ).all()
+    flagged_rows = session.execute(
+        select(EmailMessage.mailbox_id, func.count())
+        .where(
+            EmailMessage.tenant_id == tenant_id,
+            EmailMessage.remote_deleted.is_(False),
+            EmailMessage.is_flagged.is_(True),
+        )
+        .group_by(EmailMessage.mailbox_id)
+    ).all()
+
+    for mailbox_id, total in stored_rows:
+        counts.setdefault(str(mailbox_id), {})["stored_count"] = int(total or 0)
+    for mailbox_id, total in unread_rows:
+        counts.setdefault(str(mailbox_id), {})["unread_count"] = int(total or 0)
+    for mailbox_id, total in flagged_rows:
+        counts.setdefault(str(mailbox_id), {})["flagged_count"] = int(total or 0)
+
+    return counts
+
+
+def serialize_mailbox(item: Mailbox, stats: Optional[dict[str, int]] = None) -> dict:
+    counts = stats or {}
     return {
         "id": item.id,
         "tenant_id": item.tenant_id,
@@ -857,6 +1989,9 @@ def serialize_mailbox(item: Mailbox) -> dict:
         "access_mode": item.access_mode,
         "folder": item.folder,
         "validate_certificates": bool(item.validate_certificates),
+        "stored_count": int(counts.get("stored_count", 0)),
+        "unread_count": int(counts.get("unread_count", 0)),
+        "flagged_count": int(counts.get("flagged_count", 0)),
         "last_error": item.last_error,
         "last_connection_test_at": item.last_connection_test_at.isoformat() if item.last_connection_test_at else None,
         "last_synced_at": item.last_synced_at.isoformat() if item.last_synced_at else None,
@@ -865,8 +2000,8 @@ def serialize_mailbox(item: Mailbox) -> dict:
     }
 
 
-def serialize_admin_mailbox(item: Mailbox) -> dict:
-    payload = serialize_mailbox(item)
+def serialize_admin_mailbox(item: Mailbox, stats: Optional[dict[str, int]] = None) -> dict:
+    payload = serialize_mailbox(item, stats)
     payload.update(
         {
             "imap_username": item.imap_username,
@@ -1113,6 +2248,53 @@ async def ai_chat(request: Request):
     return {"success": True, "data": response}
 
 
+@app.post("/api/v1/assistant/context")
+async def assistant_context(request: Request, payload: AssistantContextRequest):
+    with get_db_session() as session:
+        return {
+            "success": True,
+            "data": build_email_assistant_context(
+                session,
+                request.state.tenant_id,
+                payload.question,
+                payload.limit,
+                payload.selected_email_id,
+                payload.selected_email_ids,
+            ),
+        }
+
+
+@app.post("/api/v1/assistant/action-preview")
+async def assistant_action_preview(request: Request, payload: AssistantActionPreviewRequest):
+    with get_db_session() as session:
+        return {
+            "success": True,
+            "data": build_email_action_preview(
+                session,
+                request.state.tenant_id,
+                payload.message,
+                payload.limit,
+                payload.selected_email_id,
+                payload.selected_email_ids,
+            ),
+        }
+
+
+@app.post("/api/v1/assistant/action-execute")
+async def assistant_action_execute(request: Request, payload: AssistantActionExecuteRequest):
+    with get_db_session() as session:
+        return {
+            "success": True,
+            "data": execute_email_assistant_action(
+                session,
+                request.state.tenant_id,
+                payload.action,
+                payload.email_ids,
+                payload.target_folder,
+            ),
+        }
+
+
 @app.get("/api/v1/dashboard")
 async def dashboard(request: Request):
     with get_db_session() as session:
@@ -1132,6 +2314,7 @@ async def dashboard(request: Request):
             .order_by(EmailMessage.received_at.desc(), EmailMessage.updated_at.desc())
             .limit(15)
         ).all()
+        mailbox_counts = get_mailbox_message_counts(session, request.state.tenant_id)
 
         stored_emails = (
             session.scalar(
@@ -1167,7 +2350,7 @@ async def dashboard(request: Request):
             "success": True,
             "data": {
                 "summary": summary,
-                "mailboxes": [serialize_mailbox(item) for item in mailboxes],
+                "mailboxes": [serialize_mailbox(item, mailbox_counts.get(item.id)) for item in mailboxes],
                 "campaigns": [serialize_campaign(item) for item in campaigns],
                 "automations": [serialize_automation(item) for item in automations],
                 "latest_emails": [serialize_email_message(item) for item in latest_emails],
@@ -1181,7 +2364,8 @@ async def list_mailboxes(request: Request):
         items = session.scalars(
             select(Mailbox).where(Mailbox.tenant_id == request.state.tenant_id).order_by(Mailbox.updated_at.desc())
         ).all()
-        return {"success": True, "data": [serialize_mailbox(item) for item in items]}
+        mailbox_counts = get_mailbox_message_counts(session, request.state.tenant_id)
+        return {"success": True, "data": [serialize_mailbox(item, mailbox_counts.get(item.id)) for item in items]}
 
 
 @app.post("/api/v1/mailboxes")
@@ -1208,12 +2392,43 @@ async def create_mailbox(request: Request, payload: MailboxCreate):
 
 
 @app.post("/api/v1/mailboxes/{mailbox_id}/sync")
-async def sync_mailbox(mailbox_id: str, request: Request):
+async def sync_mailbox(
+    mailbox_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    limit: int | None = Query(default=None, ge=1, le=100),
+):
+    effective_limit = max(1, min(limit or MANUAL_SYNC_FETCH_LIMIT, SYNC_FETCH_LIMIT))
     with get_db_session() as session:
         item = get_mailbox_or_404(session, request.state.tenant_id, mailbox_id)
-        result = sync_mailbox_messages(session, item)
+        if item.status == "syncing":
+            return {
+                "success": True,
+                "data": {
+                    "mailbox": serialize_mailbox(item),
+                    "queued": True,
+                    "limit": effective_limit,
+                    "message": "A mailbox já está a sincronizar.",
+                },
+            }
+
+        item.status = "syncing"
+        item.last_error = None
+        item.updated_at = utc_now()
+        session.add(item)
+        session.commit()
         session.refresh(item)
-        return {"success": True, "data": {"mailbox": serialize_mailbox(item), "sync_result": result}}
+
+        background_tasks.add_task(queue_mailbox_sync, request.state.tenant_id, mailbox_id, effective_limit)
+        return {
+            "success": True,
+            "data": {
+                "mailbox": serialize_mailbox(item),
+                "queued": True,
+                "limit": effective_limit,
+                "message": "Sincronização iniciada. Os resultados vão aparecer assim que a mailbox terminar o processamento.",
+            },
+        }
 
 
 @app.get("/api/v1/mailboxes/{mailbox_id}/folders")
@@ -1221,12 +2436,14 @@ async def list_mailbox_folder_options(mailbox_id: str, request: Request):
     with get_db_session() as session:
         item = get_mailbox_or_404(session, request.state.tenant_id, mailbox_id)
         folders = list_mailbox_folders(item)
+        folder_stats = get_mailbox_folder_stats(session, item, folders)
         return {
             "success": True,
             "data": {
                 "mailbox_id": mailbox_id,
                 "current_folder": item.folder or "INBOX",
                 "folders": folders,
+                "folder_stats": folder_stats,
             },
         }
 
@@ -1235,7 +2452,9 @@ async def list_mailbox_folder_options(mailbox_id: str, request: Request):
 async def list_emails(
     request: Request,
     mailbox_id: Optional[str] = None,
-    limit: int = Query(default=50, ge=1, le=100),
+    folder: Optional[str] = None,
+    include_children: bool = False,
+    limit: int = Query(default=100, ge=1, le=250),
 ):
     with get_db_session() as session:
         query = select(EmailMessage).where(
@@ -1244,6 +2463,17 @@ async def list_emails(
         )
         if mailbox_id:
             query = query.where(EmailMessage.mailbox_id == mailbox_id)
+        if folder:
+            if include_children:
+                query = query.where(
+                    or_(
+                        EmailMessage.folder == folder,
+                        EmailMessage.folder.startswith(f"{folder}."),
+                        EmailMessage.folder.startswith(f"{folder}/"),
+                    )
+                )
+            else:
+                query = query.where(EmailMessage.folder == folder)
 
         items = session.scalars(query.order_by(EmailMessage.received_at.desc(), EmailMessage.updated_at.desc()).limit(limit)).all()
         return {"success": True, "data": [serialize_email_message(item) for item in items]}

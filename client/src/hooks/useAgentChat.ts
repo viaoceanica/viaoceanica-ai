@@ -20,6 +20,10 @@ export interface ExportedFile {
   downloadUrl: string;
 }
 
+export interface AgentRequestContext {
+  [key: string]: unknown;
+}
+
 interface AgentChatResponse {
   reply: string;
   agent: string;
@@ -45,10 +49,11 @@ interface QuotaInfo {
 interface UseAgentChatOptions {
   moduleKey?: string;
   onError?: (error: string) => void;
+  getRequestContext?: () => AgentRequestContext | undefined;
 }
 
 export function useAgentChat(options: UseAgentChatOptions = {}) {
-  const { moduleKey = "platform", onError } = options;
+  const { moduleKey = "platform", onError, getRequestContext } = options;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [quota, setQuota] = useState<QuotaInfo | null>(null);
@@ -93,6 +98,7 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
           body: JSON.stringify({
             message: content.trim(),
             moduleKey,
+            ...(getRequestContext?.() || {}),
           }),
           signal: abortRef.current.signal,
         });
@@ -157,7 +163,7 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
         abortRef.current = null;
       }
     },
-    [moduleKey, isLoading, onError, fetchQuota]
+    [moduleKey, isLoading, onError, fetchQuota, getRequestContext]
   );
 
   // Clear conversation
