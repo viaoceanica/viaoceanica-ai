@@ -30,8 +30,11 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, delete as sql_delete, func, or_, select
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint, create_engine, delete as sql_delete, func, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+import httpx
+from pgvector.sqlalchemy import Vector
 
 from ai_client import ask_assistant
 
@@ -46,6 +49,10 @@ ALLOW_DEMO_TENANT = os.getenv("ALLOW_DEMO_TENANT", "false").lower() in {"1", "tr
 EMAIL_CREDENTIALS_SECRET = os.getenv("EMAIL_CREDENTIALS_SECRET", "email-module-dev-secret-change-me")
 SYNC_FETCH_LIMIT = int(os.getenv("EMAIL_SYNC_FETCH_LIMIT", "25"))
 MANUAL_SYNC_FETCH_LIMIT = int(os.getenv("EMAIL_MANUAL_SYNC_FETCH_LIMIT", "5"))
+AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://ai-service:4010")
+EMAIL_EMBEDDING_MODEL = os.getenv("EMAIL_EMBEDDING_MODEL", "qwen3-embedding:8b")
+EMAIL_EMBEDDING_TIMEOUT_SECONDS = float(os.getenv("EMAIL_EMBEDDING_TIMEOUT_SECONDS", "120"))
+EMAIL_EMBEDDING_SOURCE_LIMIT = int(os.getenv("EMAIL_EMBEDDING_SOURCE_LIMIT", "12000"))
 _start_time = time.time()
 
 MailboxSecurityMode = Literal["ssl_tls", "starttls", "none"]
@@ -119,6 +126,27 @@ class EmailMessage(Base):
     has_attachments: Mapped[bool] = mapped_column(Boolean, default=False)
     remote_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, index=True)
+
+
+class EmailMessageEmbedding(Base):
+    __tablename__ = "email_message_embeddings"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "message_id", name="uq_email_message_embeddings_tenant_message"),
+        Index("ix_email_message_embeddings_tenant_mailbox_embedded", "tenant_id", "mailbox_id", "embedded_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True)
+    mailbox_id: Mapped[str] = mapped_column(String(36), index=True)
+    message_id: Mapped[str] = mapped_column(String(36), index=True)
+    folder: Mapped[str] = mapped_column(String(255), default="INBOX")
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    content_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    embedding_model: Mapped[str] = mapped_column(String(128), default="qwen3-embedding:8b")
+    embedding: Mapped[list[float]] = mapped_column(Vector(), nullable=False)
+    embedded_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now, index=True)
 
@@ -278,6 +306,14 @@ class AssistantContextRequest(BaseModel):
     selected_email_ids: list[str] = Field(default_factory=list, max_length=25)
 
 
+class EmailSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+    limit: int = Field(default=10, ge=1, le=50)
+    mailbox_id: Optional[str] = Field(default=None, max_length=64)
+    folder: Optional[str] = Field(default=None, max_length=255)
+    include_children: bool = False
+
+
 class AssistantActionPreviewRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     limit: int = Field(default=5, ge=1, le=10)
@@ -326,6 +362,14 @@ def decrypt_secret(value: str) -> str:
         raise HTTPException(status_code=500, detail="Stored mailbox credentials could not be decrypted") from exc
 
 
+def ensure_db_extensions() -> None:
+    if _engine is None:
+        return
+
+    with _engine.begin() as conn:
+        conn.exec_driver_sql("CREATE EXTENSION IF NOT EXISTS vector")
+
+
 def ensure_schema() -> None:
     if _engine is None:
         return
@@ -354,6 +398,95 @@ def ensure_schema() -> None:
         conn.exec_driver_sql("UPDATE email_mailboxes SET auth_method = 'password' WHERE auth_method IS NULL OR auth_method = ''")
         conn.exec_driver_sql("UPDATE email_mailboxes SET folder = 'INBOX' WHERE folder IS NULL OR folder = ''")
         conn.exec_driver_sql("UPDATE email_mailboxes SET validate_certificates = TRUE WHERE validate_certificates IS NULL")
+
+
+def build_email_embedding_source(item: EmailMessage) -> str:
+    parts = [
+        f"Assunto: {item.subject or ''}",
+        f"De: {item.from_name or item.from_address or ''}",
+        f"Para: {item.to_addresses or ''}",
+        f"Folder: {item.folder or 'INBOX'}",
+        f"Snippet: {item.snippet or ''}",
+        f"Corpo: {(item.body_text or '')[:EMAIL_EMBEDDING_SOURCE_LIMIT]}",
+    ]
+    return "\n".join(part for part in parts if part and part.strip())
+
+
+def calculate_content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def fetch_embedding_vector(text: str, tenant_id: str, model: str = EMAIL_EMBEDDING_MODEL) -> list[float] | None:
+    if not text.strip():
+        return None
+
+    try:
+        with httpx.Client(timeout=EMAIL_EMBEDDING_TIMEOUT_SECONDS) as client:
+            response = client.post(
+                f"{AI_SERVICE_URL}/api/v1/embeddings",
+                json={"input": text, "model": model},
+                headers={
+                    "Content-Type": "application/json",
+                    "x-viao-user-id": "1",
+                    "x-viao-tenant-id": tenant_id,
+                    "x-viao-company-role": "owner",
+                    "x-viao-request-id": f"email-embedding-{uuid4()}",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            embedding = ((payload.get("data") or {}).get("data") or [{}])[0].get("embedding")
+            return embedding if isinstance(embedding, list) else None
+    except Exception as exc:
+        logger.warning("[email] embedding generation failed: %s", exc)
+        return None
+
+
+def sync_email_embedding(session: Session, item: EmailMessage) -> bool:
+    source_text = build_email_embedding_source(item)
+    if not source_text.strip():
+        return False
+
+    content_hash = calculate_content_hash(source_text)
+    existing = session.scalar(
+        select(EmailMessageEmbedding).where(
+            EmailMessageEmbedding.tenant_id == item.tenant_id,
+            EmailMessageEmbedding.message_id == item.id,
+        )
+    )
+
+    if existing and existing.content_hash == content_hash and existing.embedding_model == EMAIL_EMBEDDING_MODEL:
+        return False
+
+    embedding = fetch_embedding_vector(source_text, item.tenant_id)
+    if not embedding:
+        return False
+
+    if existing is None:
+        existing = EmailMessageEmbedding(
+            id=str(uuid4()),
+            tenant_id=item.tenant_id,
+            mailbox_id=item.mailbox_id,
+            message_id=item.id,
+            folder=item.folder,
+            content_hash=content_hash,
+            content_text=source_text,
+            embedding_model=EMAIL_EMBEDDING_MODEL,
+            embedding=embedding,
+            embedded_at=utc_now(),
+        )
+        session.add(existing)
+    else:
+        existing.mailbox_id = item.mailbox_id
+        existing.folder = item.folder
+        existing.content_hash = content_hash
+        existing.content_text = source_text
+        existing.embedding_model = EMAIL_EMBEDDING_MODEL
+        existing.embedding = embedding
+        existing.embedded_at = utc_now()
+        existing.updated_at = utc_now()
+
+    return True
 
 
 def get_mailbox_or_404(session: Session, tenant_id: str, mailbox_id: str) -> Mailbox:
@@ -871,6 +1004,91 @@ def build_email_assistant_context(
             "recent_emails": [serialize_assistant_email_summary(item) for item in scoped_emails],
             "keyword_terms": keyword_terms,
         },
+    }
+
+def search_email_messages(session: Session, tenant_id: str, query: str, limit: int, mailbox_id: str | None = None, folder: str | None = None, include_children: bool = False) -> dict:
+    query_filters, query_info = build_assistant_email_query(session, tenant_id, query)
+    mailbox_filters: list = []
+    if mailbox_id:
+        mailbox_filters.append(EmailMessage.mailbox_id == mailbox_id)
+    folder_filters: list = []
+    if folder and folder != ALL_FOLDERS_KEY:
+        if include_children and should_include_child_folders(folder):
+            folder_filters.append(
+                or_(
+                    EmailMessage.folder == folder,
+                    EmailMessage.folder.startswith(f"{folder}."),
+                    EmailMessage.folder.startswith(f"{folder}/"),
+                )
+            )
+        else:
+            folder_filters.append(EmailMessage.folder == folder)
+
+    scoped_filters = [*query_filters, *mailbox_filters, *folder_filters]
+    if not session.scalar(select(func.count()).select_from(EmailMessage).where(*scoped_filters)):
+        scoped_filters = [
+            EmailMessage.tenant_id == tenant_id,
+            EmailMessage.remote_deleted.is_(False),
+            *mailbox_filters,
+            *folder_filters,
+        ]
+
+    query_vector = fetch_embedding_vector(query, tenant_id)
+    candidate_limit = max(limit * 5, 25)
+
+    if query_vector:
+        distance_expr = EmailMessageEmbedding.embedding.cosine_distance(query_vector)
+        rows = session.execute(
+            select(EmailMessage, EmailMessageEmbedding, distance_expr.label("distance"))
+            .join(
+                EmailMessageEmbedding,
+                (EmailMessageEmbedding.tenant_id == EmailMessage.tenant_id) & (EmailMessageEmbedding.message_id == EmailMessage.id),
+            )
+            .where(*scoped_filters)
+            .order_by(distance_expr.asc(), EmailMessage.received_at.desc(), EmailMessage.updated_at.desc())
+            .limit(candidate_limit)
+        ).all()
+
+        scored = []
+        normalized_query = normalize_search_text(query)
+        terms = [term for term in re.split(r"[^a-z0-9@._%+-]+", normalized_query) if len(term) >= 3]
+        for message, embedding_row, distance in rows:
+            blob = normalize_search_text(f"{message.subject or ''} {message.from_name or ''} {message.from_address or ''} {message.snippet or ''} {message.body_text or ''}")
+            keyword_hits = sum(1 for term in terms if term in blob)
+            semantic_score = max(0.0, 1.0 - float(distance or 0.0))
+            score = round(semantic_score + (keyword_hits * 0.05), 4)
+            scored.append((score, semantic_score, keyword_hits, float(distance or 0.0), message, embedding_row))
+
+        scored.sort(key=lambda row: (-row[0], row[3], row[4].received_at or datetime.min), reverse=False)
+        ranked = scored[:limit]
+        return {
+            "query": query,
+            "query_info": query_info,
+            "query_vector_available": True,
+            "results": [
+                {
+                    **serialize_assistant_email_summary(message),
+                    "score": score,
+                    "semantic_score": semantic_score,
+                    "distance": distance,
+                    "keyword_hits": keyword_hits,
+                    "embedding_model": embedding_row.embedding_model,
+                }
+                for score, semantic_score, keyword_hits, distance, message, embedding_row in ranked
+            ],
+        }
+
+    rows = session.scalars(
+        select(EmailMessage)
+        .where(*scoped_filters)
+        .order_by(EmailMessage.received_at.desc(), EmailMessage.updated_at.desc())
+        .limit(limit)
+    ).all()
+    return {
+        "query": query,
+        "query_info": query_info,
+        "query_vector_available": False,
+        "results": [serialize_assistant_email_summary(item) for item in rows],
     }
 
 
@@ -1653,6 +1871,7 @@ def sync_selected_folder(
     synced_count = 0
     new_count = 0
     updated_count = 0
+    embedded_count = 0
 
     for uid in reversed(selected_uids):
         fetch_status, fetch_data = client.uid("fetch", uid, "(UID FLAGS BODY.PEEK[])")
@@ -1707,11 +1926,18 @@ def sync_selected_folder(
         item.updated_at = utc_now()
         synced_count += 1
 
+        try:
+            if sync_email_embedding(session, item):
+                embedded_count += 1
+        except Exception as exc:
+            logger.warning("[email] embedding sync failed for message %s: %s", item.id, exc)
+
     return {
         "folder": folder,
         "fetched": synced_count,
         "created": new_count,
         "updated": updated_count,
+        "embedded": embedded_count,
         "remote_total": remote_total,
     }
 
@@ -2129,6 +2355,7 @@ def apply_mailbox_admin_payload(mailbox: Mailbox, payload: MailboxAdminUpsert, p
 async def lifespan(app: FastAPI):
     logger.info("[email] Starting on port %s", PORT)
     if _engine is not None:
+        ensure_db_extensions()
         Base.metadata.create_all(bind=_engine)
         ensure_schema()
     yield
@@ -2294,6 +2521,23 @@ async def assistant_context(request: Request, payload: AssistantContextRequest):
                 payload.limit,
                 payload.selected_email_id,
                 payload.selected_email_ids,
+            ),
+        }
+
+
+@app.post("/api/v1/emails/search")
+async def search_emails(request: Request, payload: EmailSearchRequest):
+    with get_db_session() as session:
+        return {
+            "success": True,
+            "data": search_email_messages(
+                session,
+                request.state.tenant_id,
+                payload.query,
+                payload.limit,
+                payload.mailbox_id,
+                payload.folder,
+                payload.include_children,
             ),
         }
 

@@ -1,6 +1,7 @@
 -- Via Oceânica AI — Database Initialization
 -- This file runs once when the PostgreSQL container is first created.
 
+CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ─── Enums ──────────────────────────────────────────────────────────
 

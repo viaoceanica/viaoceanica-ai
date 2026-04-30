@@ -1102,6 +1102,34 @@ async function fetchEmailAssistantContextPayload(
   }
 }
 
+async function fetchEmailSemanticSearchPayload(
+  ctx: TenantContext,
+  message: string,
+  limit = 8,
+): Promise<any | null> {
+  try {
+    const response = await fetch(`${EMAIL_MODULE_URL}/api/v1/emails/search`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-viao-user-id": String(ctx.userId),
+        "x-viao-tenant-id": String(ctx.tenantId),
+        "x-viao-request-id": `${ctx.requestId}-email-semantic-search`,
+      },
+      body: JSON.stringify({
+        query: message,
+        limit,
+      }),
+    });
+
+    if (!response.ok) return null;
+    const payload = await response.json() as any;
+    return payload?.data || null;
+  } catch {
+    return null;
+  }
+}
+
 function buildEmailCountFallbackReply(emailContextPayload: any): string | null {
   const senderMatches = Array.isArray(emailContextPayload?.sender_matches) ? emailContextPayload.sender_matches : [];
   const recipientMatches = Array.isArray(emailContextPayload?.recipient_matches) ? emailContextPayload.recipient_matches : [];
@@ -1311,6 +1339,8 @@ async function buildEmailRuntimeContext(ctx: TenantContext, message: string, ema
     const senderMatches = Array.isArray(payload?.sender_matches) ? payload.sender_matches : [];
     const recipientMatches = Array.isArray(payload?.recipient_matches) ? payload.recipient_matches : [];
     const queryScope = payload?.query_scope || {};
+    const semanticSearch = await fetchEmailSemanticSearchPayload(ctx, message, 8);
+    const semanticResults = Array.isArray(semanticSearch?.results) ? semanticSearch.results : [];
 
     const lines: string[] = [
       "CONTEXTO_EMAIL_OPERACIONAL (tempo real):",
@@ -1447,7 +1477,17 @@ async function buildEmailRuntimeContext(ctx: TenantContext, message: string, ema
       }
     }
 
-    lines.push("Usa estes dados diretamente para responder sobre os emails do módulo. Quando houver um bloco EMAIL_SELECIONADO_NO_UI, prioriza-o para pedidos sobre o email aberto ou para rascunhar respostas. Quando houver um bloco EMAILS_SELECIONADOS_NO_UI, usa-o para pedidos sobre os emails selecionados. Quando houver um bloco RASCUNHO_DE_RESPOSTA_PEDIDO, devolve um rascunho pronto a enviar, no tom e formato pedidos. Quando houver um bloco ESCOPO_DA_CONSULTA_ATUAL com emails, prioriza esse bloco para resumos e respostas sobre o pedido atual. Quando houver contagens no bloco, usa-as e não digas que não tens acesso aos emails.");
+    if (semanticResults.length > 0) {
+      lines.push("FERRAMENTA_BUSCA_SEMANTICA_EMAIL:");
+      lines.push(`- vetorial_disponivel=${semanticSearch?.query_vector_available ? "sim" : "nao"}`);
+      for (const result of semanticResults.slice(0, 8)) {
+        lines.push(
+          `- similaridade: score=${result.score ?? "—"} | distancia=${result.distance ?? "—"} | data=${result.received_at || "sem_data"} | de=${result.from || "Remetente desconhecido"} | assunto=${result.subject || "(Sem assunto)"} | pasta=${result.folder || "INBOX"} | snippet=${result.snippet || ""}`
+        );
+      }
+    }
+
+    lines.push("Usa estes dados diretamente para responder sobre os emails do módulo. Quando houver um bloco EMAIL_SELECIONADO_NO_UI, prioriza-o para pedidos sobre o email aberto ou para rascunhar respostas. Quando houver um bloco EMAILS_SELECIONADOS_NO_UI, usa-o para pedidos sobre os emails selecionados. Quando houver um bloco RASCUNHO_DE_RESPOSTA_PEDIDO, devolve um rascunho pronto a enviar, no tom e formato pedidos. Quando houver um bloco ESCOPO_DA_CONSULTA_ATUAL com emails, prioriza esse bloco para resumos e respostas sobre o pedido atual. Quando houver um bloco FERRAMENTA_BUSCA_SEMANTICA_EMAIL, usa os resultados semânticos como evidência prioritária para pedidos de resumo, urgência, tópicos e correspondências. Quando houver contagens no bloco, usa-as e não digas que não tens acesso aos emails.");
     return lines.join("\n");
   } catch (err) {
     console.warn("[AI Service] Failed to build email runtime context:", err);
