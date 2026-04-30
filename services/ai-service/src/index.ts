@@ -921,6 +921,26 @@ function normalizeEmailAssistantText(value: string): string {
     .trim();
 }
 
+function shouldKeepPendingEmailActionPrompt(message: string): boolean {
+  const normalized = normalizeEmailAssistantText(message);
+  if (!normalized) return true;
+
+  if (isAffirmativeConfirmation(message) || isNegativeConfirmation(message)) {
+    return true;
+  }
+
+  if (message.includes("?")) return false;
+
+  const tokenCount = normalized.split(" ").filter(Boolean).length;
+  if (tokenCount >= 4) return false;
+
+  if (/(quant|como|qual|quais|mostra|lista|resum|rascunh|draft|responde|reply|email|mail|mensagem|procur|search|encontra)/.test(normalized)) {
+    return false;
+  }
+
+  return true;
+}
+
 function extractDraftReplyPreferences(message: string): DraftReplyPreferences | null {
   const normalized = normalizeEmailAssistantText(message);
   const requested = /(rascunh|draft|responde a|reply to|resposta a|reply|responder a)/.test(normalized)
@@ -1573,21 +1593,25 @@ app.post("/api/v1/agent/chat", async (req, res) => {
         });
       }
 
-      return res.json({
-        success: true,
-        data: {
-          reply: `${pendingAction.confirmationPrompt}\n\nTenho esta ação pendente. Responde 'confirmar' para executar ou 'cancelar' para abortar.`,
-          agent: agentId,
-          module: effectiveModule,
-          model: "local-action",
-          usage: {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            estimated_cost_usd: 0,
+      if (shouldKeepPendingEmailActionPrompt(message)) {
+        return res.json({
+          success: true,
+          data: {
+            reply: `${pendingAction.confirmationPrompt}\n\nTenho esta ação pendente. Responde 'confirmar' para executar ou 'cancelar' para abortar.`,
+            agent: agentId,
+            module: effectiveModule,
+            model: "local-action",
+            usage: {
+              prompt_tokens: 0,
+              completion_tokens: 0,
+              total_tokens: 0,
+              estimated_cost_usd: 0,
+            },
           },
-        },
-      });
+        });
+      }
+
+      emailPendingActions.delete(sessionKey);
     }
 
     if (isNegativeConfirmation(message)) {
