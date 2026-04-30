@@ -25,6 +25,7 @@ const AI_API_KEY = process.env.AI_PROVIDER_API_KEY || "";
 const AI_BASE_URL = process.env.AI_PROVIDER_BASE_URL || "https://api.openai.com/v1";
 const HELPDESK_MODULE_URL = process.env.HELPDESK_MODULE_URL || "http://mod-helpdesk:4001";
 const EMAIL_MODULE_URL = process.env.EMAIL_MODULE_URL || process.env.MOD_EMAIL_URL || "http://mod-email:4004";
+const AI_AGENT_CHAT_TIMEOUT_MS = parseInt(process.env.AI_AGENT_CHAT_TIMEOUT_MS || "30000");
 
 // R2 / S3 config for file exports
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID || "";
@@ -972,6 +973,79 @@ function extractDraftReplyPreferences(message: string): DraftReplyPreferences | 
   };
 }
 
+
+function isAbortLikeError(error: any): boolean {
+  if (!error) return false;
+  const name = String(error?.name || "").toLowerCase();
+  const message = String(error?.message || "").toLowerCase();
+  return name.includes("abort")
+    || message.includes("aborted")
+    || message.includes("timeout")
+    || message.includes("timed out");
+}
+
+function buildEmailDraftFallbackReply(
+  emailContext: EmailChatContext | null | undefined,
+  preferences: DraftReplyPreferences | null,
+): string {
+  const selected = emailContext?.selectedEmail;
+  const subject = selected?.subject?.trim() || "(Sem assunto)";
+  const preview = (selected?.bodyPreview || selected?.snippet || "").trim();
+  const language = preferences?.language || "pt-PT";
+  const includeSubject = preferences?.includeSubject !== false && preferences?.format !== "texto simples";
+  const tone = preferences?.tones?.[0] || "profissional";
+  const length = preferences?.length || "média";
+
+  if (language === "en") {
+    const intro = length === "curta" ? "Thank you for your email." : "Thank you for your email and for the details shared.";
+    const body = [
+      "Hi,",
+      "",
+      intro,
+      preview ? "I reviewed the context and we will move forward on this." : "I reviewed your message and we will move forward on this.",
+      "Please share any additional details you want us to prioritize.",
+      "",
+      "Best regards,",
+    ].join("\n");
+    return includeSubject ? `Subject: Re: ${subject}\n\n${body}` : body;
+  }
+
+  if (language === "es") {
+    const intro = length === "curta" ? "Gracias por tu correo." : "Gracias por tu correo y por los detalles compartidos.";
+    const body = [
+      "Hola,",
+      "",
+      intro,
+      preview ? "Revisé el contexto y vamos a avanzar con esto." : "Revisé tu mensaje y vamos a avanzar con esto.",
+      "Si hace falta, compárteme más detalles para priorizar correctamente.",
+      "",
+      "Saludos,",
+    ].join("\n");
+    return includeSubject ? `Asunto: Re: ${subject}\n\n${body}` : body;
+  }
+
+  const opening = tone.includes("amig")
+    ? "Obrigado pelo teu email."
+    : tone.includes("firme")
+      ? "Obrigado pelo email."
+      : "Obrigado pelo seu email.";
+  const secondLine = length === "curta"
+    ? "Vi a tua mensagem e vamos avançar com este ponto."
+    : "Analisei a tua mensagem e vamos avançar com este ponto com prioridade.";
+
+  const body = [
+    "Olá,",
+    "",
+    opening,
+    preview ? secondLine : "Recebemos a tua mensagem e vamos tratar deste tema com prioridade.",
+    "Se necessário, envia por favor qualquer detalhe adicional que consideres importante.",
+    "",
+    "Cumprimentos,",
+  ].join("\n");
+
+  return includeSubject ? `Assunto: Re: ${subject}\n\n${body}` : body;
+}
+
 async function buildHelpdeskRuntimeContext(ctx: TenantContext): Promise<string | null> {
   try {
     const ticketRes = await fetch(`${HELPDESK_MODULE_URL}/api/v1/tickets`, {
@@ -1618,17 +1692,26 @@ app.post("/api/v1/agent/chat", async (req, res) => {
     { role: "user", content: message },
   ];
   const model = AGENT_MODEL_MAP[effectiveModule] || AGENT_MODEL_MAP[agentId] || DEFAULT_CHAT_MODEL;
+  const draftReplyPreferences = effectiveModule === "email" ? extractDraftReplyPreferences(message) : null;
 
   try {
     const start = Date.now();
-    const response = await fetch(`${AI_BASE_URL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${AI_API_KEY}`,
-      },
-      body: JSON.stringify({ model, messages, temperature: 0.7, max_tokens: 2048 }),
-    });
+    const controller = new AbortController();
+    const timeoutHandle = setTimeout(() => controller.abort(), AI_AGENT_CHAT_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(`${AI_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${AI_API_KEY}`,
+        },
+        body: JSON.stringify({ model, messages, temperature: 0.7, max_tokens: 2048 }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
     const durationMs = Date.now() - start;
 
     if (!response.ok) {
@@ -1685,6 +1768,47 @@ app.post("/api/v1/agent/chat", async (req, res) => {
       },
     });
   } catch (error: any) {
+    if (effectiveModule === "email" && draftReplyPreferences?.requested && isAbortLikeError(error)) {
+      const fallbackReply = buildEmailDraftFallbackReply(emailContext, draftReplyPreferences);
+
+      appendToSession(sessionKey, [
+        { role: "user", content: message },
+        { role: "assistant", content: fallbackReply },
+      ]);
+
+      await recordUsageEvent({
+        tenantId: ctx.tenantId,
+        userId: ctx.userId,
+        moduleKey: effectiveModule,
+        requestId: ctx.requestId,
+        provider: "local-fallback",
+        model: "local-draft-fallback",
+        endpoint: "agent/chat",
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        estimatedCostUsd: 0,
+        status: "success",
+        durationMs: AI_AGENT_CHAT_TIMEOUT_MS,
+      });
+
+      return res.json({
+        success: true,
+        data: {
+          reply: fallbackReply,
+          agent: agentId,
+          module: effectiveModule,
+          model: "local-draft-fallback",
+          usage: {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            estimated_cost_usd: 0,
+          },
+        },
+      });
+    }
+
     console.error("[AI Service] Agent chat error:", error.message);
     await recordUsageEvent({
       tenantId: ctx.tenantId,
