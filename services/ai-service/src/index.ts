@@ -1128,6 +1128,84 @@ function buildEmailCountFallbackReply(emailContextPayload: any): string | null {
   return null;
 }
 
+function isEmailSummaryQuestion(message: string): boolean {
+  const normalized = normalizeEmailAssistantText(message);
+  return /(resumo|sumario|summary|sintese|resumir)/.test(normalized)
+    && /(email|emails|mail|mensagem|mensagens)/.test(normalized);
+}
+
+function isEmailUrgencyQuestion(message: string): boolean {
+  const normalized = normalizeEmailAssistantText(message);
+  return /(urgente|urgentes|urgent|prioridade|prioritario|prioritaria)/.test(normalized)
+    && /(email|emails|mail|mensagem|mensagens|ultimos|ultimas|recentes)/.test(normalized);
+}
+
+function getEmailFallbackRecentItems(emailContextPayload: any, maxItems = 10): any[] {
+  const scopedRecent = Array.isArray(emailContextPayload?.query_scope?.recent_emails)
+    ? emailContextPayload.query_scope.recent_emails
+    : [];
+  const globalRecent = Array.isArray(emailContextPayload?.recent_emails)
+    ? emailContextPayload.recent_emails
+    : [];
+  const source = scopedRecent.length > 0 ? scopedRecent : globalRecent;
+  return source.slice(0, maxItems);
+}
+
+function formatEmailFallbackLine(email: any): string {
+  const date = String(email?.received_at || "sem_data").replace("T", " ").slice(0, 16);
+  const sender = email?.from || email?.from_name || email?.from_address || "Remetente desconhecido";
+  const subject = email?.subject || "(Sem assunto)";
+  const folder = email?.folder || "INBOX";
+  return `- ${date} | ${sender} | ${subject} [${folder}]`;
+}
+
+function buildEmailSummaryFallbackReply(emailContextPayload: any): string | null {
+  const items = getEmailFallbackRecentItems(emailContextPayload, 10);
+  if (!items.length) return null;
+
+  const total = Number(emailContextPayload?.query_scope?.total || items.length);
+  const lines = [
+    `Resumo dos últimos ${items.length} email(s) disponíveis (total no critério: ${total}):`,
+    ...items.map(formatEmailFallbackLine),
+  ];
+
+  return lines.join("\n");
+}
+
+function estimateUrgencyScore(email: any): number {
+  const folder = String(email?.folder || "").toLowerCase();
+  if (folder.includes("spam") || folder.includes("junk")) return 0;
+
+  const text = normalizeEmailAssistantText(`${email?.subject || ""} ${email?.snippet || ""}`);
+  let score = 0;
+
+  if (/(urgente|urgent|asap|imediat|hoje|agora|prazo|venciment|atras|overdue|falha|erro|pagament)/.test(text)) {
+    score += 3;
+  }
+  if (email?.is_seen === false) score += 1;
+  if (email?.is_flagged === true) score += 1;
+
+  return score;
+}
+
+function buildEmailUrgencyFallbackReply(emailContextPayload: any): string | null {
+  const items = getEmailFallbackRecentItems(emailContextPayload, 10);
+  if (!items.length) return null;
+
+  const urgent = items.filter((item) => estimateUrgencyScore(item) >= 3);
+  const nonUrgent = items.filter((item) => estimateUrgencyScore(item) < 3);
+
+  const lines = [
+    `Classificação de urgência (heurística) para ${items.length} email(s):`,
+    `Urgentes: ${urgent.length}`,
+    ...urgent.slice(0, 10).map(formatEmailFallbackLine),
+    `Não urgentes: ${nonUrgent.length}`,
+    ...nonUrgent.slice(0, 10).map(formatEmailFallbackLine),
+  ];
+
+  return lines.join("\n");
+}
+
 async function buildHelpdeskRuntimeContext(ctx: TenantContext): Promise<string | null> {
   try {
     const ticketRes = await fetch(`${HELPDESK_MODULE_URL}/api/v1/tickets`, {
@@ -1929,6 +2007,56 @@ app.post("/api/v1/agent/chat", async (req, res) => {
               agent: agentId,
               module: effectiveModule,
               model: "local-count-fallback",
+              usage: {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                estimated_cost_usd: 0,
+              },
+            },
+          });
+        }
+      }
+
+      if (isEmailUrgencyQuestion(message) || isEmailSummaryQuestion(message)) {
+        const contextPayload = await fetchEmailAssistantContextPayload(ctx, message, emailContext);
+        const urgencyReply = contextPayload && isEmailUrgencyQuestion(message)
+          ? buildEmailUrgencyFallbackReply(contextPayload)
+          : null;
+        const summaryReply = contextPayload && isEmailSummaryQuestion(message)
+          ? buildEmailSummaryFallbackReply(contextPayload)
+          : null;
+        const fallbackReply = urgencyReply || summaryReply;
+
+        if (fallbackReply) {
+          appendToSession(sessionKey, [
+            { role: "user", content: message },
+            { role: "assistant", content: fallbackReply },
+          ]);
+
+          await recordUsageEvent({
+            tenantId: ctx.tenantId,
+            userId: ctx.userId,
+            moduleKey: effectiveModule,
+            requestId: ctx.requestId,
+            provider: "local-fallback",
+            model: urgencyReply ? "local-urgency-fallback" : "local-summary-fallback",
+            endpoint: "agent/chat",
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+            estimatedCostUsd: 0,
+            status: "success",
+            durationMs: AI_AGENT_CHAT_TIMEOUT_MS,
+          });
+
+          return res.json({
+            success: true,
+            data: {
+              reply: fallbackReply,
+              agent: agentId,
+              module: effectiveModule,
+              model: urgencyReply ? "local-urgency-fallback" : "local-summary-fallback",
               usage: {
                 prompt_tokens: 0,
                 completion_tokens: 0,
