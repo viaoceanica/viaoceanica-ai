@@ -1471,6 +1471,40 @@ def decode_imap_folder_name(entry: bytes | str) -> str | None:
     return folder or None
 
 
+def should_include_child_folders(scope_folder: str | None) -> bool:
+    value = (scope_folder or "").strip().lower()
+    if not value:
+        return False
+
+    strict_folder_leaves = {
+        "inbox",
+        "spam",
+        "junk",
+        "bulk mail",
+        "trash",
+        "bin",
+        "deleted",
+        "sent",
+        "sent items",
+        "enviados",
+        "draft",
+        "drafts",
+        "rascunho",
+        "rascunhos",
+        "archive",
+        "archives",
+        "arquivo",
+        "arquivos",
+    }
+
+    segments = [segment for segment in re.split(r"[./]", value) if segment]
+    if len(segments) > 1 and segments[0] == "inbox":
+        segments = segments[1:]
+    leaf = segments[-1] if segments else value
+
+    return leaf not in strict_folder_leaves
+
+
 def sort_folder_names(folders: list[str], configured_folder: str | None = None) -> list[str]:
     configured = (configured_folder or "INBOX").strip().lower()
 
@@ -2464,7 +2498,8 @@ async def list_emails(
         if mailbox_id:
             query = query.where(EmailMessage.mailbox_id == mailbox_id)
         if folder:
-            if include_children:
+            effective_include_children = include_children and should_include_child_folders(folder)
+            if effective_include_children:
                 query = query.where(
                     or_(
                         EmailMessage.folder == folder,
