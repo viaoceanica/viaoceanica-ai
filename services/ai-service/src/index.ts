@@ -1066,6 +1066,68 @@ function buildEmailDraftFallbackReply(
   return includeSubject ? `Assunto: Re: ${subject}\n\n${body}` : body;
 }
 
+function isEmailCountQuestion(message: string): boolean {
+  const normalized = normalizeEmailAssistantText(message);
+  return /(quantos|quantas|count|how many|numero)/.test(normalized)
+    && /(email|emails|mail|mensagem|mensagens)/.test(normalized);
+}
+
+async function fetchEmailAssistantContextPayload(
+  ctx: TenantContext,
+  message: string,
+  emailContext?: EmailChatContext | null,
+): Promise<any | null> {
+  try {
+    const emailRes = await fetch(`${EMAIL_MODULE_URL}/api/v1/assistant/context`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-viao-user-id": String(ctx.userId),
+        "x-viao-tenant-id": String(ctx.tenantId),
+        "x-viao-request-id": `${ctx.requestId}-email-context-fallback`,
+      },
+      body: JSON.stringify({
+        question: message,
+        limit: 12,
+        selected_email_id: emailContext?.selectedEmailId || emailContext?.selectedEmail?.id || null,
+        selected_email_ids: Array.isArray(emailContext?.selectedEmailIds) ? emailContext?.selectedEmailIds : [],
+      }),
+    });
+
+    if (!emailRes.ok) return null;
+    const payload = await emailRes.json() as any;
+    return payload?.data || null;
+  } catch {
+    return null;
+  }
+}
+
+function buildEmailCountFallbackReply(emailContextPayload: any): string | null {
+  const senderMatches = Array.isArray(emailContextPayload?.sender_matches) ? emailContextPayload.sender_matches : [];
+  const recipientMatches = Array.isArray(emailContextPayload?.recipient_matches) ? emailContextPayload.recipient_matches : [];
+
+  if (senderMatches.length > 0) {
+    const primary = senderMatches[0] || {};
+    const total = Number(primary?.total || 0);
+    const query = primary?.query || "o remetente indicado";
+    return `Tens ${total} email(s) de ${query}.`;
+  }
+
+  if (recipientMatches.length > 0) {
+    const primary = recipientMatches[0] || {};
+    const total = Number(primary?.total || 0);
+    const query = primary?.query || "o destinatário indicado";
+    return `Tens ${total} email(s) para ${query}.`;
+  }
+
+  const scopedTotal = Number(emailContextPayload?.query_scope?.total);
+  if (Number.isFinite(scopedTotal)) {
+    return `Tens ${scopedTotal} email(s) para esse critério.`;
+  }
+
+  return null;
+}
+
 async function buildHelpdeskRuntimeContext(ctx: TenantContext): Promise<string | null> {
   try {
     const ticketRes = await fetch(`${HELPDESK_MODULE_URL}/api/v1/tickets`, {
@@ -1792,45 +1854,91 @@ app.post("/api/v1/agent/chat", async (req, res) => {
       },
     });
   } catch (error: any) {
-    if (effectiveModule === "email" && draftReplyPreferences?.requested && isAbortLikeError(error)) {
-      const fallbackReply = buildEmailDraftFallbackReply(emailContext, draftReplyPreferences);
+    if (effectiveModule === "email" && isAbortLikeError(error)) {
+      if (draftReplyPreferences?.requested) {
+        const fallbackReply = buildEmailDraftFallbackReply(emailContext, draftReplyPreferences);
 
-      appendToSession(sessionKey, [
-        { role: "user", content: message },
-        { role: "assistant", content: fallbackReply },
-      ]);
+        appendToSession(sessionKey, [
+          { role: "user", content: message },
+          { role: "assistant", content: fallbackReply },
+        ]);
 
-      await recordUsageEvent({
-        tenantId: ctx.tenantId,
-        userId: ctx.userId,
-        moduleKey: effectiveModule,
-        requestId: ctx.requestId,
-        provider: "local-fallback",
-        model: "local-draft-fallback",
-        endpoint: "agent/chat",
-        promptTokens: 0,
-        completionTokens: 0,
-        totalTokens: 0,
-        estimatedCostUsd: 0,
-        status: "success",
-        durationMs: AI_AGENT_CHAT_TIMEOUT_MS,
-      });
-
-      return res.json({
-        success: true,
-        data: {
-          reply: fallbackReply,
-          agent: agentId,
-          module: effectiveModule,
+        await recordUsageEvent({
+          tenantId: ctx.tenantId,
+          userId: ctx.userId,
+          moduleKey: effectiveModule,
+          requestId: ctx.requestId,
+          provider: "local-fallback",
           model: "local-draft-fallback",
-          usage: {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            estimated_cost_usd: 0,
+          endpoint: "agent/chat",
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          estimatedCostUsd: 0,
+          status: "success",
+          durationMs: AI_AGENT_CHAT_TIMEOUT_MS,
+        });
+
+        return res.json({
+          success: true,
+          data: {
+            reply: fallbackReply,
+            agent: agentId,
+            module: effectiveModule,
+            model: "local-draft-fallback",
+            usage: {
+              prompt_tokens: 0,
+              completion_tokens: 0,
+              total_tokens: 0,
+              estimated_cost_usd: 0,
+            },
           },
-        },
-      });
+        });
+      }
+
+      if (isEmailCountQuestion(message)) {
+        const contextPayload = await fetchEmailAssistantContextPayload(ctx, message, emailContext);
+        const fallbackReply = contextPayload ? buildEmailCountFallbackReply(contextPayload) : null;
+
+        if (fallbackReply) {
+          appendToSession(sessionKey, [
+            { role: "user", content: message },
+            { role: "assistant", content: fallbackReply },
+          ]);
+
+          await recordUsageEvent({
+            tenantId: ctx.tenantId,
+            userId: ctx.userId,
+            moduleKey: effectiveModule,
+            requestId: ctx.requestId,
+            provider: "local-fallback",
+            model: "local-count-fallback",
+            endpoint: "agent/chat",
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+            estimatedCostUsd: 0,
+            status: "success",
+            durationMs: AI_AGENT_CHAT_TIMEOUT_MS,
+          });
+
+          return res.json({
+            success: true,
+            data: {
+              reply: fallbackReply,
+              agent: agentId,
+              module: effectiveModule,
+              model: "local-count-fallback",
+              usage: {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                estimated_cost_usd: 0,
+              },
+            },
+          });
+        }
+      }
     }
 
     console.error("[AI Service] Agent chat error:", error.message);
