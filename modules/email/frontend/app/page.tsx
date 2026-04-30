@@ -220,11 +220,45 @@ function folderLabel(folder: string) {
   return getFolderMeta(folder).label;
 }
 
+function shouldIncludeFolderChildren(scopeFolder: string) {
+  const raw = (scopeFolder || "").trim();
+  if (!raw || raw === ALL_FOLDERS_KEY) return false;
+
+  const normalized = raw.toLowerCase();
+  const strictFolders = new Set([
+    "inbox",
+    "spam",
+    "junk",
+    "bulk mail",
+    "trash",
+    "bin",
+    "deleted",
+    "sent",
+    "sent items",
+    "enviados",
+    "draft",
+    "drafts",
+    "rascunho",
+    "rascunhos",
+    "archive",
+    "archives",
+    "arquivo",
+    "arquivos",
+  ]);
+
+  const segments = trimInboxRoot(splitFolderSegments(raw));
+  const leaf = (segments.length ? segments[segments.length - 1] : normalized).toLowerCase();
+
+  return !strictFolders.has(leaf);
+}
+
 function isFolderWithinScope(folder: string | null | undefined, scopeFolder: string) {
+
   const current = (folder || "INBOX").trim().toLowerCase();
   const scope = (scopeFolder || "INBOX").trim().toLowerCase();
   if (!scope || scope === ALL_FOLDERS_KEY.toLowerCase()) return true;
   if (current === scope) return true;
+  if (!shouldIncludeFolderChildren(scopeFolder)) return false;
   return current.startsWith(`${scope}.`) || current.startsWith(`${scope}/`);
 }
 
@@ -410,7 +444,9 @@ export default function EmailPage() {
       if (mailboxId) params.set("mailbox_id", mailboxId);
       if (folder && folder !== ALL_FOLDERS_KEY) {
         params.set("folder", folder);
-        params.set("include_children", "true");
+        if (shouldIncludeFolderChildren(folder)) {
+          params.set("include_children", "true");
+        }
       }
       params.set("limit", "250");
       const url = `${API_BASE}/api/emails?${params.toString()}`;
