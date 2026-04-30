@@ -1,4 +1,4 @@
-# Via Oceânica AI Platform — Deployment Runbook
+# Via Oceânica AI Platform - Deployment Runbook
 
 **Version:** 1.0  
 **Last Updated:** 2026-04-09  
@@ -43,6 +43,20 @@ The platform runs on a single VPS (77.42.95.216) with Docker Compose orchestrati
 
 ## 3. Deployment Procedures
 
+### 3.0 Canonical Deployment Root (this host)
+
+Use a stable project root outside temporary folders:
+
+```bash
+cd /root/projects/viaoceanica-ai-live
+```
+
+Notes:
+- The previous path under `.openclaw/workspace/tmp/` is restore-only backup material.
+- On this host, `/root/.openclaw/workspace/tmp/viaoceanica-ai-live` is a symlink to the canonical root so legacy commands resolve to current files.
+- Keep backups under `/root/restore-backups/` and restore only when needed.
+
+
 ### 3.1 Full Deployment (All Services)
 
 ```bash
@@ -50,7 +64,7 @@ The platform runs on a single VPS (77.42.95.216) with Docker Compose orchestrati
 ssh root@77.42.95.216
 
 # Navigate to project
-cd /opt/viaoceanica-ai
+cd /root/projects/viaoceanica-ai-live
 
 # Pull latest code (if using git)
 git pull origin main
