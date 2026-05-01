@@ -50,6 +50,7 @@ EMAIL_CREDENTIALS_SECRET = os.getenv("EMAIL_CREDENTIALS_SECRET", "email-module-d
 SYNC_FETCH_LIMIT = int(os.getenv("EMAIL_SYNC_FETCH_LIMIT", "25"))
 MANUAL_SYNC_FETCH_LIMIT = int(os.getenv("EMAIL_MANUAL_SYNC_FETCH_LIMIT", "5"))
 AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://ai-service:4010")
+OLLAMA_EMBEDDING_URL = os.getenv("OLLAMA_EMBEDDING_URL", "http://host.docker.internal:11434/v1/embeddings")
 EMAIL_EMBEDDING_MODEL = os.getenv("EMAIL_EMBEDDING_MODEL", "qwen3-embedding:8b")
 EMAIL_EMBEDDING_TIMEOUT_SECONDS = float(os.getenv("EMAIL_EMBEDDING_TIMEOUT_SECONDS", "120"))
 EMAIL_EMBEDDING_SOURCE_LIMIT = int(os.getenv("EMAIL_EMBEDDING_SOURCE_LIMIT", "12000"))
@@ -420,26 +421,30 @@ def fetch_embedding_vector(text: str, tenant_id: str, model: str = EMAIL_EMBEDDI
     if not text.strip():
         return None
 
-    try:
-        with httpx.Client(timeout=EMAIL_EMBEDDING_TIMEOUT_SECONDS) as client:
-            response = client.post(
-                f"{AI_SERVICE_URL}/api/v1/embeddings",
-                json={"input": text, "model": model},
-                headers={
-                    "Content-Type": "application/json",
-                    "x-viao-user-id": "1",
-                    "x-viao-tenant-id": tenant_id,
-                    "x-viao-company-role": "owner",
-                    "x-viao-request-id": f"email-embedding-{uuid4()}",
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
-            embedding = ((payload.get("data") or {}).get("data") or [{}])[0].get("embedding")
-            return embedding if isinstance(embedding, list) else None
-    except Exception as exc:
-        logger.warning("[email] embedding generation failed: %s", exc)
-        return None
+    payload = {"input": text, "model": model}
+    headers = {
+        "Content-Type": "application/json",
+        "x-viao-user-id": "1",
+        "x-viao-tenant-id": tenant_id,
+        "x-viao-company-role": "owner",
+        "x-viao-request-id": f"email-embedding-{uuid4()}",
+    }
+
+    for endpoint in (OLLAMA_EMBEDDING_URL, f"{AI_SERVICE_URL}/api/v1/embeddings"):
+        try:
+            with httpx.Client(timeout=EMAIL_EMBEDDING_TIMEOUT_SECONDS) as client:
+                response = client.post(endpoint, json=payload, headers=headers)
+                response.raise_for_status()
+                body = response.json()
+                data = body.get("data") or {}
+                embedding = data["data"][0]["embedding"] if endpoint == OLLAMA_EMBEDDING_URL else ((data.get("data") or [{}])[0].get("embedding"))
+                if isinstance(embedding, list) and embedding:
+                    return embedding
+        except Exception as exc:
+            logger.warning("[email] embedding generation failed via %s: %s", endpoint, exc)
+            continue
+
+    return None
 
 
 def sync_email_embedding(session: Session, item: EmailMessage) -> bool:
