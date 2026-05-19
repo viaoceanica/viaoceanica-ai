@@ -47,8 +47,6 @@ AI_AGENT_ID = os.getenv("AI_AGENT_ID", "email")
 DEFAULT_TENANT = os.getenv("DEFAULT_TENANT_ID", "")
 ALLOW_DEMO_TENANT = os.getenv("ALLOW_DEMO_TENANT", "false").lower() in {"1", "true", "yes", "on"}
 EMAIL_CREDENTIALS_SECRET = os.getenv("EMAIL_CREDENTIALS_SECRET", "email-module-dev-secret-change-me")
-SYNC_FETCH_LIMIT = int(os.getenv("EMAIL_SYNC_FETCH_LIMIT", "25"))
-MANUAL_SYNC_FETCH_LIMIT = int(os.getenv("EMAIL_MANUAL_SYNC_FETCH_LIMIT", "5"))
 AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://ai-service:4010")
 OLLAMA_EMBEDDING_URL = os.getenv("OLLAMA_EMBEDDING_URL", "http://host.docker.internal:11434/v1/embeddings")
 EMAIL_EMBEDDING_MODEL = os.getenv("EMAIL_EMBEDDING_MODEL", "qwen3-embedding:8b")
@@ -2029,7 +2027,7 @@ def sync_selected_folder(
     client: imaplib.IMAP4 | imaplib.IMAP4_SSL,
     mailbox: Mailbox,
     folder: str,
-    limit: int,
+    limit: int | None,
 ) -> dict:
     select_status, select_data = client.select(folder, readonly=True)
     if select_status != "OK":
@@ -2049,7 +2047,10 @@ def sync_selected_folder(
     all_uids: list[str] = []
     if search_data and search_data[0]:
         all_uids = [uid for uid in search_data[0].decode("utf-8", errors="ignore").split() if uid]
-    selected_uids = all_uids[-max(1, min(limit, 100)):]
+    if limit is None:
+        selected_uids = all_uids
+    else:
+        selected_uids = all_uids[-max(1, min(limit, 100)):]
 
     existing = []
     if selected_uids:
@@ -2137,7 +2138,7 @@ def sync_selected_folder(
     }
 
 
-def sync_mailbox_messages(session: Session, mailbox: Mailbox, limit: int = SYNC_FETCH_LIMIT) -> dict:
+def sync_mailbox_messages(session: Session, mailbox: Mailbox, limit: int | None = None) -> dict:
     if not mailbox.sync_enabled:
         raise HTTPException(status_code=409, detail="A sincronização da mailbox está desativada")
     if not mailbox.imap_password_encrypted:
@@ -2258,7 +2259,7 @@ def sync_mailbox_messages(session: Session, mailbox: Mailbox, limit: int = SYNC_
         close_imap_client(client)
 
 
-def queue_mailbox_sync(tenant_id: str, mailbox_id: str, limit: int) -> None:
+def queue_mailbox_sync(tenant_id: str, mailbox_id: str, limit: int | None = None) -> None:
     with get_db_session() as session:
         mailbox = session.scalar(select(Mailbox).where(Mailbox.tenant_id == tenant_id, Mailbox.id == mailbox_id))
         if mailbox is None:
@@ -2870,7 +2871,6 @@ async def sync_mailbox(
     background_tasks: BackgroundTasks,
     limit: int | None = Query(default=None, ge=1, le=100),
 ):
-    effective_limit = max(1, min(limit or MANUAL_SYNC_FETCH_LIMIT, SYNC_FETCH_LIMIT))
     with get_db_session() as session:
         item = get_mailbox_or_404(session, request.state.tenant_id, mailbox_id)
         if item.status == "syncing":
@@ -2879,7 +2879,7 @@ async def sync_mailbox(
                 "data": {
                     "mailbox": serialize_mailbox(item),
                     "queued": True,
-                    "limit": effective_limit,
+                    "limit": None,
                     "message": "A mailbox já está a sincronizar.",
                 },
             }
@@ -2891,14 +2891,14 @@ async def sync_mailbox(
         session.commit()
         session.refresh(item)
 
-        background_tasks.add_task(queue_mailbox_sync, request.state.tenant_id, mailbox_id, effective_limit)
+        background_tasks.add_task(queue_mailbox_sync, request.state.tenant_id, mailbox_id, limit)
         return {
             "success": True,
             "data": {
                 "mailbox": serialize_mailbox(item),
                 "queued": True,
-                "limit": effective_limit,
-                "message": "Sincronização iniciada. Os resultados vão aparecer assim que a mailbox terminar o processamento.",
+                "limit": None if limit is None else max(1, min(limit, 100)),
+                "message": "Sincronização iniciada para importar todos os emails disponíveis via IMAP. Os resultados vão aparecer assim que a mailbox terminar o processamento.",
             },
         }
 
