@@ -2260,6 +2260,7 @@ def sync_mailbox_messages(session: Session, mailbox: Mailbox) -> dict:
                     if client is None:
                         client = connect(folder)
                     folder_results.append(sync_selected_folder(session, client, mailbox, folder))
+                    session.commit()
                     break
                 except Exception as exc:
                     disconnected = is_imap_disconnect_error(exc)
