@@ -2027,7 +2027,6 @@ def sync_selected_folder(
     client: imaplib.IMAP4 | imaplib.IMAP4_SSL,
     mailbox: Mailbox,
     folder: str,
-    limit: int | None,
 ) -> dict:
     select_status, select_data = client.select(folder, readonly=True)
     if select_status != "OK":
@@ -2047,10 +2046,7 @@ def sync_selected_folder(
     all_uids: list[str] = []
     if search_data and search_data[0]:
         all_uids = [uid for uid in search_data[0].decode("utf-8", errors="ignore").split() if uid]
-    if limit is None:
-        selected_uids = all_uids
-    else:
-        selected_uids = all_uids[-max(1, min(limit, 100)):]
+    selected_uids = all_uids
 
     existing = []
     if selected_uids:
@@ -2138,7 +2134,7 @@ def sync_selected_folder(
     }
 
 
-def sync_mailbox_messages(session: Session, mailbox: Mailbox, limit: int | None = None) -> dict:
+def sync_mailbox_messages(session: Session, mailbox: Mailbox) -> dict:
     if not mailbox.sync_enabled:
         raise HTTPException(status_code=409, detail="A sincronização da mailbox está desativada")
     if not mailbox.imap_password_encrypted:
@@ -2174,7 +2170,7 @@ def sync_mailbox_messages(session: Session, mailbox: Mailbox, limit: int | None 
                 try:
                     if client is None:
                         client = connect(folder)
-                    folder_results.append(sync_selected_folder(session, client, mailbox, folder, limit))
+                    folder_results.append(sync_selected_folder(session, client, mailbox, folder))
                     break
                 except Exception as exc:
                     disconnected = is_imap_disconnect_error(exc)
@@ -2259,14 +2255,14 @@ def sync_mailbox_messages(session: Session, mailbox: Mailbox, limit: int | None 
         close_imap_client(client)
 
 
-def queue_mailbox_sync(tenant_id: str, mailbox_id: str, limit: int | None = None) -> None:
+def queue_mailbox_sync(tenant_id: str, mailbox_id: str) -> None:
     with get_db_session() as session:
         mailbox = session.scalar(select(Mailbox).where(Mailbox.tenant_id == tenant_id, Mailbox.id == mailbox_id))
         if mailbox is None:
             logger.warning("[email] Skipping queued sync for missing mailbox %s tenant %s", mailbox_id, tenant_id)
             return
         try:
-            result = sync_mailbox_messages(session, mailbox, limit=limit)
+            result = sync_mailbox_messages(session, mailbox)
             logger.info(
                 "[email] queued sync complete mailbox=%s tenant=%s fetched=%s created=%s updated=%s folders=%s",
                 mailbox_id,
@@ -2869,7 +2865,6 @@ async def sync_mailbox(
     mailbox_id: str,
     request: Request,
     background_tasks: BackgroundTasks,
-    limit: int | None = Query(default=None, ge=1, le=100),
 ):
     with get_db_session() as session:
         item = get_mailbox_or_404(session, request.state.tenant_id, mailbox_id)
@@ -2891,13 +2886,13 @@ async def sync_mailbox(
         session.commit()
         session.refresh(item)
 
-        background_tasks.add_task(queue_mailbox_sync, request.state.tenant_id, mailbox_id, limit)
+        background_tasks.add_task(queue_mailbox_sync, request.state.tenant_id, mailbox_id)
         return {
             "success": True,
             "data": {
                 "mailbox": serialize_mailbox(item),
                 "queued": True,
-                "limit": None if limit is None else max(1, min(limit, 100)),
+                "limit": None,
                 "message": "Sincronização iniciada para importar todos os emails disponíveis via IMAP. Os resultados vão aparecer assim que a mailbox terminar o processamento.",
             },
         }
