@@ -85,6 +85,8 @@ async function initMeteringTables() {
       provider VARCHAR(50) NOT NULL DEFAULT 'openai',
       model VARCHAR(100) NOT NULL,
       endpoint VARCHAR(100) NOT NULL,
+      request_text TEXT,
+      response_text TEXT,
       prompt_tokens INTEGER NOT NULL DEFAULT 0,
       completion_tokens INTEGER NOT NULL DEFAULT 0,
       total_tokens INTEGER NOT NULL DEFAULT 0,
@@ -94,6 +96,22 @@ async function initMeteringTables() {
       duration_ms INTEGER,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS user_id INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS module_key VARCHAR(100) NOT NULL DEFAULT 'contabilidade';
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS request_id VARCHAR(255);
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS provider VARCHAR(50) NOT NULL DEFAULT 'openai';
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS endpoint VARCHAR(100) NOT NULL DEFAULT 'unknown';
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS request_text TEXT;
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS response_text TEXT;
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS prompt_tokens INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS completion_tokens INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS total_tokens INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS estimated_cost_usd NUMERIC(10, 6) NOT NULL DEFAULT 0;
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'success';
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS error_message TEXT;
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS duration_ms INTEGER;
+    ALTER TABLE ai_usage_events ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
     CREATE INDEX IF NOT EXISTS idx_ai_usage_tenant_created
       ON ai_usage_events (tenant_id, created_at DESC);
@@ -168,6 +186,20 @@ function estimateCost(model: string, promptTokens: number, completionTokens: num
   return (promptTokens / 1000) * costs.input + (completionTokens / 1000) * costs.output;
 }
 
+function extractLatestUserMessage(messages: Array<{ role: string; content: string }> | unknown): string {
+  if (!Array.isArray(messages)) return "";
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const item = messages[index];
+    if (item && typeof item === "object" && (item as { role?: unknown; content?: unknown }).role === "user") {
+      const content = (item as { content?: unknown }).content;
+      if (typeof content === "string") return content.trim();
+    }
+  }
+
+  return "";
+}
+
 // ─── Metering ───────────────────────────────────────────────────────
 
 async function recordUsageEvent(event: {
@@ -178,6 +210,8 @@ async function recordUsageEvent(event: {
   provider: string;
   model: string;
   endpoint: string;
+  requestText?: string | null;
+  responseText?: string | null;
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
@@ -191,12 +225,14 @@ async function recordUsageEvent(event: {
     await db.query(
       `INSERT INTO ai_usage_events
         (tenant_id, user_id, module_key, request_id, provider, model, endpoint,
+         request_text, response_text,
          prompt_tokens, completion_tokens, total_tokens, estimated_cost_usd,
          status, error_message, duration_ms)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
       [
         event.tenantId, event.userId, event.moduleKey, event.requestId,
         event.provider, event.model, event.endpoint,
+        event.requestText || null, event.responseText || null,
         event.promptTokens, event.completionTokens, event.totalTokens,
         event.estimatedCostUsd, event.status, event.errorMessage || null,
         event.durationMs,
@@ -384,6 +420,32 @@ app.post("/api/v1/chat/completions", async (req, res) => {
   if (!messages || !Array.isArray(messages)) {
     return res.status(400).json({ success: false, error: { code: "INVALID_INPUT", message: "Campo 'messages' é obrigatório" } });
   }
+  const requestText = extractLatestUserMessage(messages);
+  const sendJson = res.json.bind(res);
+  res.json = ((body: any) => {
+    if (body && typeof body === "object" && body.success === false) {
+      const errorMessage = typeof body?.error?.message === "string" ? body.error.message : null;
+      void recordUsageEvent({
+        tenantId: ctx.tenantId,
+        userId: ctx.userId,
+        moduleKey: ctx.moduleKey || "contabilidade",
+        requestId: ctx.requestId,
+        requestText,
+        responseText: errorMessage,
+        provider: "litellm",
+        model: model || "gpt-4o-mini",
+        endpoint: "chat/completions",
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        estimatedCostUsd: 0,
+        status: "error",
+        errorMessage: errorMessage || undefined,
+        durationMs: 0,
+      });
+    }
+    return sendJson(body);
+  }) as typeof res.json;
 
   // Check token quota
   const quota = await checkTokenQuota(ctx);
@@ -411,6 +473,8 @@ app.post("/api/v1/chat/completions", async (req, res) => {
       userId: ctx.userId,
       moduleKey: ctx.moduleKey || "contabilidade",
       requestId: ctx.requestId,
+      requestText,
+      responseText: data.choices?.[0]?.message?.content || "",
       provider: "litellm",
       model: actualModel,
       endpoint: "chat/completions",
@@ -438,21 +502,6 @@ app.post("/api/v1/chat/completions", async (req, res) => {
     });
   } catch (error: any) {
     console.error("[AI Service] Chat completion error:", error.message);
-
-    await recordUsageEvent({
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      moduleKey: ctx.moduleKey || "contabilidade",
-      requestId: ctx.requestId,
-      provider: "litellm",
-      model: model || "gpt-4o-mini",
-      endpoint: "chat/completions",
-      promptTokens: 0, completionTokens: 0, totalTokens: 0,
-      estimatedCostUsd: 0,
-      status: "error",
-      errorMessage: error.message,
-      durationMs: 0,
-    });
 
     return res.status(500).json({ success: false, error: { code: "AI_ERROR", message: "Erro na chamada AI" } });
   }
@@ -611,7 +660,7 @@ app.get("/api/v1/usage", async (req, res) => {
 
     // Get recent events for this tenant
     const recentResult = await db.query(
-      `SELECT model, endpoint, prompt_tokens, completion_tokens, total_tokens,
+      `SELECT model, endpoint, request_text, response_text, prompt_tokens, completion_tokens, total_tokens,
               estimated_cost_usd, status, duration_ms, created_at
        FROM ai_usage_events
        WHERE tenant_id = $1
@@ -767,6 +816,7 @@ app.get("/api/v1/usage/admin/recent", async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
     const result = await db.query(
       `SELECT e.id, e.tenant_id, e.module_key, e.user_id, e.model,
+              e.request_text, e.response_text, e.error_message,
               e.prompt_tokens, e.completion_tokens, e.total_tokens,
               e.estimated_cost_usd, e.status, e.duration_ms, e.created_at,
               c.name as company_name, u.name as user_name
@@ -788,6 +838,9 @@ app.get("/api/v1/usage/admin/recent", async (req, res) => {
           user_name: r.user_name || null,
           module_key: r.module_key || "unknown",
           model: r.model,
+          request_text: r.request_text || null,
+          response_text: r.response_text || null,
+          error_message: r.error_message || null,
           prompt_tokens: r.prompt_tokens,
           completion_tokens: r.completion_tokens,
           total_tokens: r.total_tokens,
@@ -912,13 +965,95 @@ type DraftReplyPreferences = {
   directDraftOnly: boolean;
 };
 
+const EMAIL_INTENT_TYPO_VOCABULARY = [
+  "summary", "summarize", "summarise", "sumario", "summario", "resumo", "resumir",
+  "count", "quantos", "quantas", "numero",
+  "email", "emails", "mail", "mails", "mensagem", "mensagens",
+  "ultimo", "ultimos", "ultimas", "latest", "last", "recent", "recentes",
+  "from", "sender", "de", "remetente", "to", "recipient", "para", "destinatario",
+  "urgent", "urgente", "urgentes", "prioridade",
+  "date", "dates", "data", "datas", "quando", "sent", "enviado", "enviados",
+  "including", "include", "excluding", "exclude", "spam", "trash", "lixeira",
+  "attachments", "attachment", "anexo", "anexos",
+] as const;
+
+function levenshteinDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a) return b.length;
+  if (!b) return a.length;
+
+  const prev: number[] = new Array(b.length + 1);
+  const curr: number[] = new Array(b.length + 1);
+  for (let j = 0; j <= b.length; j += 1) prev[j] = j;
+
+  for (let i = 1; i <= a.length; i += 1) {
+    curr[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + cost,
+      );
+    }
+    for (let j = 0; j <= b.length; j += 1) prev[j] = curr[j];
+  }
+  return prev[b.length];
+}
+
+function correctLikelyIntentTypos(normalized: string): string {
+  const tokens = normalized.split(" ");
+  const corrected = tokens.map((token) => {
+    if (!token || token.length < 4) return token;
+    if (/[@.]/.test(token)) return token; // keep addresses/domains untouched
+    if (!/^[a-z]+$/.test(token)) return token;
+    if (EMAIL_INTENT_TYPO_VOCABULARY.includes(token as any)) return token;
+
+    let bestCandidate = token;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (const candidate of EMAIL_INTENT_TYPO_VOCABULARY) {
+      if (candidate[0] !== token[0]) continue;
+      const distance = levenshteinDistance(token, candidate);
+      const maxAllowed = token.length >= 5 ? 2 : 1;
+      const ratio = distance / Math.max(token.length, candidate.length, 1);
+      if (distance > maxAllowed) continue;
+      if (ratio > 0.34) continue;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestCandidate = candidate;
+      }
+    }
+
+    return bestCandidate;
+  });
+  return corrected.join(" ");
+}
+
 function normalizeEmailAssistantText(value: string): string {
-  return value
+  const normalized = value
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim();
+
+  const typoCorrections: Array<[RegExp, string]> = [
+    [/\bsummario\b/g, "sumario"],
+    [/\bsumarry\b/g, "summary"],
+    [/\bsmmary\b/g, "summary"],
+    [/\bultmos\b/g, "ultimos"],
+    [/\bulitmos\b/g, "ultimos"],
+    [/\bemeils\b/g, "emails"],
+    [/\bemials\b/g, "emails"],
+  ];
+
+  const corrected = typoCorrections.reduce(
+    (acc, [pattern, replacement]) => acc.replace(pattern, replacement),
+    normalized
+  );
+
+  return correctLikelyIntentTypos(corrected);
 }
 
 function shouldKeepPendingEmailActionPrompt(message: string): boolean {
@@ -943,7 +1078,7 @@ function shouldKeepPendingEmailActionPrompt(message: string): boolean {
 
 function extractDraftReplyPreferences(message: string): DraftReplyPreferences | null {
   const normalized = normalizeEmailAssistantText(message);
-  const requested = /(rascunh|draft|responde a|reply to|resposta a|reply|responder a)/.test(normalized)
+  const requested = /\b(?:rascunh\w*|draft(?:ing)?|responde\s+a|reply\s+to|resposta\s+a|reply|responder\s+a)\b/.test(normalized)
     && /(email|mail|mensagem|isto|este|esta)/.test(normalized);
 
   if (!requested) return null;
@@ -1072,12 +1207,75 @@ function isEmailCountQuestion(message: string): boolean {
     && /(email|emails|mail|mensagem|mensagens)/.test(normalized);
 }
 
+function getRequestedEmailWindow(message: string, fallback = 12, maximum = 50): number {
+  const normalized = normalizeEmailAssistantText(message);
+  const explicitMatch = normalized.match(/\b(?:last|latest|recent|recentes|ultimos|últimos|ultimas|últimas)\s+(\d{1,2})\s+(?:emails?|mails?|mensagens?)\b/)
+    || normalized.match(/\b(?:emails?|mails?|mensagens?)\s+(\d{1,2})\b/)
+    || normalized.match(/\b(\d{1,2})\s+(?:emails?|mails?|mensagens?)\b/);
+  const requested = explicitMatch ? Number.parseInt(explicitMatch[1] || "", 10) : fallback;
+  if (!Number.isFinite(requested) || requested <= 0) return fallback;
+  return Math.max(1, Math.min(requested, maximum));
+}
+
+function shouldIncludeSpamEmails(message: string): boolean {
+  const normalized = normalizeEmailAssistantText(message);
+  return /\b(spam|junk|lixo eletronico|lixo eletrónico)\b/.test(normalized);
+}
+
+function shouldIncludeTrashEmails(message: string): boolean {
+  const normalized = normalizeEmailAssistantText(message);
+  return /\b(trash|deleted|deleted items|bin|lixeira|papeleira)\b/.test(normalized)
+    || /\b(all folders|across all folders|todas as pastas|em todas as pastas)\b/.test(normalized);
+}
+
+function isSpamLikeFolder(folder: unknown): boolean {
+  const normalized = String(folder || "").toLowerCase();
+  return /(^|[./_-])(spam|junk|bulk)([./_-]|$)/.test(normalized);
+}
+
+function isTrashLikeFolder(folder: unknown): boolean {
+  const normalized = String(folder || "").toLowerCase();
+  return /(^|[./_-])(trash|bin|deleted|deleteditems|deleted_items)([./_-]|$)/.test(normalized);
+}
+
+function inferEmailAssistantReplyLanguage(message: string): "pt-PT" | "en" {
+  const normalized = normalizeEmailAssistantText(message);
+  if (/\b(english|ingles)\b/.test(normalized)) return "en";
+  if (/\b(portuguese|portugues|pt-pt)\b/.test(normalized)) return "pt-PT";
+  return "pt-PT";
+}
+
+function getEmailAssistantContextLimit(message: string): number {
+  if (isEmailDatesQuestion(message)) {
+    return 100;
+  }
+  const requested = getRequestedEmailWindow(message, 12, 25);
+  const appliesFiltering = !shouldIncludeSpamEmails(message) || !shouldIncludeTrashEmails(message);
+  if ((isEmailSummaryQuestion(message) || isEmailUrgencyQuestion(message)) && appliesFiltering) {
+    return Math.min(Math.max(requested * 2, requested + 5), 25);
+  }
+  return requested;
+}
+
+function sanitizeEmailContextQuestion(message: string): string {
+  if (!(isEmailSummaryQuestion(message) || isEmailUrgencyQuestion(message))) {
+    return message;
+  }
+
+  return message
+    .replace(/\b(?:including|include|with|incluindo|com|excluding|exclude|without|excluindo|sem)\s+(?:spam|junk|trash|deleted items|bin|lixeira|papeleira)(?:\s+(?:and|e)\s+(?:spam|junk|trash|deleted items|bin|lixeira|papeleira))*/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 async function fetchEmailAssistantContextPayload(
   ctx: TenantContext,
   message: string,
   emailContext?: EmailChatContext | null,
 ): Promise<any | null> {
   try {
+    const limit = getEmailAssistantContextLimit(message);
+    const sanitizedQuestion = sanitizeEmailContextQuestion(message) || message;
     const emailRes = await fetch(`${EMAIL_MODULE_URL}/api/v1/assistant/context`, {
       method: "POST",
       headers: {
@@ -1087,8 +1285,8 @@ async function fetchEmailAssistantContextPayload(
         "x-viao-request-id": `${ctx.requestId}-email-context-fallback`,
       },
       body: JSON.stringify({
-        question: message,
-        limit: 12,
+        question: sanitizedQuestion,
+        limit,
         selected_email_id: emailContext?.selectedEmailId || emailContext?.selectedEmail?.id || null,
         selected_email_ids: Array.isArray(emailContext?.selectedEmailIds) ? emailContext?.selectedEmailIds : [],
       }),
@@ -1130,27 +1328,34 @@ async function fetchEmailSemanticSearchPayload(
   }
 }
 
-function buildEmailCountFallbackReply(emailContextPayload: any): string | null {
+function buildEmailCountFallbackReply(emailContextPayload: any, message: string): string | null {
+  const language = inferEmailAssistantReplyLanguage(message);
   const senderMatches = Array.isArray(emailContextPayload?.sender_matches) ? emailContextPayload.sender_matches : [];
   const recipientMatches = Array.isArray(emailContextPayload?.recipient_matches) ? emailContextPayload.recipient_matches : [];
 
   if (senderMatches.length > 0) {
     const primary = senderMatches[0] || {};
     const total = Number(primary?.total || 0);
-    const query = primary?.query || "o remetente indicado";
-    return `Tens ${total} email(s) de ${query}.`;
+    const query = primary?.query || (language === "en" ? "the requested sender" : "o remetente indicado");
+    return language === "en"
+      ? `You have ${total} email(s) from ${query}.`
+      : `Tens ${total} email(s) de ${query}.`;
   }
 
   if (recipientMatches.length > 0) {
     const primary = recipientMatches[0] || {};
     const total = Number(primary?.total || 0);
-    const query = primary?.query || "o destinatário indicado";
-    return `Tens ${total} email(s) para ${query}.`;
+    const query = primary?.query || (language === "en" ? "the requested recipient" : "o destinatário indicado");
+    return language === "en"
+      ? `You have ${total} email(s) for ${query}.`
+      : `Tens ${total} email(s) para ${query}.`;
   }
 
   const scopedTotal = Number(emailContextPayload?.query_scope?.total);
   if (Number.isFinite(scopedTotal)) {
-    return `Tens ${scopedTotal} email(s) para esse critério.`;
+    return language === "en"
+      ? `You have ${scopedTotal} email(s) matching that criterion.`
+      : `Tens ${scopedTotal} email(s) para esse critério.`;
   }
 
   return null;
@@ -1158,17 +1363,61 @@ function buildEmailCountFallbackReply(emailContextPayload: any): string | null {
 
 function isEmailSummaryQuestion(message: string): boolean {
   const normalized = normalizeEmailAssistantText(message);
-  return /(resumo|sumario|summary|sintese|resumir)/.test(normalized)
+  return /(resumo|sumario|summario|summary|summarize|summarise|sintese|resumir|resume|resum[eo]|recap|digest)/.test(normalized)
     && /(email|emails|mail|mensagem|mensagens)/.test(normalized);
 }
 
 function isEmailUrgencyQuestion(message: string): boolean {
   const normalized = normalizeEmailAssistantText(message);
-  return /(urgente|urgentes|urgent|prioridade|prioritario|prioritaria)/.test(normalized)
-    && /(email|emails|mail|mensagem|mensagens|ultimos|ultimas|recentes)/.test(normalized);
+  const asksUrgency = /(urgente|urgentes|urgent|urgencia|urgency|prioridade|prioritario|prioritaria|classific|classify|triag)/.test(normalized);
+  const asksEmailScope = /(email|emails|mail|mensagem|mensagens|ultimos|ultimas|recentes|hoje|today)/.test(normalized);
+  return asksUrgency && asksEmailScope;
 }
 
-function getEmailFallbackRecentItems(emailContextPayload: any, maxItems = 10): any[] {
+function isEmailDatesQuestion(message: string): boolean {
+  const normalized = normalizeEmailAssistantText(message);
+  const asksDates = /(datas?|date|dates|quando|when)/.test(normalized)
+    || (/sent/.test(normalized) && /(on|em)/.test(normalized));
+  const asksEmailScope = /(email|emails|mail|mensagem|mensagens)/.test(normalized);
+  const hasSenderOrRecipientHint = /(from|de|sender|remetente|to|para|recipient|destinat)/.test(normalized);
+  return asksDates && asksEmailScope && hasSenderOrRecipientHint;
+}
+
+function buildEmailDatesFallbackReply(emailContextPayload: any, message: string): string | null {
+  const senderMatches = Array.isArray(emailContextPayload?.sender_matches) ? emailContextPayload.sender_matches : [];
+  const recipientMatches = Array.isArray(emailContextPayload?.recipient_matches) ? emailContextPayload.recipient_matches : [];
+  const match = senderMatches[0] || recipientMatches[0] || null;
+  if (!match) return null;
+
+  const recent = Array.isArray(match.recent_emails) ? match.recent_emails : [];
+  const uniqueDates: string[] = [];
+  const seen = new Set<string>();
+  for (const item of recent) {
+    const raw = String(item?.received_at || "");
+    if (!raw) continue;
+    const dateOnly = raw.slice(0, 10);
+    if (!dateOnly || seen.has(dateOnly)) continue;
+    seen.add(dateOnly);
+    uniqueDates.push(dateOnly);
+  }
+
+  const query = String(match?.query || "o remetente indicado").trim();
+  const total = Number(match?.total || 0);
+  const datesLine = uniqueDates.length > 0
+    ? uniqueDates.join(", ")
+    : "sem datas recentes no contexto atual";
+  return [
+    `Encontrei ${total} email(s) para "${query}".`,
+    `Datas recentes de envio/receção: ${datesLine}.`,
+    "Se quiseres, posso listar mais datas por ordem cronológica."
+  ].join("\n");
+}
+
+function getEmailFallbackRecentItems(
+  emailContextPayload: any,
+  maxItems = 10,
+  message?: string,
+): { items: any[]; excludedSpam: number; excludedTrash: number } {
   const scopedRecent = Array.isArray(emailContextPayload?.query_scope?.recent_emails)
     ? emailContextPayload.query_scope.recent_emails
     : [];
@@ -1176,26 +1425,95 @@ function getEmailFallbackRecentItems(emailContextPayload: any, maxItems = 10): a
     ? emailContextPayload.recent_emails
     : [];
   const source = scopedRecent.length > 0 ? scopedRecent : globalRecent;
-  return source.slice(0, maxItems);
+
+  if (!message) {
+    return { items: source.slice(0, maxItems), excludedSpam: 0, excludedTrash: 0 };
+  }
+
+  const includeSpam = shouldIncludeSpamEmails(message);
+  const includeTrash = shouldIncludeTrashEmails(message);
+  const excludedSpam = includeSpam ? 0 : source.filter((item) => isSpamLikeFolder(item?.folder)).length;
+  const excludedTrash = includeTrash ? 0 : source.filter((item) => isTrashLikeFolder(item?.folder)).length;
+  const filtered = source.filter((item) => {
+    if (!includeSpam && isSpamLikeFolder(item?.folder)) return false;
+    if (!includeTrash && isTrashLikeFolder(item?.folder)) return false;
+    return true;
+  });
+  const items = (filtered.length > 0 ? filtered : source).slice(0, maxItems);
+  return {
+    items,
+    excludedSpam: filtered.length > 0 ? excludedSpam : 0,
+    excludedTrash: filtered.length > 0 ? excludedTrash : 0,
+  };
 }
 
-function formatEmailFallbackLine(email: any): string {
+function formatEmailFallbackLine(email: any, language: "pt-PT" | "en" = "pt-PT"): string {
   const date = String(email?.received_at || "sem_data").replace("T", " ").slice(0, 16);
-  const sender = email?.from || email?.from_name || email?.from_address || "Remetente desconhecido";
-  const subject = email?.subject || "(Sem assunto)";
+  const sender = email?.from || email?.from_name || email?.from_address || (language === "en" ? "Unknown sender" : "Remetente desconhecido");
+  const subject = email?.subject || (language === "en" ? "(No subject)" : "(Sem assunto)");
   const folder = email?.folder || "INBOX";
   return `- ${date} | ${sender} | ${subject} [${folder}]`;
 }
 
-function buildEmailSummaryFallbackReply(emailContextPayload: any): string | null {
-  const items = getEmailFallbackRecentItems(emailContextPayload, 10);
+function buildEmailTopSendersLine(items: any[], language: "pt-PT" | "en" = "pt-PT", maxSenders = 3): string | null {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    const sender = String(item?.from || item?.from_address || (language === "en" ? "Unknown sender" : "Remetente desconhecido")).trim();
+    if (!sender) continue;
+    counts.set(sender, (counts.get(sender) || 0) + 1);
+  }
+
+  const ranked = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, maxSenders);
+
+  if (!ranked.length) return null;
+  return language === "en"
+    ? `Top senders: ${ranked.map(([sender, count]) => `${sender} (${count})`).join(", ")}`
+    : `Remetentes mais frequentes: ${ranked.map(([sender, count]) => `${sender} (${count})`).join(", ")}`;
+}
+
+function buildEmailExclusionNote(excludedSpam: number, excludedTrash: number, language: "pt-PT" | "en" = "pt-PT"): string {
+  const parts: string[] = [];
+  if (excludedSpam > 0) {
+    parts.push(language === "en" ? `${excludedSpam} spam/junk` : `${excludedSpam} de spam/junk`);
+  }
+  if (excludedTrash > 0) {
+    parts.push(language === "en" ? `${excludedTrash} trash` : `${excludedTrash} da Lixeira/Trash`);
+  }
+  if (!parts.length) return "";
+  return language === "en"
+    ? `, excluding ${parts.join(" and ")}`
+    : `, excluindo ${parts.join(" e ")}`;
+}
+
+function buildEmailSummaryFallbackReply(emailContextPayload: any, message: string): string | null {
+  const language = inferEmailAssistantReplyLanguage(message);
+  const requestedCount = getRequestedEmailWindow(message, 10, 25);
+  const { items, excludedSpam, excludedTrash } = getEmailFallbackRecentItems(emailContextPayload, requestedCount, message);
   if (!items.length) return null;
 
   const total = Number(emailContextPayload?.query_scope?.total || items.length);
-  const lines = [
-    `Resumo dos últimos ${items.length} email(s) disponíveis (total no critério: ${total}):`,
-    ...items.map(formatEmailFallbackLine),
-  ];
+  const unread = items.filter((item) => item?.is_seen === false).length;
+  const flagged = items.filter((item) => item?.is_flagged === true).length;
+  const attachments = items.filter((item) => item?.has_attachments === true).length;
+  const topSendersLine = buildEmailTopSendersLine(items, language);
+  const exclusionNote = buildEmailExclusionNote(excludedSpam, excludedTrash, language);
+  const lines = language === "en"
+    ? [
+        `Summary of the last ${items.length} stored email(s)${exclusionNote} (total matching: ${total}):`,
+        `Quick view: ${unread} unread | ${flagged} flagged | ${attachments} with attachments`,
+        ...(topSendersLine ? [topSendersLine] : []),
+        "Recent emails:",
+        ...items.map((item) => formatEmailFallbackLine(item, language)),
+      ]
+    : [
+        `Resumo dos últimos ${items.length} email(s) guardados${exclusionNote} (total no critério: ${total}):`,
+        `Visão rápida: ${unread} por ler | ${flagged} sinalizados | ${attachments} com anexos`,
+        ...(topSendersLine ? [topSendersLine] : []),
+        "Emails recentes:",
+        ...items.map((item) => formatEmailFallbackLine(item, language)),
+      ];
 
   return lines.join("\n");
 }
@@ -1216,20 +1534,31 @@ function estimateUrgencyScore(email: any): number {
   return score;
 }
 
-function buildEmailUrgencyFallbackReply(emailContextPayload: any): string | null {
-  const items = getEmailFallbackRecentItems(emailContextPayload, 10);
+function buildEmailUrgencyFallbackReply(emailContextPayload: any, message: string): string | null {
+  const language = inferEmailAssistantReplyLanguage(message);
+  const requestedCount = getRequestedEmailWindow(message, 10, 25);
+  const { items, excludedSpam, excludedTrash } = getEmailFallbackRecentItems(emailContextPayload, requestedCount, message);
   if (!items.length) return null;
 
   const urgent = items.filter((item) => estimateUrgencyScore(item) >= 3);
   const nonUrgent = items.filter((item) => estimateUrgencyScore(item) < 3);
+  const exclusionNote = buildEmailExclusionNote(excludedSpam, excludedTrash, language);
 
-  const lines = [
-    `Classificação de urgência (heurística) para ${items.length} email(s):`,
-    `Urgentes: ${urgent.length}`,
-    ...urgent.slice(0, 10).map(formatEmailFallbackLine),
-    `Não urgentes: ${nonUrgent.length}`,
-    ...nonUrgent.slice(0, 10).map(formatEmailFallbackLine),
-  ];
+  const lines = language === "en"
+    ? [
+        `Urgency classification (heuristic) for ${items.length} email(s)${exclusionNote}:`,
+        `Urgent: ${urgent.length}`,
+        ...urgent.slice(0, requestedCount).map((item) => formatEmailFallbackLine(item, language)),
+        `Not urgent: ${nonUrgent.length}`,
+        ...nonUrgent.slice(0, requestedCount).map((item) => formatEmailFallbackLine(item, language)),
+      ]
+    : [
+        `Classificação de urgência (heurística) para ${items.length} email(s)${exclusionNote}:`,
+        `Urgentes: ${urgent.length}`,
+        ...urgent.slice(0, requestedCount).map((item) => formatEmailFallbackLine(item, language)),
+        `Não urgentes: ${nonUrgent.length}`,
+        ...nonUrgent.slice(0, requestedCount).map((item) => formatEmailFallbackLine(item, language)),
+      ];
 
   return lines.join("\n");
 }
@@ -1703,6 +2032,56 @@ app.post("/api/v1/agent/chat", async (req, res) => {
 
   const agentId = AGENT_MAP[effectiveModule] || "platform";
   const sessionKey = getSessionKey(ctx.tenantId, ctx.userId, effectiveModule);
+  const requestText = message.trim();
+  const logAssistantEvent = async (event: {
+    provider: string;
+    model: string;
+    endpoint: string;
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    estimatedCostUsd: number;
+    status: string;
+    errorMessage?: string;
+    durationMs: number;
+    responseText?: string | null;
+  }) => recordUsageEvent({
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+    moduleKey: effectiveModule,
+    requestId: ctx.requestId,
+    requestText,
+    responseText: event.responseText || null,
+    ...event,
+  });
+  const sendJson = res.json.bind(res);
+  res.json = ((body: any) => {
+    const responseModel = typeof body?.data?.model === "string" ? body.data.model : "";
+    const shouldLogLocal = body?.success === true && responseModel.startsWith("local");
+    const shouldLogError = body?.success === false;
+    if ((shouldLogLocal || shouldLogError) && body && typeof body === "object") {
+      const replyText = typeof body?.data?.reply === "string"
+        ? body.data.reply
+        : typeof body?.error?.message === "string"
+          ? body.error.message
+          : null;
+      const usage = body?.data?.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
+      void logAssistantEvent({
+        provider: shouldLogLocal || body?.error?.code === "EMAIL_ACTION_FAILED" ? "local-action" : "litellm",
+        model: responseModel || "local-action",
+        endpoint: "agent/chat",
+        promptTokens: usage.prompt_tokens || 0,
+        completionTokens: usage.completion_tokens || 0,
+        totalTokens: usage.total_tokens || 0,
+        estimatedCostUsd: usage.estimated_cost_usd || 0,
+        status: shouldLogError ? "error" : "success",
+        errorMessage: body?.error?.message,
+        durationMs: 0,
+        responseText: replyText,
+      });
+    }
+    return sendJson(body);
+  }) as typeof res.json;
 
   if (clearHistory) {
     agentSessions.delete(sessionKey);
@@ -1812,13 +2191,50 @@ app.post("/api/v1/agent/chat", async (req, res) => {
       });
     }
 
-    const actionPreview = await previewEmailAssistantAction(ctx, message, emailContext);
-    if (actionPreview?.matched) {
-      if (!actionPreview.ready) {
+    const shouldBypassActionPreview = isEmailCountQuestion(message)
+      || isEmailUrgencyQuestion(message)
+      || isEmailSummaryQuestion(message)
+      || isEmailDatesQuestion(message);
+
+    if (!shouldBypassActionPreview) {
+      const actionPreview = await previewEmailAssistantAction(ctx, message, emailContext);
+      if (actionPreview?.matched) {
+        if (!actionPreview.ready) {
+          return res.json({
+            success: true,
+            data: {
+              reply: actionPreview.message || "Preciso de mais contexto para preparar essa ação sobre os emails.",
+              agent: agentId,
+              module: effectiveModule,
+              model: "local-action",
+              usage: {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                estimated_cost_usd: 0,
+              },
+            },
+          });
+        }
+
+        emailPendingActions.set(sessionKey, {
+          action: actionPreview.action,
+          emailIds: Array.isArray(actionPreview.email_ids) ? actionPreview.email_ids : [],
+          targetFolder: actionPreview.target_folder || undefined,
+          confirmationPrompt: actionPreview.confirmation_prompt || "Confirmas a ação pedida?",
+          emailCount: Number(actionPreview.email_count || 0),
+          createdAt: Date.now(),
+        });
+
+        appendToSession(sessionKey, [
+          { role: "user", content: message },
+          { role: "assistant", content: actionPreview.confirmation_prompt || "Confirmas a ação pedida?" },
+        ]);
+
         return res.json({
           success: true,
           data: {
-            reply: actionPreview.message || "Preciso de mais contexto para preparar essa ação sobre os emails.",
+            reply: actionPreview.confirmation_prompt || "Confirmas a ação pedida?",
             agent: agentId,
             module: effectiveModule,
             model: "local-action",
@@ -1831,36 +2247,59 @@ app.post("/api/v1/agent/chat", async (req, res) => {
           },
         });
       }
+    }
+  }
 
-      emailPendingActions.set(sessionKey, {
-        action: actionPreview.action,
-        emailIds: Array.isArray(actionPreview.email_ids) ? actionPreview.email_ids : [],
-        targetFolder: actionPreview.target_folder || undefined,
-        confirmationPrompt: actionPreview.confirmation_prompt || "Confirmas a ação pedida?",
-        emailCount: Number(actionPreview.email_count || 0),
-        createdAt: Date.now(),
-      });
+  if (effectiveModule === "email") {
+    const shouldUseDeterministicReply = isEmailCountQuestion(message)
+      || isEmailUrgencyQuestion(message)
+      || isEmailSummaryQuestion(message)
+      || isEmailDatesQuestion(message);
 
-      appendToSession(sessionKey, [
-        { role: "user", content: message },
-        { role: "assistant", content: actionPreview.confirmation_prompt || "Confirmas a ação pedida?" },
-      ]);
+    if (shouldUseDeterministicReply) {
+      const contextPayload = await fetchEmailAssistantContextPayload(ctx, message, emailContext);
+      const countReply = contextPayload && isEmailCountQuestion(message)
+        ? buildEmailCountFallbackReply(contextPayload, message)
+        : null;
+      const urgencyReply = contextPayload && isEmailUrgencyQuestion(message)
+        ? buildEmailUrgencyFallbackReply(contextPayload, message)
+        : null;
+      const summaryReply = contextPayload && isEmailSummaryQuestion(message)
+        ? buildEmailSummaryFallbackReply(contextPayload, message)
+        : null;
+      const datesReply = contextPayload && isEmailDatesQuestion(message)
+        ? buildEmailDatesFallbackReply(contextPayload, message)
+        : null;
+      const fallbackReply = countReply || urgencyReply || summaryReply || datesReply;
 
-      return res.json({
-        success: true,
-        data: {
-          reply: actionPreview.confirmation_prompt || "Confirmas a ação pedida?",
-          agent: agentId,
-          module: effectiveModule,
-          model: "local-action",
-          usage: {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            estimated_cost_usd: 0,
+      if (fallbackReply) {
+        appendToSession(sessionKey, [
+          { role: "user", content: message },
+          { role: "assistant", content: fallbackReply },
+        ]);
+
+        return res.json({
+          success: true,
+          data: {
+            reply: fallbackReply,
+            agent: agentId,
+            module: effectiveModule,
+            model: countReply
+              ? "local-count-fallback"
+              : urgencyReply
+                ? "local-urgency-fallback"
+                : summaryReply
+                  ? "local-summary-fallback"
+                  : "local-dates-fallback",
+            usage: {
+              prompt_tokens: 0,
+              completion_tokens: 0,
+              total_tokens: 0,
+              estimated_cost_usd: 0,
+            },
           },
-        },
-      });
+        });
+      }
     }
   }
 
@@ -1944,6 +2383,8 @@ app.post("/api/v1/agent/chat", async (req, res) => {
       userId: ctx.userId,
       moduleKey: effectiveModule,
       requestId: ctx.requestId,
+      requestText,
+      responseText: cleanReply,
       provider: "litellm",
       model: actualModel,
       endpoint: "agent/chat",
@@ -1981,22 +2422,6 @@ app.post("/api/v1/agent/chat", async (req, res) => {
           { role: "assistant", content: fallbackReply },
         ]);
 
-        await recordUsageEvent({
-          tenantId: ctx.tenantId,
-          userId: ctx.userId,
-          moduleKey: effectiveModule,
-          requestId: ctx.requestId,
-          provider: "local-fallback",
-          model: "local-draft-fallback",
-          endpoint: "agent/chat",
-          promptTokens: 0,
-          completionTokens: 0,
-          totalTokens: 0,
-          estimatedCostUsd: 0,
-          status: "success",
-          durationMs: AI_AGENT_CHAT_TIMEOUT_MS,
-        });
-
         return res.json({
           success: true,
           data: {
@@ -2016,29 +2441,13 @@ app.post("/api/v1/agent/chat", async (req, res) => {
 
       if (isEmailCountQuestion(message)) {
         const contextPayload = await fetchEmailAssistantContextPayload(ctx, message, emailContext);
-        const fallbackReply = contextPayload ? buildEmailCountFallbackReply(contextPayload) : null;
+        const fallbackReply = contextPayload ? buildEmailCountFallbackReply(contextPayload, message) : null;
 
         if (fallbackReply) {
           appendToSession(sessionKey, [
             { role: "user", content: message },
             { role: "assistant", content: fallbackReply },
           ]);
-
-          await recordUsageEvent({
-            tenantId: ctx.tenantId,
-            userId: ctx.userId,
-            moduleKey: effectiveModule,
-            requestId: ctx.requestId,
-            provider: "local-fallback",
-            model: "local-count-fallback",
-            endpoint: "agent/chat",
-            promptTokens: 0,
-            completionTokens: 0,
-            totalTokens: 0,
-            estimatedCostUsd: 0,
-            status: "success",
-            durationMs: AI_AGENT_CHAT_TIMEOUT_MS,
-          });
 
           return res.json({
             success: true,
@@ -2058,15 +2467,18 @@ app.post("/api/v1/agent/chat", async (req, res) => {
         }
       }
 
-      if (isEmailUrgencyQuestion(message) || isEmailSummaryQuestion(message)) {
+      if (isEmailUrgencyQuestion(message) || isEmailSummaryQuestion(message) || isEmailDatesQuestion(message)) {
         const contextPayload = await fetchEmailAssistantContextPayload(ctx, message, emailContext);
         const urgencyReply = contextPayload && isEmailUrgencyQuestion(message)
-          ? buildEmailUrgencyFallbackReply(contextPayload)
+          ? buildEmailUrgencyFallbackReply(contextPayload, message)
           : null;
         const summaryReply = contextPayload && isEmailSummaryQuestion(message)
-          ? buildEmailSummaryFallbackReply(contextPayload)
+          ? buildEmailSummaryFallbackReply(contextPayload, message)
           : null;
-        const fallbackReply = urgencyReply || summaryReply;
+        const datesReply = contextPayload && isEmailDatesQuestion(message)
+          ? buildEmailDatesFallbackReply(contextPayload, message)
+          : null;
+        const fallbackReply = urgencyReply || summaryReply || datesReply;
 
         if (fallbackReply) {
           appendToSession(sessionKey, [
@@ -2074,29 +2486,17 @@ app.post("/api/v1/agent/chat", async (req, res) => {
             { role: "assistant", content: fallbackReply },
           ]);
 
-          await recordUsageEvent({
-            tenantId: ctx.tenantId,
-            userId: ctx.userId,
-            moduleKey: effectiveModule,
-            requestId: ctx.requestId,
-            provider: "local-fallback",
-            model: urgencyReply ? "local-urgency-fallback" : "local-summary-fallback",
-            endpoint: "agent/chat",
-            promptTokens: 0,
-            completionTokens: 0,
-            totalTokens: 0,
-            estimatedCostUsd: 0,
-            status: "success",
-            durationMs: AI_AGENT_CHAT_TIMEOUT_MS,
-          });
-
           return res.json({
             success: true,
             data: {
               reply: fallbackReply,
               agent: agentId,
               module: effectiveModule,
-              model: urgencyReply ? "local-urgency-fallback" : "local-summary-fallback",
+              model: urgencyReply
+                ? "local-urgency-fallback"
+                : summaryReply
+                  ? "local-summary-fallback"
+                  : "local-dates-fallback",
               usage: {
                 prompt_tokens: 0,
                 completion_tokens: 0,
@@ -2110,20 +2510,6 @@ app.post("/api/v1/agent/chat", async (req, res) => {
     }
 
     console.error("[AI Service] Agent chat error:", error.message);
-    await recordUsageEvent({
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      moduleKey: effectiveModule,
-      requestId: ctx.requestId,
-      provider: "litellm",
-      model,
-      endpoint: "agent/chat",
-      promptTokens: 0, completionTokens: 0, totalTokens: 0,
-      estimatedCostUsd: 0,
-      status: "error",
-      errorMessage: error.message,
-      durationMs: 0,
-    });
     return res.status(500).json({ success: false, error: { code: "AI_ERROR", message: "Erro interno do assistente." } });
   }
 });

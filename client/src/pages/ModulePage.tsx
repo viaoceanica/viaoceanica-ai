@@ -28,9 +28,9 @@ const nameMap: Record<string, string> = {
  * and is accessible via the nginx reverse proxy at /module/contabilidade/
  */
 const iframeModules: Record<string, string> = {
-  contabilidade: "/module/contabilidade/",
-  helpdesk: "/module/helpdesk/",
-  email: "/module/email/",
+  contabilidade: "/module/contabilidade",
+  helpdesk: "/module/helpdesk",
+  email: "/module/email",
 };
 
 export default function ModulePage() {
@@ -70,13 +70,6 @@ export default function ModulePage() {
       );
     }
   };
-
-  const tenantQuery = new URLSearchParams();
-  if (user?.companyId) tenantQuery.set("tenantId", String(user.companyId));
-  if (user?.id) tenantQuery.set("userId", String(user.id));
-  if (user?.companyRole) tenantQuery.set("companyRole", user.companyRole);
-  if (user?.platformRole) tenantQuery.set("platformRoles", String(user.platformRole));
-  const tenantQueryString = tenantQuery.toString();
 
   // Send tenant context to iframe via postMessage when loaded
   useEffect(() => {
@@ -140,17 +133,13 @@ export default function ModulePage() {
   const iframeSrc = iframeModules[slug];
   const adminIframeModules: Record<string, string> = {
     helpdesk: "/module/helpdesk/admin?v=20260427b",
-    email: "/module/email/admin/",
+    email: "/module/email/admin",
   };
   const adminIframeSrc = adminIframeModules[slug];
   const resolvedIframeSrcBase = moduleView === "admin" && adminIframeSrc
     ? adminIframeSrc
     : iframeSrc;
-  const resolvedIframeSrc = resolvedIframeSrcBase
-    ? (tenantQueryString
-        ? `${resolvedIframeSrcBase}${resolvedIframeSrcBase.includes("?") ? "&" : "?"}${tenantQueryString}`
-        : resolvedIframeSrcBase)
-    : undefined;
+  const resolvedIframeSrc = resolvedIframeSrcBase;
 
   if (iframeSrc) {
     return (

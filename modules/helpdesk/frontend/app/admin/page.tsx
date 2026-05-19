@@ -503,7 +503,7 @@ class HelpdeskAdminErrorBoundary extends React.Component<{ children: React.React
               {this.state.error?.stack || this.state.error?.message || "Erro desconhecido"}
             </pre>
             <div className="mt-4 flex flex-wrap gap-2">
-              <a href="/module/helpdesk/" className="rounded-[12px] bg-red-700 px-4 py-2 text-sm font-semibold text-white">Ver interface</a>
+              <a href="/module/helpdesk" className="rounded-[12px] bg-red-700 px-4 py-2 text-sm font-semibold text-white">Ver interface</a>
               <button onClick={() => window.location.reload()} className="rounded-[12px] border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-800">Recarregar</button>
             </div>
           </div>

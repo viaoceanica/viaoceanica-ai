@@ -389,65 +389,76 @@ export default function Home() {
 
   async function loadWorkspace(activeTenantId: string) {
     const tenantHeaders = buildModuleHeaders(activeTenantId);
-    const [statusRes, ticketsRes, adminRes] = await Promise.all([
+    const requestList: Array<Promise<Response>> = [
       fetch(`${getApiBase()}/api/status`, { headers: tenantHeaders }),
       fetch(`${getApiBase()}/api/tickets`, { headers: tenantHeaders }),
-      fetch(`${getApiBase()}/api/tenants/${activeTenantId}/admin/summary`, { headers: tenantHeaders }),
-    ]);
+    ];
+    if (canManageTickets) {
+      requestList.push(fetch(`${getApiBase()}/api/tenants/${activeTenantId}/admin/summary`, { headers: tenantHeaders }));
+    }
+
+    const [statusRes, ticketsRes, adminRes] = await Promise.all(requestList);
 
     const statusJson = (await statusRes.json()) as TicketStatusResponse;
     const ticketsJson = (await ticketsRes.json()) as { success: boolean; data: Ticket[] };
-    const adminJson = (await adminRes.json()) as AdminSummaryResponse;
+    const adminJson = adminRes ? (await adminRes.json()) as AdminSummaryResponse : null;
 
     setStatus(statusJson);
     setTickets(Array.isArray(ticketsJson.data) ? ticketsJson.data : []);
-    setAdminSummary(adminRes.ok ? adminJson : null);
+    setAdminSummary(adminJson && adminRes?.ok ? adminJson : null);
 
-    try {
-      const clientsRes = await fetch(`${getApiBase()}/api/admin/catalog/clients`, { headers: tenantHeaders });
-      const clientsJson = (await clientsRes.json()) as { data?: { items?: ClientCatalogItem[] } };
-      const nextClients = Array.isArray(clientsJson?.data?.items) ? clientsJson.data.items : [];
-      setClientCatalog(
-        [...nextClients].sort((a, b) =>
-          buildClientOptionLabel(a).localeCompare(buildClientOptionLabel(b), "pt-PT", { sensitivity: "base" })
-        )
-      );
-    } catch {
+    if (canManageTickets) {
+      try {
+        const clientsRes = await fetch(`${getApiBase()}/api/admin/catalog/clients`, { headers: tenantHeaders });
+        const clientsJson = (await clientsRes.json()) as { data?: { items?: ClientCatalogItem[] } };
+        const nextClients = Array.isArray(clientsJson?.data?.items) ? clientsJson.data.items : [];
+        setClientCatalog(
+          [...nextClients].sort((a, b) =>
+            buildClientOptionLabel(a).localeCompare(buildClientOptionLabel(b), "pt-PT", { sensitivity: "base" })
+          )
+        );
+      } catch {
+        setClientCatalog([]);
+      }
+
+      try {
+        const categoriesRes = await fetch(`${getApiBase()}/api/admin/catalog/categories`, { headers: tenantHeaders });
+        const categoriesJson = (await categoriesRes.json()) as { data?: { items?: CategoryCatalogItem[] } };
+        const nextCategories = Array.isArray(categoriesJson?.data?.items) ? categoriesJson.data.items : [];
+        setCategoryCatalog(
+          nextCategories
+            .filter((category) => isCatalogEntryActive(category.active))
+            .sort((a, b) => buildCategoryOptionLabel(a).localeCompare(buildCategoryOptionLabel(b), "pt-PT", { sensitivity: "base" }))
+        );
+      } catch {
+        setCategoryCatalog([]);
+      }
+
+      try {
+        const slasRes = await fetch(`${getApiBase()}/api/admin/catalog/slas`, { headers: tenantHeaders });
+        const slasJson = (await slasRes.json()) as { data?: { items?: SlaCatalogItem[] } };
+        const nextSlas = Array.isArray(slasJson?.data?.items) ? slasJson.data.items : [];
+        setSlaCatalog(
+          nextSlas
+            .filter((sla) => isCatalogEntryActive(sla.active) && parseDurationMinutes(sla.resolutionTime) !== null)
+            .sort((a, b) => (parseDurationMinutes(a.resolutionTime) || 0) - (parseDurationMinutes(b.resolutionTime) || 0))
+        );
+      } catch {
+        setSlaCatalog([]);
+      }
+
+      try {
+        const slaPoliciesRes = await fetch(`${getApiBase()}/api/admin/catalog/sla_policies`, { headers: tenantHeaders });
+        const slaPoliciesJson = (await slaPoliciesRes.json()) as { data?: { items?: SlaPolicyCatalogItem[] } };
+        const nextPolicies = Array.isArray(slaPoliciesJson?.data?.items) ? slaPoliciesJson.data.items : [];
+        setSlaPolicyCatalog(nextPolicies.filter((policy) => isCatalogEntryActive(policy.active) && parseDurationMinutes(policy.resolutionTime) !== null));
+      } catch {
+        setSlaPolicyCatalog([]);
+      }
+    } else {
       setClientCatalog([]);
-    }
-
-    try {
-      const categoriesRes = await fetch(`${getApiBase()}/api/admin/catalog/categories`, { headers: tenantHeaders });
-      const categoriesJson = (await categoriesRes.json()) as { data?: { items?: CategoryCatalogItem[] } };
-      const nextCategories = Array.isArray(categoriesJson?.data?.items) ? categoriesJson.data.items : [];
-      setCategoryCatalog(
-        nextCategories
-          .filter((category) => isCatalogEntryActive(category.active))
-          .sort((a, b) => buildCategoryOptionLabel(a).localeCompare(buildCategoryOptionLabel(b), "pt-PT", { sensitivity: "base" }))
-      );
-    } catch {
       setCategoryCatalog([]);
-    }
-
-    try {
-      const slasRes = await fetch(`${getApiBase()}/api/admin/catalog/slas`, { headers: tenantHeaders });
-      const slasJson = (await slasRes.json()) as { data?: { items?: SlaCatalogItem[] } };
-      const nextSlas = Array.isArray(slasJson?.data?.items) ? slasJson.data.items : [];
-      setSlaCatalog(
-        nextSlas
-          .filter((sla) => isCatalogEntryActive(sla.active) && parseDurationMinutes(sla.resolutionTime) !== null)
-          .sort((a, b) => (parseDurationMinutes(a.resolutionTime) || 0) - (parseDurationMinutes(b.resolutionTime) || 0))
-      );
-    } catch {
       setSlaCatalog([]);
-    }
-
-    try {
-      const slaPoliciesRes = await fetch(`${getApiBase()}/api/admin/catalog/sla_policies`, { headers: tenantHeaders });
-      const slaPoliciesJson = (await slaPoliciesRes.json()) as { data?: { items?: SlaPolicyCatalogItem[] } };
-      const nextPolicies = Array.isArray(slaPoliciesJson?.data?.items) ? slaPoliciesJson.data.items : [];
-      setSlaPolicyCatalog(nextPolicies.filter((policy) => isCatalogEntryActive(policy.active) && parseDurationMinutes(policy.resolutionTime) !== null));
-    } catch {
       setSlaPolicyCatalog([]);
     }
 

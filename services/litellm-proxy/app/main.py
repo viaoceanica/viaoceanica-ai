@@ -15,16 +15,12 @@ logger = logging.getLogger(__name__)
 
 APP_START = time.time()
 APP_PORT = int(os.getenv("PORT", "4025"))
-LOCAL_AI_BASE_URL = os.getenv("LOCAL_AI_BASE_URL", os.getenv("UPSTREAM_AI_BASE_URL", "http://host.docker.internal:11434/v1")).rstrip("/")
+LOCAL_AI_BASE_URL = os.getenv("LOCAL_AI_BASE_URL", os.getenv("UPSTREAM_AI_BASE_URL", "http://host.docker.internal:11434")).rstrip("/")
 LOCAL_AI_API_KEY = os.getenv("LOCAL_AI_API_KEY", os.getenv("UPSTREAM_AI_API_KEY", "ollama"))
-LOCAL_AI_PROVIDER = os.getenv("LOCAL_AI_PROVIDER", "openai")
-FALLBACK_AI_BASE_URL = os.getenv("FALLBACK_AI_BASE_URL", "").rstrip("/")
-FALLBACK_AI_API_KEY = os.getenv("FALLBACK_AI_API_KEY", "")
-FALLBACK_AI_PROVIDER = os.getenv("FALLBACK_AI_PROVIDER", "openai")
+LOCAL_AI_PROVIDER = os.getenv("LOCAL_AI_PROVIDER", "ollama")
 DEFAULT_CHAT_MODEL = os.getenv("DEFAULT_CHAT_MODEL", "qwen2.5:14b-instruct")
 DEFAULT_EMBEDDING_MODEL = os.getenv("DEFAULT_EMBEDDING_MODEL", "qwen3-embedding:8b")
 LOCAL_TIMEOUT_SECONDS = float(os.getenv("LOCAL_TIMEOUT_SECONDS", os.getenv("UPSTREAM_TIMEOUT_SECONDS", "120")))
-FALLBACK_TIMEOUT_SECONDS = float(os.getenv("FALLBACK_TIMEOUT_SECONDS", os.getenv("UPSTREAM_TIMEOUT_SECONDS", "120")))
 
 app = FastAPI(title="Via Oceânica LiteLLM Proxy", version="1.0.0")
 
@@ -41,7 +37,7 @@ def _as_plain_dict(value: Any) -> Any:
 
 
 def _candidate_endpoints() -> list[dict[str, str]]:
-    candidates = [
+    return [
         {
             "label": "local",
             "api_base": LOCAL_AI_BASE_URL,
@@ -49,23 +45,13 @@ def _candidate_endpoints() -> list[dict[str, str]]:
             "timeout": str(LOCAL_TIMEOUT_SECONDS),
         }
     ]
-    if FALLBACK_AI_BASE_URL and FALLBACK_AI_BASE_URL != LOCAL_AI_BASE_URL:
-        candidates.append(
-            {
-                "label": "fallback",
-                "api_base": FALLBACK_AI_BASE_URL,
-                "api_key": FALLBACK_AI_API_KEY,
-                "timeout": str(FALLBACK_TIMEOUT_SECONDS),
-            }
-        )
-    return candidates
 
 
 def _try_completion(**kwargs: Any):
     last_error: Exception | None = None
     for candidate in _candidate_endpoints():
         try:
-            provider = LOCAL_AI_PROVIDER if candidate["label"] == "local" else FALLBACK_AI_PROVIDER
+            provider = LOCAL_AI_PROVIDER
             model = kwargs.get("model")
             if isinstance(model, str) and "/" not in model:
                 model = f"{provider}/{model}"
@@ -90,13 +76,14 @@ def _try_embedding(**kwargs: Any):
     last_error: Exception | None = None
     for candidate in _candidate_endpoints():
         try:
-            provider = LOCAL_AI_PROVIDER if candidate["label"] == "local" else FALLBACK_AI_PROVIDER
+            provider = LOCAL_AI_PROVIDER
+            model = kwargs.get("model")
             return embedding(
                 api_base=candidate["api_base"],
                 api_key=candidate["api_key"] or None,
                 timeout=float(candidate["timeout"]),
                 custom_llm_provider=provider,
-                **kwargs,
+                **{**kwargs, "model": model},
             ), candidate["label"]
         except Exception as exc:
             logger.warning("LiteLLM embedding failed on %s endpoint: %s", candidate["label"], exc)
@@ -122,7 +109,6 @@ def ready() -> dict[str, Any]:
         "status": "ready",
         "dependencies": {
             "local_ai_base_url": "configured" if LOCAL_AI_BASE_URL else "missing",
-            "fallback_ai_base_url": "configured" if FALLBACK_AI_BASE_URL else "missing",
         },
     }
 

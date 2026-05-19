@@ -35,6 +35,11 @@ function getModuleUrl(moduleKey: string): string | undefined {
   return process.env[envKey];
 }
 
+function getModuleFrontendUrl(moduleKey: string): string | undefined {
+  const envKey = `MOD_${moduleKey.toUpperCase().replace(/-/g, "_")}_FRONTEND_URL`;
+  return process.env[envKey] || `http://${moduleKey}-frontend:3000`;
+}
+
 // ─── Redis Client (for session cache & rate limiting) ───────────────
 
 let redis: ReturnType<typeof createClient> | null = null;
@@ -262,6 +267,27 @@ app.use("/api/module/:moduleKey", async (req, res, next) => {
     target: targetUrl,
     changeOrigin: true,
     pathRewrite: (_path: string) => `/api/v1${_path}`,
+  } as Options)(req, res, next);
+});
+
+// Module page routes: /module/<module_key>/* → module frontend
+// This keeps the dashboard shell from swallowing the iframe/apps and returning the shell 404.
+app.use("/module/:moduleKey", async (req, res, next) => {
+  const moduleKey = req.params.moduleKey;
+  const targetUrl = getModuleFrontendUrl(moduleKey);
+
+  if (!targetUrl) {
+    return res.status(404).json({
+      success: false,
+      error: { code: "MODULE_NOT_FOUND", message: `Module frontend '${moduleKey}' is not registered or not running` },
+    });
+  }
+
+  return createProxyMiddleware({
+    target: targetUrl,
+    changeOrigin: true,
+    ws: true,
+    pathRewrite: (_path: string) => (_path === "/" ? `/module/${moduleKey}` : `/module/${moduleKey}${_path}`),
   } as Options)(req, res, next);
 });
 

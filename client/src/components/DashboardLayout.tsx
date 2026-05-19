@@ -79,7 +79,7 @@ const adminMenuItems = [
   { icon: Coins, label: "Tokens", path: "/admin/tokens" },
   { icon: Puzzle, label: "Módulos", path: "/admin/modules" },
   { icon: Settings, label: "Planos", path: "/admin/plans" },
-  { icon: Brain, label: "Consumo AI", path: "/admin/ai-usage" },
+  { icon: Brain, label: "Interações AI", path: "/admin/ai-usage" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";

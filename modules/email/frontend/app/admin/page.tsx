@@ -122,13 +122,6 @@ export default function EmailAdminPage() {
   const [success, setSuccess] = useState("");
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (window.top === window.self) {
-      window.location.replace(`/dashboard/module/email?view=admin${window.location.search ? `&${window.location.search.slice(1)}` : ""}`);
-    }
-  }, []);
-
-  useEffect(() => {
     const query = new URLSearchParams(window.location.search);
     const queryTenantId = query.get("tenantId");
     const queryUserId = query.get("userId");

@@ -302,14 +302,14 @@ class ParsedEmailPayload(BaseModel):
 
 class AssistantContextRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
-    limit: int = Field(default=12, ge=1, le=25)
+    limit: int = Field(default=12, ge=1, le=100)
     selected_email_id: Optional[str] = Field(default=None, max_length=64)
-    selected_email_ids: list[str] = Field(default_factory=list, max_length=25)
+    selected_email_ids: list[str] = Field(default_factory=list, max_length=100)
 
 
 class EmailSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
-    limit: int = Field(default=10, ge=1, le=50)
+    limit: int = Field(default=10, ge=1, le=100)
     mailbox_id: Optional[str] = Field(default=None, max_length=64)
     folder: Optional[str] = Field(default=None, max_length=255)
     include_children: bool = False
@@ -317,14 +317,14 @@ class EmailSearchRequest(BaseModel):
 
 class AssistantActionPreviewRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
-    limit: int = Field(default=5, ge=1, le=10)
+    limit: int = Field(default=5, ge=1, le=100)
     selected_email_id: Optional[str] = Field(default=None, max_length=64)
-    selected_email_ids: list[str] = Field(default_factory=list, max_length=25)
+    selected_email_ids: list[str] = Field(default_factory=list, max_length=100)
 
 
 class AssistantActionExecuteRequest(BaseModel):
     action: EmailAction
-    email_ids: list[str] = Field(min_length=1, max_length=50)
+    email_ids: list[str] = Field(min_length=1, max_length=100)
     target_folder: Optional[str] = Field(default=None, max_length=255)
 
 
@@ -389,16 +389,29 @@ def ensure_schema() -> None:
         "ALTER TABLE email_mailboxes ADD COLUMN IF NOT EXISTS last_connection_test_at TIMESTAMP NULL",
     ]
 
-    with _engine.begin() as conn:
-        for statement in statements:
-            conn.exec_driver_sql(statement)
+    for statement in statements:
+        try:
+            with _engine.begin() as conn:
+                conn.exec_driver_sql("SET LOCAL statement_timeout = '5s'")
+                conn.exec_driver_sql(statement)
+        except Exception as exc:
+            logger.warning("[email] schema migration skipped for statement %r: %s", statement, exc)
 
-        conn.exec_driver_sql("UPDATE email_mailboxes SET provider = 'imap' WHERE provider IS NULL OR provider = ''")
-        conn.exec_driver_sql("UPDATE email_mailboxes SET security_mode = 'ssl_tls' WHERE security_mode IS NULL OR security_mode = ''")
-        conn.exec_driver_sql("UPDATE email_mailboxes SET access_mode = 'read_write' WHERE access_mode IS NULL OR access_mode = ''")
-        conn.exec_driver_sql("UPDATE email_mailboxes SET auth_method = 'password' WHERE auth_method IS NULL OR auth_method = ''")
-        conn.exec_driver_sql("UPDATE email_mailboxes SET folder = 'INBOX' WHERE folder IS NULL OR folder = ''")
-        conn.exec_driver_sql("UPDATE email_mailboxes SET validate_certificates = TRUE WHERE validate_certificates IS NULL")
+    updates = [
+        "UPDATE email_mailboxes SET provider = 'imap' WHERE provider IS NULL OR provider = ''",
+        "UPDATE email_mailboxes SET security_mode = 'ssl_tls' WHERE security_mode IS NULL OR security_mode = ''",
+        "UPDATE email_mailboxes SET access_mode = 'read_write' WHERE access_mode IS NULL OR access_mode = ''",
+        "UPDATE email_mailboxes SET auth_method = 'password' WHERE auth_method IS NULL OR auth_method = ''",
+        "UPDATE email_mailboxes SET folder = 'INBOX' WHERE folder IS NULL OR folder = ''",
+        "UPDATE email_mailboxes SET validate_certificates = TRUE WHERE validate_certificates IS NULL",
+    ]
+    for statement in updates:
+        try:
+            with _engine.begin() as conn:
+                conn.exec_driver_sql("SET LOCAL statement_timeout = '5s'")
+                conn.exec_driver_sql(statement)
+        except Exception as exc:
+            logger.warning("[email] schema backfill skipped for statement %r: %s", statement, exc)
 
 
 def build_email_embedding_source(item: EmailMessage) -> str:
@@ -415,6 +428,35 @@ def build_email_embedding_source(item: EmailMessage) -> str:
 
 def calculate_content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def extract_embedding_from_response(body: object) -> list[float] | None:
+    if isinstance(body, dict):
+        data = body.get("data")
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    embedding = item.get("embedding")
+                    if isinstance(embedding, list) and embedding:
+                        return embedding
+        if isinstance(data, dict):
+            nested = data.get("data")
+            if isinstance(nested, list):
+                for item in nested:
+                    if isinstance(item, dict):
+                        embedding = item.get("embedding")
+                        if isinstance(embedding, list) and embedding:
+                            return embedding
+        embedding = body.get("embedding")
+        if isinstance(embedding, list) and embedding:
+            return embedding
+    elif isinstance(body, list):
+        for item in body:
+            if isinstance(item, dict):
+                embedding = item.get("embedding")
+                if isinstance(embedding, list) and embedding:
+                    return embedding
+    return None
 
 
 def fetch_embedding_vector(text: str, tenant_id: str, model: str = EMAIL_EMBEDDING_MODEL) -> list[float] | None:
@@ -435,11 +477,10 @@ def fetch_embedding_vector(text: str, tenant_id: str, model: str = EMAIL_EMBEDDI
             with httpx.Client(timeout=EMAIL_EMBEDDING_TIMEOUT_SECONDS) as client:
                 response = client.post(endpoint, json=payload, headers=headers)
                 response.raise_for_status()
-                body = response.json()
-                data = body.get("data") or {}
-                embedding = data["data"][0]["embedding"] if endpoint == OLLAMA_EMBEDDING_URL else ((data.get("data") or [{}])[0].get("embedding"))
+                embedding = extract_embedding_from_response(response.json())
                 if isinstance(embedding, list) and embedding:
                     return embedding
+                logger.warning("[email] embedding response from %s had an unexpected shape", endpoint)
         except Exception as exc:
             logger.warning("[email] embedding generation failed via %s: %s", endpoint, exc)
             continue
@@ -550,6 +591,52 @@ ASSISTANT_QUERY_STOPWORDS = {
     "o",
     "or",
     "the",
+    "i",
+    "me",
+    "my",
+    "mine",
+    "have",
+    "has",
+    "had",
+    "do",
+    "did",
+    "does",
+    "what",
+    "which",
+    "when",
+    "where",
+    "were",
+    "was",
+    "sent",
+    "send",
+    "on",
+    "of",
+    "at",
+    "how",
+    "many",
+    "date",
+    "dates",
+    "que",
+    "quais",
+    "qual",
+    "quantos",
+    "quantas",
+    "tenho",
+    "tem",
+    "foram",
+    "enviado",
+    "enviada",
+    "enviados",
+    "enviadas",
+    "datas",
+    "quando",
+    "specific",
+    "specifico",
+    "especifico",
+    "específico",
+    "domain",
+    "dominio",
+    "domínio",
 }
 
 GENERIC_EMAIL_REFERENCES = {
@@ -580,10 +667,35 @@ def truncate_text(value: str | None, max_length: int = 180) -> str:
     return f"{cleaned[: max_length - 1].rstrip()}…"
 
 
+def strip_assistant_query_scope_suffixes(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    suffix_patterns = [
+        r"\s+(?:in|across|within)\s+all\s+(?:folders?|mailboxes?)$",
+        r"\s+(?:em|por|atraves de|através de)\s+todas?\s+as\s+(?:pastas|mailboxes?|caixas?)$",
+        r"\s+(?:in|na|no|em)\s+(?:the\s+)?(?:inbox|archive|arquivo|spam|junk|trash|lixo|sent|enviados|drafts|rascunhos?)$",
+    ]
+    for pattern in suffix_patterns:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned
+
+
 def normalize_assistant_query_phrase(value: str) -> str:
     cleaned = re.sub(r"\s+", " ", value).strip(" '\".,;:!?()[]{}")
+    cleaned = re.sub(
+        r"^(?:i\s+have\s+from|do\s+i\s+have\s+from|what\s+dates?\s+were|what\s+dates?|which\s+dates?|quais?\s+datas?\s+foram|quais?\s+datas?|quantos?\s+emails?\s+tenho\s+de|tenho\s+de)\s+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     cleaned = re.sub(r"^(?:the|o|a|os|as)\s+", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b(?:emails?|mails?|messages?|mensagens?)\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = strip_assistant_query_scope_suffixes(cleaned)
+    cleaned = re.sub(
+        r"\s+(?:sent\s+on|were\s+sent\s+on|sent|foram\s+enviad[oa]s?\s+em|enviad[oa]s?\s+em|enviad[oa]s?)$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" '\".,;:!?()[]{}")
     return cleaned[:120]
 
@@ -593,8 +705,8 @@ def extract_sender_queries(question: str) -> list[str]:
     normalized = re.sub(r"\s+", " ", question).strip()
 
     patterns = [
-        r"(?:emails?|mails?|messages?|mensagens?)\s+(?:from|form|de|do|da|remetente|sender)\s+(.+?)(?:$|[?!,;])",
-        r"(?:from|form|de|do|da|remetente|sender)\s+(.+?)(?:$|[?!,;])",
+        r"(?:emails?|mails?|messages?|mensagens?)\s+\b(?:from|form|de|do|da|remetente|sender)\b\s+(.+?)(?:$|[?!,;])",
+        r"\b(?:from|form|de|do|da|remetente|sender)\b\s+(.+?)(?:$|[?!,;])",
     ]
     for pattern in patterns:
         for match in re.findall(pattern, normalized, flags=re.IGNORECASE):
@@ -604,6 +716,15 @@ def extract_sender_queries(question: str) -> list[str]:
 
     for match in re.findall(r'["“](.+?)["”]', normalized):
         cleaned = normalize_assistant_query_phrase(match)
+        if cleaned:
+            candidates.append(cleaned)
+
+    for domain_match in re.findall(
+        r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
+        cleaned = normalize_assistant_query_phrase(domain_match)
         if cleaned:
             candidates.append(cleaned)
 
@@ -625,8 +746,8 @@ def extract_recipient_queries(question: str) -> list[str]:
     normalized = re.sub(r"\s+", " ", question).strip()
 
     patterns = [
-        r"(?:emails?|mails?|messages?|mensagens?)\s+(?:to|para|destinatario|destinatário|recipient)\s+(.+?)(?:$|[?!,;])",
-        r"(?:to|para|destinatario|destinatário|recipient)\s+(.+?)(?:$|[?!,;])",
+        r"(?:emails?|mails?|messages?|mensagens?)\s+\b(?:to|para|destinatario|destinatário|recipient)\b\s+(.+?)(?:$|[?!,;])",
+        r"\b(?:to|para|destinatario|destinatário|recipient)\b\s+(.+?)(?:$|[?!,;])",
     ]
     for pattern in patterns:
         for match in re.findall(pattern, normalized, flags=re.IGNORECASE):
@@ -656,6 +777,22 @@ def build_sender_search_filters(term: str) -> list:
     if email_addresses:
         return [address_field.like(f"%{email_address.lower()}%") for email_address in email_addresses]
 
+    domains = re.findall(
+        r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if domains:
+        deduped_domains: list[str] = []
+        seen_domains: set[str] = set()
+        for domain in domains:
+            key = domain.lower().strip(".")
+            if not key or key in seen_domains:
+                continue
+            seen_domains.add(key)
+            deduped_domains.append(key)
+        return [or_(address_field.like(f"%@{domain}%"), address_field.like(f"%{domain}%")) for domain in deduped_domains]
+
     tokens = [
         token
         for token in re.split(r"[^a-z0-9@._%+-]+", normalized)
@@ -673,6 +810,22 @@ def build_recipient_search_filters(term: str) -> list:
     email_addresses = re.findall(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", normalized, flags=re.IGNORECASE)
     if email_addresses:
         return [recipient_field.like(f"%{email_address.lower()}%") for email_address in email_addresses]
+
+    domains = re.findall(
+        r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if domains:
+        deduped_domains: list[str] = []
+        seen_domains: set[str] = set()
+        for domain in domains:
+            key = domain.lower().strip(".")
+            if not key or key in seen_domains:
+                continue
+            seen_domains.add(key)
+            deduped_domains.append(key)
+        return [recipient_field.like(f"%@{domain}%") for domain in deduped_domains]
 
     tokens = [
         token
@@ -711,7 +864,7 @@ def normalize_selected_email_ids(selected_email_id: str | None, selected_email_i
         if not candidate or candidate in unique_ids:
             continue
         unique_ids.append(candidate)
-    return unique_ids[:25]
+    return unique_ids[:100]
 
 
 def load_selected_emails_for_assistant(session: Session, tenant_id: str, selected_email_id: str | None, selected_email_ids: list[str] | None) -> list[EmailMessage]:
@@ -877,6 +1030,7 @@ def build_email_assistant_context(
     selected_email_id: str | None = None,
     selected_email_ids: list[str] | None = None,
 ) -> dict:
+    bounded_limit = max(1, min(limit, 100))
     base_filters = [EmailMessage.tenant_id == tenant_id, EmailMessage.remote_deleted.is_(False)]
     mailboxes = session.scalars(
         select(Mailbox).where(Mailbox.tenant_id == tenant_id).order_by(Mailbox.updated_at.desc())
@@ -911,7 +1065,7 @@ def build_email_assistant_context(
         select(EmailMessage)
         .where(*base_filters)
         .order_by(EmailMessage.received_at.desc(), EmailMessage.updated_at.desc())
-        .limit(limit)
+        .limit(bounded_limit)
     ).all()
     selected_emails = load_selected_emails_for_assistant(session, tenant_id, selected_email_id, selected_email_ids)
 
@@ -928,7 +1082,7 @@ def build_email_assistant_context(
             sender_query,
             build_sender_search_filters,
             (EmailMessage.from_name, EmailMessage.from_address),
-            limit,
+            bounded_limit,
         )
         if payload:
             sender_matches.append(
@@ -955,7 +1109,7 @@ def build_email_assistant_context(
             recipient_query,
             build_recipient_search_filters,
             (EmailMessage.to_addresses,),
-            limit,
+            bounded_limit,
         )
         if payload:
             recipient_matches.append(
@@ -978,7 +1132,7 @@ def build_email_assistant_context(
         select(EmailMessage)
         .where(*query_filters)
         .order_by(EmailMessage.received_at.desc(), EmailMessage.updated_at.desc())
-        .limit(min(limit, 12))
+        .limit(bounded_limit)
     ).all()
 
     return {
@@ -999,7 +1153,7 @@ def build_email_assistant_context(
         ],
         "recent_emails": [serialize_assistant_email_summary(item) for item in recent_emails],
         "selected_email": serialize_assistant_email_detail(selected_emails[0]) if selected_emails else None,
-        "selected_emails": [serialize_assistant_email_detail(item) for item in selected_emails[:10]],
+        "selected_emails": [serialize_assistant_email_detail(item) for item in selected_emails[:100]],
         "sender_matches": sender_matches,
         "recipient_matches": recipient_matches,
         "query_scope": {
@@ -1306,7 +1460,42 @@ def resolve_target_folder_for_assistant(target_folder_query: str, folders: list[
     return None, [folder_label_for_assistant(folder) for folder in partial_matches[:5]]
 
 
-def build_email_action_confirmation(action: str, emails: list[EmailMessage], total: int, target_folder: str | None = None) -> str:
+def infer_email_reply_language(message: str) -> str:
+    normalized = normalize_search_text(message)
+    if re.search(r"\b(english|ingles)\b", normalized):
+        return "en"
+    if re.search(r"\b(portuguese|portugues|pt-pt)\b", normalized):
+        return "pt-PT"
+
+    english_hits = len(re.findall(r"\b(provide|summary|summarize|show|list|last|latest|recent|including|exclude|excluding|trash|unread|attachments|urgent|delete|move|archive|reply|confirm)\b", normalized))
+    portuguese_hits = len(re.findall(r"\b(resumo|resumir|mostrar|lista|ultimos|ultimas|recentes|incluindo|excluir|excluindo|lixeira|por ler|anexos|urgente|apagar|mover|arquivar|responder|confirmar)\b", normalized))
+    return "en" if english_hits >= 2 and english_hits > portuguese_hits else "pt-PT"
+
+
+def build_email_action_confirmation(action: str, emails: list[EmailMessage], total: int, target_folder: str | None = None, language: str = "pt-PT") -> str:
+    if language == "en":
+        verb = {
+            "delete": "delete",
+            "move": "move",
+            "mark_read": "mark as read",
+            "mark_unread": "mark as unread",
+            "flag": "flag as important",
+            "unflag": "remove the important flag from",
+        }.get(action, action_label_for_assistant(action))
+        target_suffix = f' to "{folder_label_for_assistant(target_folder)}"' if action == "move" and target_folder else ""
+        count_label = "this email" if total == 1 else f"these {total} emails"
+        if action == "unflag":
+            count_label = "this email" if total == 1 else f"these {total} emails"
+        lines = [f"I found {total} email(s). Do you want me to {verb} {count_label}{target_suffix}?"]
+        for item in emails[:5]:
+            sender = item.from_name or item.from_address or "Unknown sender"
+            received = item.received_at.strftime("%Y-%m-%d %H:%M") if item.received_at else "no date"
+            lines.append(f"- {received} | {sender} | {item.subject or '(No subject)'}")
+        if total > len(emails[:5]):
+            lines.append(f"- ... and {total - len(emails[:5])} more email(s)")
+        lines.append("Reply 'confirm' to proceed or 'cancel' to abort.")
+        return "\n".join(lines)
+
     verb = {
         "delete": "apague",
         "move": "mova",
@@ -1338,6 +1527,7 @@ def build_email_action_preview(
     selected_email_id: str | None = None,
     selected_email_ids: list[str] | None = None,
 ) -> dict:
+    language = infer_email_reply_language(message)
     intent = extract_email_action_intent(message)
     if not intent:
         return {"matched": False}
@@ -1383,7 +1573,7 @@ def build_email_action_preview(
             "message": "Não encontrei emails que correspondam a esse pedido. Tenta indicar melhor o remetente, o destinatário, o assunto, o tema, a pasta, ou um intervalo temporal mais específico.",
         }
 
-    if total > 25 and not latest_only:
+    if total > 100 and not latest_only:
         return {
             "matched": True,
             "ready": False,
@@ -1419,7 +1609,7 @@ def build_email_action_preview(
                 "message": f"Não consegui resolver a pasta de destino \"{target_folder_query}\" nessa mailbox.{suggestion_text}",
             }
 
-    actionable_items = items if latest_only else items[: min(total, 25)]
+    actionable_items = items if latest_only else items[: min(total, 100)]
     preview_items = actionable_items[: min(limit, len(actionable_items))]
     return {
         "matched": True,
@@ -1431,7 +1621,7 @@ def build_email_action_preview(
         "email_count": len(actionable_items),
         "emails": [serialize_assistant_email_summary(item) for item in preview_items],
         "query_scope": query_info,
-        "confirmation_prompt": build_email_action_confirmation(action, preview_items, len(actionable_items), resolved_folder),
+        "confirmation_prompt": build_email_action_confirmation(action, preview_items, len(actionable_items), resolved_folder, language),
     }
 
 
@@ -2362,7 +2552,6 @@ async def lifespan(app: FastAPI):
     if _engine is not None:
         ensure_db_extensions()
         Base.metadata.create_all(bind=_engine)
-        ensure_schema()
     yield
     logger.info("[email] Shutting down")
 

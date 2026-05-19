@@ -28,6 +28,7 @@
 
 x-common-env: &common-env
   NODE_ENV: production
+  TZ: ${TZ:-Atlantic/Azores}
   JWT_SECRET: ${JWT_SECRET:-viao-change-me-in-production-2024}
   COOKIE_NAME: viao_session
   REDIS_URL: redis://redis:6379
@@ -40,6 +41,8 @@ services:
     ports:
       - "5434:5432"
     environment:
+      TZ: ${TZ:-Atlantic/Azores}
+      PGTZ: ${TZ:-Atlantic/Azores}
       POSTGRES_DB: viaoceanica_platform
       POSTGRES_USER: viaoceanica
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-viao_db_2024_secure}
@@ -65,6 +68,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Atlantic/Azores}
     volumes:
       - redis-data:/data
     deploy:
@@ -160,9 +165,8 @@ services:
     environment:
       <<: *common-env
       PORT: "4025"
-      LOCAL_AI_BASE_URL: "http://host.docker.internal:11434/v1"
+      LOCAL_AI_BASE_URL: "http://host.docker.internal:11434"
       LOCAL_AI_API_KEY: "ollama"
-      FALLBACK_AI_BASE_URL: ""
       DEFAULT_CHAT_MODEL: "qwen2.5:14b-instruct"
       DEFAULT_EMBEDDING_MODEL: "qwen3-embedding:8b"
     extra_hosts:
@@ -251,6 +255,8 @@ services:
       context: .
       dockerfile: shell/Dockerfile
     restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Atlantic/Azores}
     deploy:
       resources:
         limits:
@@ -269,6 +275,8 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Atlantic/Azores}
     volumes:
       - qdrant-data:/qdrant/storage
     deploy:
@@ -293,6 +301,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
+      TZ: ${TZ:-Atlantic/Azores}
       DATABASE_URL: postgresql+psycopg2://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_contabilidade
       QDRANT_URL: http://qdrant:6333
       OPENAI_API_KEY: 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
@@ -330,6 +339,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
+      TZ: ${TZ:-Atlantic/Azores}
       SERVER_API_BASE_URL: http://mod-contabilidade:4003
     depends_on:
       - mod-contabilidade
@@ -351,6 +361,8 @@ services:
   nginx:
     image: nginx:alpine
     restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Atlantic/Azores}
     ports:
       - "8200:80"
     volumes:

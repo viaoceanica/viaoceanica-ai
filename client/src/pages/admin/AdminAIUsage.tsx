@@ -8,7 +8,7 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
-import { Brain, Zap, DollarSign, Activity, BarChart3, Clock, TrendingUp, Layers, AlertCircle, CheckCircle2 } from "lucide-react";
+import { Brain, Zap, DollarSign, Activity, BarChart3, Clock, TrendingUp, Layers } from "lucide-react";
 import { useMemo, useEffect, useState, useCallback } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -107,6 +107,9 @@ interface RecentEvent {
   user_name: string | null;
   module_key: string;
   model: string;
+  request_text: string | null;
+  response_text: string | null;
+  error_message: string | null;
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
@@ -121,21 +124,21 @@ export default function AdminAIUsage() {
     period: string;
     period_start: string;
     tenants: TenantUsage[];
-  }>("/api/platform/ai/usage/admin");
+  }>("/api/ai/usage/admin");
 
   const { data: dailyData, isLoading: dailyLoading } = useApiQuery<{
     period_start: string;
     days: DailyUsage[];
-  }>("/api/platform/ai/usage/admin/daily");
+  }>("/api/ai/usage/admin/daily");
 
   const { data: modulesData, isLoading: modulesLoading } = useApiQuery<{
     period_start: string;
     modules: ModuleUsage[];
-  }>("/api/platform/ai/usage/admin/modules");
+  }>("/api/ai/usage/admin/modules");
 
   const { data: recentData, isLoading: recentLoading } = useApiQuery<{
     events: RecentEvent[];
-  }>("/api/platform/ai/usage/admin/recent");
+  }>("/api/ai/usage/admin/recent");
 
   // ─── Computed totals ──────────────────────────────────────────────
   const totals = useMemo(() => {
@@ -200,10 +203,10 @@ export default function AdminAIUsage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
           <Brain className="h-6 w-6 text-primary" />
-          Consumo AI
+          Interações AI
         </h1>
         <p className="text-muted-foreground mt-1">
-          Monitorização do consumo de IA por tenant e módulo — {periodLabel}
+          Registo das interações de IA por tenant e módulo — {periodLabel}
         </p>
       </div>
 
@@ -391,11 +394,11 @@ export default function AdminAIUsage() {
         </CardContent>
       </Card>
 
-      {/* Recent Events */}
+      {/* AI Interaction Log */}
       <Card className="border-border/50">
         <CardHeader>
-          <CardTitle className="text-lg flex items-center gap-2"><Clock className="h-5 w-5 text-primary" />Eventos Recentes</CardTitle>
-          <CardDescription>Últimas chamadas ao serviço de IA</CardDescription>
+          <CardTitle className="text-lg flex items-center gap-2"><Activity className="h-5 w-5 text-primary" />Registo de Interações</CardTitle>
+          <CardDescription>Mostra o pedido original do utilizador, a resposta da IA, tokens usados, timestamp e erros exatos</CardDescription>
         </CardHeader>
         <CardContent>
           {recentLoading ? (
@@ -405,13 +408,14 @@ export default function AdminAIUsage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border/50">
-                    <th className="text-left py-2 px-3 text-xs font-medium text-muted-foreground uppercase">Data</th>
+                    <th className="text-left py-2 px-3 text-xs font-medium text-muted-foreground uppercase">Timestamp</th>
                     <th className="text-left py-2 px-3 text-xs font-medium text-muted-foreground uppercase">Empresa</th>
+                    <th className="text-left py-2 px-3 text-xs font-medium text-muted-foreground uppercase">Utilizador</th>
                     <th className="text-left py-2 px-3 text-xs font-medium text-muted-foreground uppercase">Módulo</th>
-                    <th className="text-left py-2 px-3 text-xs font-medium text-muted-foreground uppercase">Modelo</th>
+                    <th className="text-left py-2 px-3 text-xs font-medium text-muted-foreground uppercase">Pedido</th>
+                    <th className="text-left py-2 px-3 text-xs font-medium text-muted-foreground uppercase">Resposta</th>
                     <th className="text-right py-2 px-3 text-xs font-medium text-muted-foreground uppercase">Tokens</th>
-                    <th className="text-right py-2 px-3 text-xs font-medium text-muted-foreground uppercase">Duração</th>
-                    <th className="text-center py-2 px-3 text-xs font-medium text-muted-foreground uppercase">Estado</th>
+                    <th className="text-right py-2 px-3 text-xs font-medium text-muted-foreground uppercase">Estado</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -421,14 +425,41 @@ export default function AdminAIUsage() {
                         {new Date(event.created_at).toLocaleString("pt-PT", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
                       </td>
                       <td className="py-2.5 px-3 font-medium">{event.company_name}</td>
+                      <td className="py-2.5 px-3 text-xs text-muted-foreground">
+                        {event.user_name || "—"}
+                      </td>
                       <td className="py-2.5 px-3">
                         <Badge variant="outline" className="text-xs">{MODULE_LABELS[event.module_key] || event.module_key}</Badge>
                       </td>
-                      <td className="py-2.5 px-3 text-xs text-muted-foreground font-mono">{event.model}</td>
-                      <td className="py-2.5 px-3 text-right font-mono text-xs">{event.total_tokens > 0 ? formatTokens(event.total_tokens) : "—"}</td>
-                      <td className="py-2.5 px-3 text-right text-xs text-muted-foreground">{event.duration_ms > 0 ? `${(event.duration_ms / 1000).toFixed(1)}s` : "—"}</td>
-                      <td className="py-2.5 px-3 text-center">
-                        {event.status === "success" ? <CheckCircle2 className="h-4 w-4 text-green-500 mx-auto" /> : <AlertCircle className="h-4 w-4 text-red-500 mx-auto" />}
+                      <td className="py-2.5 px-3 align-top">
+                        <div className="max-w-[22rem] text-xs leading-5 whitespace-pre-wrap break-words">
+                          {event.request_text || "—"}
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 align-top">
+                        <div className="max-w-[22rem] text-xs leading-5 whitespace-pre-wrap break-words">
+                          {event.status === "error"
+                            ? (event.error_message || "—")
+                            : (event.response_text || "—")}
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 text-right align-top">
+                        <div className="text-xs font-mono">
+                          <div>{event.total_tokens > 0 ? formatTokens(event.total_tokens) : "0"} total</div>
+                          <div className="text-muted-foreground">
+                            {event.prompt_tokens}/{event.completion_tokens}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 text-right align-top">
+                        <div className="flex flex-col items-end gap-1">
+                          <div className="text-xs text-muted-foreground font-mono">
+                            {event.status === "success" ? "success" : "error"}
+                          </div>
+                          <div className="text-xs text-muted-foreground whitespace-nowrap">
+                            {event.duration_ms > 0 ? `${(event.duration_ms / 1000).toFixed(1)}s` : "—"}
+                          </div>
+                        </div>
                       </td>
                     </tr>
                   ))}

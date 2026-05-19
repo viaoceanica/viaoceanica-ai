@@ -104,6 +104,8 @@ const ALL_FOLDERS_KEY = "__all__";
 const SIDEBAR_WIDTH_KEY = "email.module.sidebarWidth";
 const LIST_WIDTH_KEY = "email.module.listWidth";
 const EMAIL_ASSISTANT_CONTEXT_EVENT = "viao-email-assistant-context";
+const SYNC_POLL_INTERVAL_MS = 5000;
+const SYNC_POLL_MAX_ATTEMPTS = 90;
 
 function formatListDate(value?: string | null) {
   if (!value) return "—";
@@ -135,7 +137,7 @@ function parseDateValue(value?: string | null) {
 
 function statusClass(status: string) {
   if (["connected", "active", "sent"].includes(status)) return "tag success";
-  if (["configured", "paused", "scheduled"].includes(status)) return "tag warning";
+  if (["configured", "paused", "scheduled", "syncing"].includes(status)) return "tag warning";
   return "tag";
 }
 
@@ -151,6 +153,8 @@ function mailboxStatusLabel(status?: string | null) {
       return "configurada";
     case "paused":
       return "em pausa";
+    case "syncing":
+      return "a sincronizar";
     case "error":
       return "erro";
     default:
@@ -284,6 +288,7 @@ function truncateAssistantBody(value?: string | null, limit = 2200) {
 export default function EmailPage() {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const mailListRef = useRef<HTMLDivElement | null>(null);
+  const syncPollTimerRef = useRef<number | null>(null);
   const [tenantId, setTenantId] = useState("");
   const [userId, setUserId] = useState("");
   const [companyRole, setCompanyRole] = useState("");
@@ -341,14 +346,6 @@ export default function EmailPage() {
   }, [listWidth]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (window.top === window.self) {
-      const suffix = window.location.search || "";
-      window.location.replace(`/dashboard/module/email${suffix}`);
-    }
-  }, []);
-
-  useEffect(() => {
     const query = new URLSearchParams(window.location.search);
     const queryTenantId = query.get("tenantId");
     const queryUserId = query.get("userId");
@@ -400,7 +397,7 @@ export default function EmailPage() {
     return headers;
   }
 
-  async function loadDashboard(activeTenantId: string) {
+  async function loadDashboard(activeTenantId: string): Promise<Mailbox[]> {
     const headers = buildHeaders(activeTenantId);
     const [statusRes, dashboardRes] = await Promise.all([
       fetch(`${API_BASE}/api/status`, { headers }),
@@ -427,13 +424,15 @@ export default function EmailPage() {
       setSelectedEmailId("");
       setSelectedEmailIds([]);
       setEmails([]);
-      return;
+      return [];
     }
 
     setSelectedMailboxId((current) => {
       if (current && nextMailboxes.some((item) => item.id === current)) return current;
       return nextMailboxes[0]?.id || "";
     });
+
+    return nextMailboxes;
   }
 
   async function loadEmails(activeTenantId: string, mailboxId?: string, folder?: string) {
@@ -533,6 +532,7 @@ export default function EmailPage() {
   const summary = dashboard?.data?.summary || {};
   const mailboxes = dashboard?.data?.mailboxes || [];
   const selectedMailbox = mailboxes.find((item) => item.id === selectedMailboxId) || null;
+  const selectedMailboxIsSyncing = !!selectedMailbox && (syncingMailboxId === selectedMailbox.id || selectedMailbox.status === "syncing");
   const folderStats = selectedMailboxId ? folderStatsByMailbox[selectedMailboxId] || [] : [];
   const folderOptions = selectedMailboxId ? folderOptionsByMailbox[selectedMailboxId] || [] : [];
 
@@ -815,14 +815,23 @@ export default function EmailPage() {
     window.addEventListener("mouseup", onUp);
   }
 
-  async function refreshAll(preferredMailboxId?: string) {
-    if (!tenantId) return;
+  function clearSyncPollTimer() {
+    if (typeof window === "undefined") return;
+    if (syncPollTimerRef.current !== null) {
+      window.clearTimeout(syncPollTimerRef.current);
+      syncPollTimerRef.current = null;
+    }
+  }
+
+  async function refreshAll(preferredMailboxId?: string): Promise<Mailbox[]> {
+    if (!tenantId) return [];
     const mailboxIdToLoad = preferredMailboxId || selectedMailboxId || undefined;
     const folderToLoad = selectedFolder || ALL_FOLDERS_KEY;
-    await loadDashboard(tenantId);
+    const nextMailboxes = await loadDashboard(tenantId);
     if (mailboxIdToLoad) {
       await Promise.all([loadEmails(tenantId, mailboxIdToLoad, folderToLoad), loadFolders(tenantId, mailboxIdToLoad)]);
     }
+    return nextMailboxes;
   }
 
   async function parseApiPayload(response: Response) {
@@ -832,6 +841,36 @@ export default function EmailPage() {
       return JSON.parse(raw);
     } catch {
       return { detail: raw };
+    }
+  }
+
+  useEffect(() => () => {
+    clearSyncPollTimer();
+  }, []);
+
+  async function trackQueuedSync(mailboxId: string, attempt = 0) {
+    try {
+      const nextMailboxes = await refreshAll(mailboxId);
+      const mailbox = nextMailboxes.find((item) => item.id === mailboxId);
+      if (!mailbox || mailbox.status !== "syncing") {
+        clearSyncPollTimer();
+        setSyncingMailboxId(null);
+        return;
+      }
+      if (attempt >= SYNC_POLL_MAX_ATTEMPTS) {
+        clearSyncPollTimer();
+        setSyncingMailboxId(null);
+        setSuccess("A sincronização continua em segundo plano. Atualize a mailbox dentro de alguns instantes.");
+        return;
+      }
+      clearSyncPollTimer();
+      syncPollTimerRef.current = window.setTimeout(() => {
+        void trackQueuedSync(mailboxId, attempt + 1);
+      }, SYNC_POLL_INTERVAL_MS);
+    } catch (err) {
+      clearSyncPollTimer();
+      setSyncingMailboxId(null);
+      setError(err instanceof Error ? err.message : "Erro ao acompanhar a sincronização da mailbox");
     }
   }
 
@@ -853,6 +892,8 @@ export default function EmailPage() {
 
   async function syncMailbox(mailboxId: string) {
     if (!tenantId) return;
+    let keepTracking = false;
+    clearSyncPollTimer();
     setSyncingMailboxId(mailboxId);
     setError("");
     setSuccess("");
@@ -879,16 +920,19 @@ export default function EmailPage() {
           ? `Sincronizada ${syncResult.mailbox_name}: ${syncResult.fetched} emails lidos em ${syncResult.folders_synced || 1} pasta(s), ${syncResult.created} novos, ${syncResult.updated} atualizados.`
           : payloadData?.message || "Sincronização concluída."
       );
-      await refreshAll(mailboxId);
-      if (payloadData?.queued) {
-        window.setTimeout(() => {
-          void refreshAll(mailboxId);
-        }, 4000);
+      const nextMailboxes = await refreshAll(mailboxId);
+      const mailbox = nextMailboxes.find((item) => item.id === mailboxId);
+      if (payloadData?.queued || mailbox?.status === "syncing") {
+        keepTracking = true;
+        void trackQueuedSync(mailboxId);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao sincronizar a mailbox");
     } finally {
-      setSyncingMailboxId(null);
+      if (!keepTracking) {
+        clearSyncPollTimer();
+        setSyncingMailboxId(null);
+      }
     }
   }
 
@@ -1112,10 +1156,10 @@ export default function EmailPage() {
                     <button
                       className="admin-button secondary"
                       onClick={() => void syncMailbox(selectedMailbox.id)}
-                      disabled={syncingMailboxId === selectedMailbox.id || !selectedMailbox.sync_enabled}
+                      disabled={selectedMailboxIsSyncing || !selectedMailbox.sync_enabled}
                       type="button"
                     >
-                      {syncingMailboxId === selectedMailbox.id ? "A sincronizar..." : "Sincronizar tudo"}
+                      {selectedMailboxIsSyncing ? "A sincronizar..." : "Sincronizar tudo"}
                     </button>
                   </div>
                 ) : null}
