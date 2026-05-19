@@ -1998,6 +1998,95 @@ def list_mailbox_folders(mailbox: Mailbox) -> list[str]:
             pass
 
 
+def collect_mailbox_import_audit(session: Session, mailbox: Mailbox) -> dict:
+    if not mailbox.imap_password_encrypted:
+        raise HTTPException(status_code=422, detail="A palavra-passe da mailbox não está guardada")
+    if not mailbox.imap_host or not mailbox.imap_port or not mailbox.imap_username:
+        raise HTTPException(status_code=422, detail="É necessário configurar primeiro o host, a porta e o utilizador IMAP da mailbox")
+
+    password = decrypt_secret(mailbox.imap_password_encrypted)
+    client, _ = open_imap_connection(
+        host=mailbox.imap_host,
+        port=int(mailbox.imap_port),
+        username=mailbox.imap_username,
+        password=password,
+        security_mode=mailbox.security_mode or "ssl_tls",
+        validate_certificates=bool(mailbox.validate_certificates),
+        folder=mailbox.folder or "INBOX",
+        readonly=True,
+    )
+    try:
+        remote_folders = list_client_folders(client, mailbox.folder or "INBOX")
+        folder_reports: list[dict] = []
+
+        for folder in remote_folders:
+            select_status, select_data = client.select(folder, readonly=True)
+            if select_status != "OK":
+                raise RuntimeError(f"Falha ao abrir a pasta '{folder}': {select_data}")
+
+            remote_total = 0
+            if select_data and select_data[0]:
+                try:
+                    remote_total = int(select_data[0])
+                except (TypeError, ValueError):
+                    remote_total = 0
+
+            stored_count = int(
+                session.scalar(
+                    select(func.count()).select_from(EmailMessage).where(
+                        EmailMessage.tenant_id == mailbox.tenant_id,
+                        EmailMessage.mailbox_id == mailbox.id,
+                        EmailMessage.folder == folder,
+                        EmailMessage.remote_deleted.is_(False),
+                    )
+                )
+                or 0
+            )
+            indexed_count = int(
+                session.scalar(
+                    select(func.count()).select_from(EmailMessageEmbedding).where(
+                        EmailMessageEmbedding.tenant_id == mailbox.tenant_id,
+                        EmailMessageEmbedding.mailbox_id == mailbox.id,
+                        EmailMessageEmbedding.folder == folder,
+                    )
+                )
+                or 0
+            )
+
+            folder_reports.append(
+                {
+                    "folder": folder,
+                    "remote_total": remote_total,
+                    "stored_count": stored_count,
+                    "indexed_count": indexed_count,
+                    "missing_messages": max(remote_total - stored_count, 0),
+                    "missing_embeddings": max(stored_count - indexed_count, 0),
+                }
+            )
+
+        remote_total = sum(item["remote_total"] for item in folder_reports)
+        stored_total = sum(item["stored_count"] for item in folder_reports)
+        indexed_total = sum(item["indexed_count"] for item in folder_reports)
+
+        return {
+            "mailbox": serialize_mailbox(mailbox),
+            "remote_folders": remote_folders,
+            "folders": folder_reports,
+            "remote_total": remote_total,
+            "stored_total": stored_total,
+            "indexed_total": indexed_total,
+            "missing_messages": max(remote_total - stored_total, 0),
+            "missing_embeddings": max(stored_total - indexed_total, 0),
+            "import_complete": remote_total == stored_total,
+            "search_ready": stored_total == indexed_total,
+        }
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
+
+
 def get_mailbox_folder_stats(session: Session, mailbox: Mailbox, folders: list[str]) -> list[dict]:
     rows = session.execute(
         select(EmailMessage.folder, EmailMessage.is_seen).where(
@@ -3028,6 +3117,61 @@ async def delete_admin_mailbox(mailbox_id: str, request: Request):
         session.delete(item)
         session.commit()
         return {"success": True, "data": {"id": mailbox_id}}
+
+
+@app.get("/api/v1/admin/import-audit")
+async def admin_import_audit(request: Request):
+    require_admin_access(request)
+
+    with get_db_session() as session:
+        mailboxes = session.scalars(
+            select(Mailbox).where(Mailbox.tenant_id == request.state.tenant_id).order_by(Mailbox.updated_at.desc())
+        ).all()
+        reports: list[dict] = []
+        for mailbox in mailboxes:
+            if not mailbox.sync_enabled and not mailbox.imap_password_encrypted:
+                continue
+            try:
+                reports.append(collect_mailbox_import_audit(session, mailbox))
+            except Exception as exc:
+                reports.append(
+                    {
+                        "mailbox": serialize_mailbox(mailbox),
+                        "error": str(exc),
+                        "remote_total": 0,
+                        "stored_total": int(
+                            session.scalar(
+                                select(func.count()).select_from(EmailMessage).where(
+                                    EmailMessage.tenant_id == mailbox.tenant_id,
+                                    EmailMessage.mailbox_id == mailbox.id,
+                                    EmailMessage.remote_deleted.is_(False),
+                                )
+                            )
+                            or 0
+                        ),
+                        "indexed_total": int(
+                            session.scalar(
+                                select(func.count()).select_from(EmailMessageEmbedding).where(
+                                    EmailMessageEmbedding.tenant_id == mailbox.tenant_id,
+                                    EmailMessageEmbedding.mailbox_id == mailbox.id,
+                                )
+                            )
+                            or 0
+                        ),
+                    }
+                )
+
+        return {
+            "success": True,
+            "data": {
+                "tenant_id": request.state.tenant_id,
+                "mailboxes_total": len(mailboxes),
+                "report_count": len(reports),
+                "reports": reports,
+                "import_complete": all(report.get("import_complete") for report in reports if "error" not in report),
+                "search_ready": all(report.get("search_ready") for report in reports if "error" not in report),
+            },
+        }
 
 
 @app.post("/api/v1/admin/mailboxes/{mailbox_id}/test-connection")
