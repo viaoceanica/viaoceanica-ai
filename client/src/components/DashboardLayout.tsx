@@ -79,7 +79,7 @@ const adminMenuItems = [
   { icon: Coins, label: "Tokens", path: "/admin/tokens" },
   { icon: Puzzle, label: "Módulos", path: "/admin/modules" },
   { icon: Settings, label: "Planos", path: "/admin/plans" },
-  { icon: Brain, label: "Consumo AI", path: "/admin/ai-usage" },
+  { icon: Brain, label: "Interações AI", path: "/admin/ai-usage" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
@@ -168,7 +168,7 @@ function DashboardLayoutContent({
 
   // Fetch active modules for the current user (entitlements)
   const { data: activeModules, refetch: refetchActiveModules } = useQuery<any[]>(
-    variant === "company" ? "/api/platform/entitlements/modules" : null,
+    variant === "company" ? "/api/platform/entitlements/active" : null,
     { enabled: variant === "company" }
   );
 
@@ -206,6 +206,11 @@ function DashboardLayoutContent({
 
   // Detect current module for AI assistant
   const currentModuleKey = (() => {
+    const modulePathMatch = location.match(/^\/dashboard\/module\/([^/]+)/);
+    if (modulePathMatch?.[1]) {
+      return modulePathMatch[1];
+    }
+
     const modMatch = activeModules?.find((m: any) => location.startsWith(`/dashboard/module/${m.moduleKey}`));
     return modMatch?.moduleKey || "platform";
   })();
@@ -297,7 +302,7 @@ function DashboardLayoutContent({
                 </SidebarMenuItem>
 
                 {/* Active modules — dynamic items */}
-                {activeModules && activeModules.length > 0 && activeModules.filter((m: any) => m.enabled).map((mod: any) => {
+                {activeModules && activeModules.length > 0 && activeModules.map((mod: any) => {
                   const ModIcon = moduleIconMap[mod.icon || ""] || Puzzle;
                   const modPath = `/dashboard/module/${mod.moduleKey}`;
                   const isModActive = location.startsWith(modPath);

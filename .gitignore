@@ -1,0 +1,25 @@
+# Build output
+/dist/
+
+# Dependency directories
+/node_modules/
+/modules/helpdesk/frontend/node_modules/
+
+# Next.js
+/modules/helpdesk/frontend/.next/
+/modules/helpdesk/frontend/next-env.d.ts
+/modules/helpdesk/frontend/tsconfig.json
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Native/build cache
+/node_modules/.package-lock.json
+/node_modules/typescript/tsbuildinfo
+/node_modules/@rollup/rollup-linux-x64-gnu/
+/node_modules/@tailwindcss/oxide-linux-x64-gnu/
+/node_modules/lightningcss-linux-x64-gnu/
+
+# Local knowledge/cache
+/.brv/

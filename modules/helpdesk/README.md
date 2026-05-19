@@ -93,7 +93,7 @@ curl -X POST http://localhost:4001/api/v1/ai/chat \
 |----------|-----------|---------|
 | `MOD_HELPDESK_PORT` | Porta do backend | 4001 |
 | `DATABASE_URL` | Connection string PostgreSQL | — |
-| `AI_SERVICE_URL` | URL do OpenClaw gateway | http://host.docker.internal:18789/v1 |
+| `AI_SERVICE_URL` | URL do AI service local-first | http://ai-service:4010 |
 | `AI_AGENT_ID` | ID do agente OpenClaw | helpdesk |
 | `REDIS_URL` | URL do Redis | redis://localhost:6379 |
 | `POSTGRES_PASSWORD` | Password do PostgreSQL | viao_db_2024_secure |

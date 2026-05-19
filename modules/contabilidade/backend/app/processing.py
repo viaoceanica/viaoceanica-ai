@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
 import re
 import os
 import io
@@ -9,7 +10,6 @@ import time
 import logging
 from collections import OrderedDict
 from decimal import Decimal, InvalidOperation
-from functools import lru_cache
 
 import requests
 from pathlib import Path
@@ -20,6 +20,10 @@ import fitz
 from PIL import Image, ImageOps
 import cv2
 import numpy as np
+try:
+    import pytesseract
+except ImportError:  # pragma: no cover - optional local OCR engine
+    pytesseract = None
 try:
     import zxingcpp
 except ImportError:  # pragma: no cover - optional QR engine
@@ -39,11 +43,15 @@ except ImportError:  # pragma: no cover - depends on host shared library availab
         return []
 
 from .config import get_settings
-from .llm_client import complete_prompt, vision_text
+from .ai_client import chat_completion as ai_chat_completion
+from .middleware import get_module_context
+from .database import SessionLocal
+from .models import VendorProfile
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
 _qr_detector = cv2.QRCodeDetector()
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
 EXTRACTION_PROMPT_BASE = (
     "Extract invoice data and return strict JSON only. "
@@ -70,6 +78,19 @@ def _usage_dict() -> dict[str, int]:
     return {"input": 0, "output": 0, "total": 0}
 
 
+def _request_ai_headers() -> dict[str, str] | None:
+    try:
+        ctx = get_module_context()
+    except Exception:
+        return None
+    return {
+        "X-Viao-User-Id": ctx.user_id,
+        "X-Viao-Tenant-Id": ctx.tenant_id,
+        "X-Viao-Module-Key": "contabilidade",
+        "X-Viao-Request-Id": ctx.request_id,
+    }
+
+
 def _accumulate_usage(target: dict[str, int], delta: dict[str, int] | None) -> dict[str, int]:
     if not delta:
         return target
@@ -84,24 +105,20 @@ def _usage_from_response(response: Any) -> dict[str, int]:
     input_tokens = getattr(usage, "input_tokens", None)
     output_tokens = getattr(usage, "output_tokens", None)
     total_tokens = getattr(usage, "total_tokens", None)
-    prompt_tokens = getattr(usage, "prompt_tokens", None)
-    completion_tokens = getattr(usage, "completion_tokens", None)
     if isinstance(usage, dict):
         input_tokens = usage.get("input_tokens", input_tokens)
         output_tokens = usage.get("output_tokens", output_tokens)
         total_tokens = usage.get("total_tokens", total_tokens)
-        prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
-        completion_tokens = usage.get("completion_tokens", completion_tokens)
-    input_tokens = int(input_tokens or prompt_tokens or 0)
-    output_tokens = int(output_tokens or completion_tokens or 0)
+    input_tokens = int(input_tokens or 0)
+    output_tokens = int(output_tokens or 0)
     total_tokens = int(total_tokens or (input_tokens + output_tokens))
     return {"input": input_tokens, "output": output_tokens, "total": total_tokens}
 
-OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "120"))
+AI_SERVICE_TIMEOUT_SECONDS = float(os.getenv("AI_SERVICE_TIMEOUT_SECONDS", "120"))
 MAX_QR_SCAN_SECONDS = float(os.getenv("MAX_QR_SCAN_SECONDS", "8"))
 MAX_QR_SCAN_PAGES = int(os.getenv("MAX_QR_SCAN_PAGES", "2"))
-MAX_VISION_SCAN_PAGES = int(os.getenv("MAX_VISION_SCAN_PAGES", "3"))
-IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
+MAX_OCR_PAGES = int(os.getenv("MAX_OCR_PAGES", "2"))
+
 
 def _extract_vendor_nif_from_text(text: str) -> str | None:
     compact = re.sub(r"(?<=\w)\s+(?=\w)", "", text or "")
@@ -122,7 +139,17 @@ class InvalidDocumentError(Exception):
     """Raised when an uploaded document cannot be read or parsed safely."""
 
 
-def _collapse_broken_words(value: str | None) -> str | None:
+def _collapse_broken_words(value: Any) -> str | None:
+    if value in (None, ""):
+        return value
+    if isinstance(value, dict):
+        parts = [f"{key}: {item}" for key, item in value.items() if item not in (None, "")]
+        value = ", ".join(parts) if parts else None
+    elif isinstance(value, list):
+        parts = [str(item) for item in value if item not in (None, "")]
+        value = ", ".join(parts) if parts else None
+    elif not isinstance(value, str):
+        value = str(value)
     if not value:
         return value
     tokens = value.split()
@@ -246,8 +273,130 @@ def _normalize_tax_id(value: str | None) -> str | None:
     return None
 
 
+def _looks_like_placeholder_vendor_name(value: str | None) -> bool:
+    if not value:
+        return False
+    cleaned = re.sub(r"\s+", " ", str(value)).strip().lower()
+    if not cleaned:
+        return False
+    filename_markers = {
+        "whatsapp image",
+        "image",
+        "img",
+        "scan",
+        "scanned",
+        "screenshot",
+        "document",
+        "documento",
+        "invoice",
+        "fatura",
+        "factura",
+    }
+    if any(marker in cleaned for marker in filename_markers):
+        return True
+    if re.search(r"\d{4}[-_/]\d{2}[-_/]\d{2}", cleaned):
+        return True
+    if re.search(r"\d{2}[.:]\d{2}(?:[.:]\d{2})?", cleaned):
+        return True
+    if sum(ch.isdigit() for ch in cleaned) >= 4 and sum(ch.isalpha() for ch in cleaned) <= 3:
+        return True
+    return False
 
-@lru_cache(maxsize=4096)
+
+def _tenant_id_from_context_headers(context_headers: dict[str, str] | None) -> str | None:
+    if not context_headers:
+        return None
+    for key in ("x-viao-tenant-id", "X-Viao-Tenant-Id", "x-tenant-id", "X-Tenant-Id"):
+        value = context_headers.get(key)
+        if value:
+            return str(value).strip() or None
+    lowered = {str(key).lower(): value for key, value in context_headers.items()}
+    for key in ("x-viao-tenant-id", "x-tenant-id"):
+        value = lowered.get(key)
+        if value:
+            return str(value).strip() or None
+    return None
+
+
+def _lookup_learned_vendor_profile_from_nif(nif: str | None, tenant_id: str | None) -> dict[str, Any]:
+    nif = _normalize_tax_id(nif)
+    tenant_id = str(tenant_id or "").strip() or None
+    if not nif or not tenant_id:
+        return {}
+
+    session = SessionLocal()
+    try:
+        profile = (
+            session.query(VendorProfile)
+            .filter(
+                VendorProfile.tenant_id == tenant_id,
+                VendorProfile.supplier_nif == nif,
+            )
+            .one_or_none()
+        )
+        if not profile:
+            return {}
+        try:
+            payload = json.loads(profile.payload) if profile.payload else {}
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        vendor_name = profile.vendor_name or payload.get("vendor") or payload.get("name") or None
+        if _looks_like_placeholder_vendor_name(vendor_name):
+            return {}
+        contact = payload.get("vendor_contact") or payload.get("contact")
+        if not contact and isinstance(payload.get("contacts"), dict):
+            contacts = payload.get("contacts") or {}
+            parts = []
+            for label, key in (("email", "email"), ("phone", "phone"), ("website", "website"), ("fax", "fax")):
+                value = contacts.get(key)
+                if value not in (None, ""):
+                    parts.append(f"{label}: {value}")
+            contact = ", ".join(parts) if parts else None
+        return {
+            "name": vendor_name,
+            "address": payload.get("vendor_address") or payload.get("address") or None,
+            "contact": contact,
+            "raw": payload,
+            "source": "learned",
+        }
+    finally:
+        session.close()
+
+
+def _resolve_vendor_profile_from_nif(
+    nif: str | None,
+    tenant_id: str | None = None,
+    *,
+    allow_external: bool = False,
+) -> dict[str, Any]:
+    learned = _lookup_learned_vendor_profile_from_nif(nif, tenant_id)
+    if learned and any(learned.get(field) for field in ("name", "address", "contact")):
+        return learned
+    if allow_external:
+        return _lookup_vendor_profile_from_nif(nif or "")
+    return {}
+
+
+def _format_vendor_contact_info(record: dict[str, Any]) -> str | None:
+    contacts = record.get("contacts") if isinstance(record.get("contacts"), dict) else {}
+    parts: list[str] = []
+    for label, key in (("email", "email"), ("phone", "phone"), ("website", "website"), ("fax", "fax")):
+        value = contacts.get(key) or record.get(key)
+        if value not in (None, ""):
+            parts.append(f"{label}: {value}")
+    return ", ".join(parts) if parts else None
+
+
+def _looks_like_placeholder_vendor_profile(record: dict[str, Any]) -> bool:
+    name_blob = " ".join(str(record.get(key) or "") for key in ("title", "alias", "seo_url"))
+    message_blob = " ".join(str(record.get(key) or "") for key in ("title", "alias", "message"))
+    lowered = f"{name_blob} {message_blob}".lower()
+    return "key necessary" in lowered or "contact www.nif.pt/contactos/api" in lowered or "contactos/api" in lowered
+
+
+
 def _lookup_vendor_profile_from_nif(nif: str) -> dict[str, Any]:
     key = settings.nif_lookup_key or os.getenv("NIF_PT_API_KEY", "")
     if not nif or not key:
@@ -261,23 +410,32 @@ def _lookup_vendor_profile_from_nif(nif: str) -> dict[str, Any]:
         return {}
     records = data.get("records") or {}
     for record in records.values():
-        title = (record.get("title") or "").strip() or None
+        if _looks_like_placeholder_vendor_profile(record):
+            continue
+        title = (record.get("title") or record.get("alias") or "").strip() or None
         address = (
             record.get("address")
             or record.get("morada")
             or record.get("address_complete")
+            or (record.get("place") or {}).get("address")
             or None
         )
+        place = record.get("place") if isinstance(record.get("place"), dict) else {}
         zip_code = record.get("zip") or record.get("cod_postal") or None
-        city = record.get("city") or record.get("localidade") or None
+        city = record.get("city") or record.get("localidade") or place.get("city") or None
         if zip_code and city and not address:
             address = f"{zip_code} {city}"
         elif zip_code and city and address and city not in str(address):
             address = f"{address}, {zip_code} {city}"
-        if title or address:
+        elif city and address and city not in str(address):
+            address = f"{address}, {city}"
+        contact = _format_vendor_contact_info(record)
+        if title or address or contact:
             return {
                 "name": title,
                 "address": str(address).strip() if address else None,
+                "contact": contact,
+                "contacts": record.get("contacts") if isinstance(record.get("contacts"), dict) else None,
                 "raw": record,
             }
     return {}
@@ -290,11 +448,54 @@ def _lookup_vendor_name_from_nif(nif: str | None) -> str | None:
     return profile.get("name")
 
 
-def _build_qr_first_extraction(qr_data: dict[str, Any], text: str, file_name: str) -> dict[str, Any]:
+def _guess_vendor_name_from_text(text: str | None) -> str | None:
+    if not text:
+        return None
+    noise = {
+        "invoice",
+        "fatura",
+        "factura",
+        "total",
+        "nif",
+        "atcud",
+        "data",
+        "date",
+        "customer",
+        "cliente",
+        "fornecedor",
+        "line",
+        "item",
+        "items",
+    }
+    candidates = [line.strip() for line in re.split(r"[\r\n]+", text) if line.strip()]
+    for line in candidates[:12]:
+        normalized = re.sub(r"\s+", " ", line).strip()
+        lowered = normalized.lower()
+        if len(normalized) < 3 or len(normalized) > 80:
+            continue
+        if any(token in lowered for token in noise):
+            continue
+        letters = sum(ch.isalpha() for ch in normalized)
+        if letters < 3:
+            continue
+        digits = sum(ch.isdigit() for ch in normalized)
+        if digits > letters:
+            continue
+        return normalized
+    return None
+
+
+def _build_qr_first_extraction(
+    qr_data: dict[str, Any],
+    text: str,
+    file_name: str,
+    vendor_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     supplier_nif = _normalize_tax_id(qr_data.get("supplier_nif"))
-    vendor_profile = _lookup_vendor_profile_from_nif(supplier_nif) if supplier_nif else {}
-    vendor_name = vendor_profile.get("name") or Path(file_name).stem
+    vendor_profile = vendor_profile or {}
+    vendor_name = vendor_profile.get("name") or _guess_vendor_name_from_text(text)
     vendor_address = vendor_profile.get("address")
+    vendor_contact = vendor_profile.get("contact")
 
     total = _to_decimal(qr_data.get("total"))
     tax = _to_decimal(qr_data.get("tax"))
@@ -312,7 +513,7 @@ def _build_qr_first_extraction(qr_data: dict[str, Any], text: str, file_name: st
     return {
         "vendor": vendor_name,
         "vendor_address": vendor_address,
-        "vendor_contact": None,
+        "vendor_contact": vendor_contact,
         "category": guess_category(f"{vendor_name} {text}"),
         "subtotal": subtotal,
         "tax": tax,
@@ -325,11 +526,145 @@ def _build_qr_first_extraction(qr_data: dict[str, Any], text: str, file_name: st
         "due_date": None,
         "currency": "EUR",
         "raw_text": text,
-        "ai_payload": json.dumps({"source": "qr_fallback", "qr_data": qr_data}, ensure_ascii=False),
-        "extraction_model": extraction_model,
+        "ai_payload": json.dumps({"source": "qr_fallback", "qr_data": qr_data}, ensure_ascii=False, default=str),
+        "extraction_model": settings.extraction_model,
         "notes": notes,
-        "line_items": [],
+        "line_items": _extract_qr_line_items(qr_data),
     }
+
+
+def _looks_like_qr_line_item_text(value: str) -> bool:
+    text = re.sub(r"\s+", " ", re.sub(r"[^\wÀ-ÿ0-9]+", " ", value, flags=re.UNICODE)).strip().lower()
+    if not text:
+        return False
+    if len(text) < 3:
+        return False
+    digits_only = re.sub(r"\D+", "", text)
+    letters = sum(ch.isalpha() for ch in text)
+    if not letters:
+        return False
+    if digits_only and len(digits_only) == len(text):
+        return False
+    metadata_tokens = {
+        "invoice",
+        "fatura",
+        "factura",
+        "nif",
+        "atcud",
+        "hash",
+        "total",
+        "tax",
+        "iva",
+        "customer",
+        "cliente",
+        "supplier",
+        "fornecedor",
+        "document",
+        "documento",
+        "total",
+        "subtotal",
+        "amount",
+        "valor",
+        "price",
+        "preco",
+        "preço",
+        "qty",
+        "qtd",
+        "quantity",
+        "tax",
+        "iva",
+        "date",
+        "data",
+    }
+    return not any(token in text for token in metadata_tokens)
+
+
+def _sanitize_qr_line_item_description(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    if not cleaned:
+        return None
+    if re.fullmatch(r"[\d\s.,€/-]+", cleaned):
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", cleaned):
+        return None
+    if re.fullmatch(r"\d{9}", cleaned):
+        return None
+    lowered = cleaned.lower()
+    if any(token in lowered for token in {"fatura", "factura", "invoice", "nif", "atcud", "hash", "total", "subtotal", "tax", "iva", "customer", "cliente", "supplier", "fornecedor", "document", "documento"}):
+        return None
+    if sum(ch.isalpha() for ch in cleaned) < 3:
+        return None
+    return cleaned
+
+
+def _extract_qr_line_items(qr_data: dict[str, Any]) -> list[dict[str, Any]]:
+    explicit = qr_data.get("line_items")
+    if isinstance(explicit, list):
+        normalized: list[dict[str, Any]] = []
+        for idx, item in enumerate(explicit):
+            if isinstance(item, dict):
+                description = _sanitize_qr_line_item_description(
+                    item.get("description") or item.get("name") or item.get("text") or item.get("label")
+                )
+                code = item.get("code") if isinstance(item.get("code"), str) else None
+                if not description and not code and not any(item.get(key) is not None for key in ("quantity", "unit_price", "subtotal", "line_subtotal", "tax_amount", "line_tax_amount", "total", "line_total", "tax_rate")):
+                    continue
+                normalized.append(
+                    {
+                        "position": idx + 1,
+                        "code": code,
+                        "description": description,
+                        "quantity": item.get("quantity"),
+                        "unit_price": item.get("unit_price"),
+                        "line_subtotal": item.get("subtotal") or item.get("line_subtotal"),
+                        "line_tax_amount": item.get("tax_amount") or item.get("line_tax_amount"),
+                        "line_total": item.get("total") or item.get("line_total"),
+                        "tax_rate": item.get("tax_rate"),
+                    }
+                )
+        if normalized:
+            return normalized
+
+    candidates: list[str] = []
+    qr_notes = qr_data.get("qr_notes")
+    if isinstance(qr_notes, str):
+        candidates.append(qr_notes)
+    elif isinstance(qr_notes, list):
+        candidates.extend(str(item) for item in qr_notes if item)
+
+    extra_fields = qr_data.get("extra_fields")
+    if isinstance(extra_fields, dict):
+        for key, value in extra_fields.items():
+            if key in {"A", "B", "C", "D", "E", "F", "G", "H", "L", "M", "N", "O", "P", "Q", "R", "S"}:
+                continue
+            if isinstance(value, str) and _looks_like_qr_line_item_text(value):
+                candidates.append(value)
+
+    line_items: list[dict[str, Any]] = []
+    for raw_candidate in candidates:
+        parts = [part.strip() for part in re.split(r"[\n|;]+", raw_candidate) if part.strip()]
+        for part in parts:
+            if not _looks_like_qr_line_item_text(part):
+                continue
+            description = _sanitize_qr_line_item_description(part)
+            if not description:
+                continue
+            line_items.append(
+                {
+                    "position": len(line_items) + 1,
+                    "code": None,
+                    "description": description,
+                    "quantity": None,
+                    "unit_price": None,
+                    "subtotal": None,
+                    "tax_amount": None,
+                    "total": None,
+                    "tax_rate": None,
+                }
+            )
+    return line_items
 
 
 def _decode_qr_from_pil(image: Image.Image) -> str | None:
@@ -354,7 +689,24 @@ def _decode_qr_from_pil(image: Image.Image) -> str | None:
         except Exception:
             pass
     for variant in augmented:
-        if zxingcpp is not None:
+        decoded = zbar_decode(variant)
+        for symbol in decoded:
+            data = symbol.data.decode("utf-8", "ignore")
+            if data:
+                return data
+        try:
+            dm_decoded = dmtx_decode(variant)
+        except Exception:
+            dm_decoded = []
+        for symbol in dm_decoded:
+            data = symbol.data.decode("utf-8", "ignore")
+            if data:
+                return data
+
+        if os.getenv("ENABLE_OPENCV_QR", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+            continue
+
+        if zxingcpp is not None and os.getenv("ENABLE_ZXINGCPP_IMAGE", "0").strip().lower() in {"1", "true", "yes", "on"}:
             try:
                 zx_results = zxingcpp.read_barcodes(variant, try_rotate=True, try_downscale=True, try_invert=True)
                 for barcode in zx_results or []:
@@ -398,19 +750,6 @@ def _decode_qr_from_pil(image: Image.Image) -> str | None:
                     return value
             except Exception:
                 pass
-        decoded = zbar_decode(variant)
-        for symbol in decoded:
-            data = symbol.data.decode("utf-8", "ignore")
-            if data:
-                return data
-        try:
-            dm_decoded = dmtx_decode(variant)
-        except Exception:
-            dm_decoded = []
-        for symbol in dm_decoded:
-            data = symbol.data.decode("utf-8", "ignore")
-            if data:
-                return data
     return None
 
 
@@ -556,73 +895,172 @@ def parse_portuguese_qr_payload(payload: str | None) -> dict[str, Any]:
     if regions:
         result["tax_regions"] = regions
 
+    core_fields = {"A", "B", "C", "D", "E", "F", "G", "H", "L", "M", "N", "O", "P", "Q", "R", "S"}
+    extra_fields = {code: value for code, value in fields.items() if code not in core_fields and value}
+    if extra_fields:
+        result["extra_fields"] = extra_fields
+
     return result
 
-def _is_image_upload(filename: str, content_type: str | None = None) -> bool:
-    lowered = (filename or "").lower()
-    if lowered.endswith(IMAGE_SUFFIXES):
-        return True
-    return bool(content_type and content_type.lower().startswith("image/"))
+def _ocr_text_from_image(image: Image.Image) -> str:
+    if pytesseract is None:
+        return ""
+
+    try:
+        normalized = ImageOps.exif_transpose(image).convert("L")
+    except Exception:
+        try:
+            normalized = image.convert("L")
+        except Exception:
+            return ""
+
+    try:
+        return (pytesseract.image_to_string(normalized, lang=settings.ocr_languages) or "").strip()
+    except Exception:
+        try:
+            return (pytesseract.image_to_string(normalized) or "").strip()
+        except Exception:
+            return ""
 
 
-def _pil_to_data_url(image: Image.Image) -> str:
-    buffer = io.BytesIO()
-    image = ImageOps.exif_transpose(image).convert("RGB")
-    image.save(buffer, format="PNG")
-    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
-
-
-def _render_pdf_pages_for_vision(raw: bytes, max_pages: int = MAX_VISION_SCAN_PAGES) -> list[str]:
-    data_urls: list[str] = []
-    with fitz.open(stream=raw, filetype="pdf") as document:
-        for page_index in range(min(max_pages, len(document))):
-            page = document.load_page(page_index)
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-            image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            data_urls.append(_pil_to_data_url(image))
-    return data_urls
-
-
-def _extract_text_from_pdf_with_vision(raw: bytes, file_name: str) -> tuple[str, dict[str, int]]:
-    if not settings.openai_api_key:
-        return "", _usage_dict()
-    image_data_urls = _render_pdf_pages_for_vision(raw)
-    if not image_data_urls:
-        return "", _usage_dict()
-    prompt = (
-        "Extract all readable text from these invoice pages. "
-        "Return plain text only, preserving key invoice identifiers, vendor/customer names, dates, totals, tax amounts, NIFs, "
-        "and line items when visible. Do not summarize."
-    )
-    response = vision_text(
-        model=settings.vision_model,
-        prompt=prompt,
-        image_data_urls=image_data_urls,
-        max_output_tokens=4000,
-    )
-    return response.text, response.usage
-
-
-def _extract_text_from_image_with_vision(raw: bytes, file_name: str) -> tuple[str, dict[str, int]]:
-    if not settings.openai_api_key:
-        return "", _usage_dict()
+def _extract_text_from_image_bytes_with_local_ocr(raw: bytes) -> str:
     try:
         image = Image.open(io.BytesIO(raw))
-    except Exception as exc:
-        raise InvalidDocumentError("Imagem inválida ou corrompida") from exc
+    except Exception:
+        return ""
+    return _ocr_text_from_image(image)
+
+
+def _extract_qr_payload_from_image(raw: bytes) -> str | None:
+    started_at = time.monotonic()
+
+    def timed_out() -> bool:
+        return (time.monotonic() - started_at) > MAX_QR_SCAN_SECONDS
+
+    try:
+        image = Image.open(io.BytesIO(raw))
+    except Exception:
+        return None
+
+    try:
+        width, height = image.size
+    except Exception:
+        return _decode_qr_from_pil(image)
+
+    # Bottom-heavy scans first, since Portuguese invoice QR codes are commonly
+    # printed near the footer and can be missed by full-frame reads on photos.
+    payload = _decode_qr_from_pil(image)
+    if payload:
+        return payload
+
+    bottom_regions = [
+        (0, (height * 55) // 100, width, height),
+        (0, (height * 60) // 100, width, height),
+        (0, (height * 65) // 100, width, height),
+        (0, (height * 45) // 100, width, height),
+        (0, (height * 50) // 100, width, height),
+        (0, (height * 70) // 100, width, height),
+        (0, (height * 60) // 100, (width * 60) // 100, height),
+        ((width * 40) // 100, (height * 60) // 100, width, height),
+        (0, (height * 60) // 100, (width * 50) // 100, height),
+        ((width * 50) // 100, (height * 60) // 100, width, height),
+        ((width * 30) // 100, (height * 60) // 100, (width * 70) // 100, height),
+    ]
+    for box in bottom_regions:
+        if timed_out():
+            logger.info("QR image scan timeout after %.2fs", time.monotonic() - started_at)
+            return None
+        left, top, right, bottom = box
+        if right - left < 80 or bottom - top < 80:
+            continue
+        try:
+            payload = _decode_qr_from_pil(image.crop(box))
+        except Exception:
+            payload = None
+        if payload:
+            return payload
+
+    try:
+        width, height = image.size
+    except Exception:
+        return None
+
+    crops = [
+        (0, 0, width // 2, height // 2),
+        (width // 2, 0, width, height // 2),
+        (0, height // 2, width // 2, height),
+        (width // 2, height // 2, width, height),
+        (width // 4, height // 4, (width * 3) // 4, (height * 3) // 4),
+        ((width * 2) // 3, 0, width, height // 3),
+        ((width * 3) // 5, 0, width, height // 2),
+        ((width * 2) // 3, height // 12, width, (height * 5) // 12),
+    ]
+    for box in crops:
+        if timed_out():
+            logger.info("QR image scan timeout after %.2fs", time.monotonic() - started_at)
+            return None
+        left, top, right, bottom = box
+        if right - left < 80 or bottom - top < 80:
+            continue
+        try:
+            payload = _decode_qr_from_pil(image.crop(box))
+        except Exception:
+            payload = None
+        if payload:
+            return payload
+    return None
+
+
+def _extract_text_from_image_with_vision(
+    raw: bytes,
+    file_name: str,
+    context_headers: dict[str, str] | None = None,
+) -> tuple[str, dict[str, int]]:
+    mime_type = mimetypes.guess_type(file_name)[0] or "image/jpeg"
+    data_url = f"data:{mime_type};base64,{base64.b64encode(raw).decode('ascii')}"
     prompt = (
-        "Extract all readable text from this invoice image. "
-        "Return plain text only, preserving key invoice identifiers, vendor/customer names, dates, totals, tax amounts, NIFs, "
-        "and line items when visible. Do not summarize."
+        "Read this invoice photo and extract all visible text faithfully. "
+        "Return plain text only, no JSON, no markdown, no commentary. "
+        "Preserve numbers, dates, tax IDs, totals, and line-item rows."
     )
-    response = vision_text(
+    content, usage = ai_chat_completion(
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
         model=settings.vision_model,
-        prompt=prompt,
-        image_data_urls=[_pil_to_data_url(image)],
-        max_output_tokens=4000,
+        max_tokens=1200,
+        temperature=0.0,
+        timeout_seconds=AI_SERVICE_TIMEOUT_SECONDS,
+        context_headers=context_headers,
     )
-    return response.text, response.usage
+    return (content or "").strip(), usage
+
+
+def _extract_text_from_pdf_with_local_ocr(raw: bytes, file_name: str) -> str:
+    if pytesseract is None:
+        logger.warning("Local OCR unavailable for %s, pytesseract is missing", file_name)
+        return ""
+
+    pages: list[str] = []
+    try:
+        with fitz.open(stream=raw, filetype="pdf") as document:
+            for page_index in range(min(MAX_OCR_PAGES, len(document))):
+                page = document.load_page(page_index)
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                text = _ocr_text_from_image(image)
+                if text:
+                    pages.append(text)
+    except Exception as exc:
+        logger.warning("Local OCR failed for %s: %s", file_name, exc)
+        return ""
+    return _clean_text("\n".join(pages))
 
 
 def extract_text_from_upload(upload) -> tuple[str, bytes, dict[str, int]]:
@@ -630,10 +1068,9 @@ def extract_text_from_upload(upload) -> tuple[str, bytes, dict[str, int]]:
     raw = upload.file.read()
     upload.file.seek(0)
     usage = _usage_dict()
-    content_type = getattr(upload, "content_type", None)
+    text = ""
 
     if filename.endswith(".pdf"):
-        text = ""
         try:
             reader = PdfReader(upload.file)
             pages = [page.extract_text() or "" for page in reader.pages]
@@ -655,18 +1092,15 @@ def extract_text_from_upload(upload) -> tuple[str, bytes, dict[str, int]]:
         )
         if should_use_pdf_ocr:
             try:
-                logger.info("Running PDF vision fallback for %s", upload.filename or "documento")
-                ocr_text, ocr_usage = _extract_text_from_pdf_with_vision(raw, upload.filename or "documento")
-                _accumulate_usage(usage, ocr_usage)
+                logger.info("Running local PDF OCR fallback for %s", upload.filename or "documento")
+                ocr_text = _extract_text_from_pdf_with_local_ocr(raw, upload.filename or "documento")
                 text = ocr_text or text
             except Exception as exc:
-                logger.warning("PDF vision fallback failed for %s: %s", upload.filename or "documento", exc)
-    elif _is_image_upload(filename, content_type):
-        try:
-            text, vision_usage = _extract_text_from_image_with_vision(raw, upload.filename or "documento")
-            _accumulate_usage(usage, vision_usage)
-        except Exception as exc:
-            raise InvalidDocumentError("Imagem inválida ou OCR indisponível") from exc
+                logger.warning("PDF OCR fallback failed for %s: %s", upload.filename or "documento", exc)
+    elif any(filename.endswith(ext) for ext in _IMAGE_EXTENSIONS):
+        ocr_text = _extract_text_from_image_bytes_with_local_ocr(raw)
+        if ocr_text:
+            text = ocr_text
     else:
         try:
             text = raw.decode("utf-8")
@@ -707,19 +1141,20 @@ def _to_decimal(value: Any, quant: str = "0.01") -> Decimal | None:
     return candidate
 
 
-def _normalize_line_items(line_items: Any, fallback_description: str, subtotal: Decimal | None) -> List[dict[str, Any]]:
+def _normalize_line_items(line_items: Any, fallback_description: str | None, subtotal: Decimal | None) -> List[dict[str, Any]]:
     normalized: List[dict[str, Any]] = []
+    fallback_clean = _sanitize_qr_line_item_description(fallback_description) if fallback_description else None
     if isinstance(line_items, list):
         for idx, item in enumerate(line_items):
             if not isinstance(item, dict):
                 continue
-            description = item.get("description") if isinstance(item.get("description"), str) else None
+            description = _sanitize_qr_line_item_description(item.get("description") or item.get("name") or item.get("text") or item.get("label"))
             code = item.get("code") if isinstance(item.get("code"), str) else None
             normalized.append(
                 {
                     "position": idx + 1,
                     "code": code.strip() if code else None,
-                    "description": (description or fallback_description).strip(),
+                    "description": description or fallback_clean,
                     "quantity": _to_decimal(item.get("quantity")),
                     "unit_price": _to_decimal(item.get("unit_price")),
                     "line_subtotal": _to_decimal(item.get("subtotal")) or _to_decimal(item.get("line_subtotal")),
@@ -729,12 +1164,12 @@ def _normalize_line_items(line_items: Any, fallback_description: str, subtotal: 
                 }
             )
 
-    if not normalized:
+    if not normalized and fallback_clean:
         normalized.append(
             {
                 "position": 1,
                 "code": None,
-                "description": fallback_description,
+                "description": fallback_clean,
                 "quantity": Decimal("1.00") if subtotal else None,
                 "unit_price": subtotal,
                 "line_subtotal": subtotal,
@@ -744,6 +1179,35 @@ def _normalize_line_items(line_items: Any, fallback_description: str, subtotal: 
             }
         )
     return normalized
+
+
+def _line_items_have_meaningful_content(line_items: Any) -> bool:
+    if not isinstance(line_items, list) or not line_items:
+        return False
+    for item in line_items:
+        if not isinstance(item, dict):
+            continue
+        description = _sanitize_qr_line_item_description(
+            item.get("description") or item.get("name") or item.get("text") or item.get("label")
+        )
+        code = item.get("code") if isinstance(item.get("code"), str) else None
+        if description or (code and code.strip()):
+            return True
+        if any(item.get(key) not in (None, "") for key in ("quantity", "unit_price", "subtotal", "line_subtotal", "tax_amount", "line_tax_amount", "total", "line_total", "tax_rate")):
+            return True
+    return False
+
+
+def _select_line_item_source(qr_line_items: Any, ai_line_items: Any) -> Any:
+    if _line_items_have_meaningful_content(ai_line_items):
+        return ai_line_items
+    if _line_items_have_meaningful_content(qr_line_items):
+        return qr_line_items
+    if isinstance(ai_line_items, list):
+        return ai_line_items
+    if isinstance(qr_line_items, list):
+        return qr_line_items
+    return []
 
 
 def _normalize_for_search(value: str | None) -> str:
@@ -764,21 +1228,27 @@ def _maybe_correct_parties(
     return vendor, customer, supplier_nif, customer_nif
 
 
-def _extract_with_llm(
+def _extract_with_ai_service(
     text: str,
     file_name: str,
     correction_message: str | None = None,
     previous_payload: str | None = None,
-) -> tuple[dict[str, Any], dict[str, int], str]:
-    if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY não configurada")
-
+    context_headers: dict[str, str] | None = None,
+    qr_data: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, int]]:
     usage_total = _usage_dict()
     prompt = (
         f"{EXTRACTION_PROMPT_BASE}\n\n"
         f"filename: {Path(file_name).name}\n"
         f"text: {text[:12000]}"
     )
+    if qr_data:
+        prompt += (
+            "\nQR payload (Portuguese invoice barcode):\n"
+            + json.dumps(qr_data, ensure_ascii=False, default=str)
+            + "\nUse the QR payload as the source of truth for supplier_nif, invoice_number, invoice_date, total, tax, and any embedded item text. "
+            + "Do not use supplier/customer/header text as line-item descriptions unless the item table is clearly visible."
+        )
     if correction_message:
         prompt += "\nCorrections requested: " + correction_message.strip() + "\n"
         if previous_payload:
@@ -786,14 +1256,15 @@ def _extract_with_llm(
             prompt += "Previous JSON output:\n" + trimmed + "\n"
         prompt += CORRECTION_PROMPT_SUFFIX + "\n"
 
-    response = complete_prompt(
+    content, usage = ai_chat_completion(
+        messages=[{"role": "user", "content": prompt}],
         model=settings.extraction_model,
-        prompt=prompt,
-        max_output_tokens=550,
+        max_tokens=550,
         temperature=0.0,
+        timeout_seconds=AI_SERVICE_TIMEOUT_SECONDS,
+        context_headers=context_headers,
     )
-    _accumulate_usage(usage_total, response.usage)
-    content = response.text or ""
+    _accumulate_usage(usage_total, usage)
     if not content:
         raise RuntimeError("Modelo não devolveu conteúdo")
 
@@ -803,14 +1274,15 @@ def _extract_with_llm(
         data = json.loads(payload)
     except json.JSONDecodeError:
         repair_prompt = f"{JSON_REPAIR_PROMPT}\n\n{payload[:8000]}"
-        repair_response = complete_prompt(
-            model=settings.repair_model,
-            prompt=repair_prompt,
-            max_output_tokens=700,
+        repaired, repair_usage = ai_chat_completion(
+            messages=[{"role": "user", "content": repair_prompt}],
+            model=settings.extraction_model,
+            max_tokens=700,
             temperature=0.0,
+            timeout_seconds=AI_SERVICE_TIMEOUT_SECONDS,
+            context_headers=context_headers,
         )
-        _accumulate_usage(usage_total, repair_response.usage)
-        repaired = repair_response.text or ""
+        _accumulate_usage(usage_total, repair_usage)
         repaired_match = re.search(r"\{.*\}", repaired, re.S)
         repaired_payload = repaired_match.group(0) if repaired_match else repaired
         try:
@@ -818,7 +1290,7 @@ def _extract_with_llm(
         except json.JSONDecodeError as exc:
             raise InvalidDocumentError("Resposta do modelo não pôde ser convertida em JSON válido") from exc
     data["notes"] = data.get("notes") or f"Documento processado por IA: {Path(file_name).name}"
-    return data, usage_total, (response.model or settings.extraction_model)
+    return data, usage_total
 
 
 def _determine_document_type(text: str, extraction: dict[str, Any], qr_data: dict[str, Any]) -> tuple[bool, str, str]:
@@ -891,6 +1363,13 @@ PRECHECK_BLOCKED_TYPES = {
 
 def precheck_invoice_candidate(upload: UploadFile) -> tuple[bool, str, str, str, bytes, dict[str, int]]:
     text, raw, usage = extract_text_from_upload(upload)
+    qr_payload = None
+    filename = (upload.filename or "").lower()
+    if raw and filename.endswith(tuple(_IMAGE_EXTENSIONS)):
+        qr_payload = _extract_qr_payload_from_image(raw)
+    elif raw and filename.endswith(".pdf") and _should_attempt_qr_scan(text):
+        qr_payload = _extract_qr_payload_from_pdf(raw)
+    qr_data = parse_portuguese_qr_payload(qr_payload)
     dummy_extraction = {
         "invoice_number": None,
         "invoice_date": None,
@@ -901,7 +1380,18 @@ def precheck_invoice_candidate(upload: UploadFile) -> tuple[bool, str, str, str,
         "total": None,
         "line_items": None,
     }
-    is_invoice, detected_type, validation_reason = _determine_document_type(text=text, extraction=dummy_extraction, qr_data={})
+    is_invoice, detected_type, validation_reason = _determine_document_type(text=text, extraction=dummy_extraction, qr_data=qr_data)
+    if qr_data and not is_invoice:
+        qr_hint_extraction = {
+            **dummy_extraction,
+            "invoice_number": qr_data.get("invoice_number"),
+            "invoice_date": qr_data.get("invoice_date"),
+            "supplier_nif": _normalize_tax_id(qr_data.get("supplier_nif")),
+            "total": _to_decimal(qr_data.get("total")),
+            "tax": _to_decimal(qr_data.get("tax")),
+            "line_items": qr_data.get("line_items"),
+        }
+        is_invoice, detected_type, validation_reason = _determine_document_type(text=text, extraction=qr_hint_extraction, qr_data=qr_data)
     should_process = is_invoice or detected_type not in PRECHECK_BLOCKED_TYPES
     reason = validation_reason if should_process else f"Pré-check: {validation_reason}"
     return should_process, detected_type, reason, text, raw, usage
@@ -912,7 +1402,13 @@ def extract_invoice_data(
     preextracted_text: str | None = None,
     preextracted_raw: bytes | None = None,
     preextracted_usage: dict[str, int] | None = None,
+    context_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    context_headers = context_headers or _request_ai_headers()
+    tenant_id = _tenant_id_from_context_headers(context_headers)
+    file_label = upload.filename or "documento"
+    filename = file_label.lower()
+    is_image_upload = filename.endswith(tuple(_IMAGE_EXTENSIONS))
     text = preextracted_text
     raw = preextracted_raw
     usage_total = _usage_dict()
@@ -920,18 +1416,45 @@ def extract_invoice_data(
     if text is None or raw is None:
         text, raw, usage = extract_text_from_upload(upload)
         _accumulate_usage(usage_total, usage)
-    qr_payload = None
-    file_label = upload.filename or "documento"
-    filename = file_label.lower()
-    if filename.endswith(".pdf") and _should_attempt_qr_scan(text):
-        qr_payload = _extract_qr_payload_from_pdf(raw)
-    qr_data = parse_portuguese_qr_payload(qr_payload)
 
+    qr_payload = None
+    if filename.endswith(".pdf") and raw and _should_attempt_qr_scan(text):
+        qr_payload = _extract_qr_payload_from_pdf(raw)
+    elif is_image_upload and raw:
+        qr_payload = _extract_qr_payload_from_image(raw)
+    qr_data = parse_portuguese_qr_payload(qr_payload)
+    qr_vendor_profile = _resolve_vendor_profile_from_nif(qr_data.get("supplier_nif"), tenant_id=tenant_id, allow_external=True) if qr_data else {}
+
+    if raw and filename.endswith(tuple(_IMAGE_EXTENSIONS)) and (not text or _looks_like_garbled_text(text) or not _has_invoice_markers(text)):
+        try:
+            vision_text, vision_usage = _extract_text_from_image_with_vision(raw, file_label, context_headers=context_headers)
+            _accumulate_usage(usage_total, vision_usage)
+            if vision_text:
+                text = vision_text if not text else f"{text}\n{vision_text}"
+        except Exception as exc:
+            logger.warning("Vision fallback failed for %s: %s", file_label, exc)
+
+    if qr_data and (not text or _looks_like_garbled_text(text) or not _has_invoice_markers(text)):
+        qr_hint_lines = ["QR payload detected in invoice image:"]
+        for key in ("document_type", "supplier_nif", "customer_nif", "invoice_number", "invoice_date", "total", "tax", "atcud", "hash_fragment"):
+            value = qr_data.get(key)
+            if value not in (None, ""):
+                qr_hint_lines.append(f"{key}: {value}")
+        text = (text + "\n" if text else "") + "\n".join(qr_hint_lines)
+
+    qr_primary_extraction: dict[str, Any] | None = None
+    if is_image_upload and qr_data:
+        qr_primary_extraction = _build_qr_first_extraction(qr_data=qr_data, text=text, file_name=file_label, vendor_profile=qr_vendor_profile)
+        qr_primary_extraction["qr_data"] = qr_data
+        qr_primary_extraction["qr_payload"] = qr_payload
+
+    used_ai_extraction = False
     try:
-        extraction = build_extraction_from_text(text=text, file_name=file_label)
+        extraction = build_extraction_from_text(text=text, file_name=file_label, context_headers=context_headers, qr_data=qr_data)
+        used_ai_extraction = True
     except Exception:
-        if qr_data:
-            extraction = _build_qr_first_extraction(qr_data=qr_data, text=text, file_name=file_label)
+        if qr_primary_extraction is not None:
+            extraction = qr_primary_extraction
         else:
             raise
 
@@ -951,12 +1474,14 @@ def extract_invoice_data(
             extraction["supplier_nif"] = fallback_supplier
     else:
         extraction["supplier_nif"] = normalized_supplier
-    if not _ai_returned_line_items(extraction):
+    if used_ai_extraction and not _ai_returned_line_items(extraction):
         retry_extraction = build_extraction_from_text(
             text=text,
             file_name=file_label,
             correction_message="Line items missing. Extract every individual row from the product/service table, including code, description, quantity, unit_price, subtotal, tax amount and total.",
             previous_payload=extraction.get("ai_payload"),
+            context_headers=context_headers,
+            qr_data=qr_data,
         )
         if _ai_returned_line_items(retry_extraction):
             retry_extraction["token_input"] = int(retry_extraction.get("token_input") or 0) + int(extraction.get("token_input") or 0)
@@ -966,15 +1491,19 @@ def extract_invoice_data(
     if qr_data:
         extraction["qr_data"] = qr_data
         extraction["qr_payload"] = qr_payload
+        if qr_primary_extraction and qr_primary_extraction.get("subtotal") is not None:
+            extraction["subtotal"] = qr_primary_extraction["subtotal"]
         supplier_nif = _normalize_tax_id(qr_data.get("supplier_nif"))
         if supplier_nif:
             extraction["supplier_nif"] = supplier_nif
-            vendor_profile = _lookup_vendor_profile_from_nif(supplier_nif)
+            vendor_profile = qr_vendor_profile or _resolve_vendor_profile_from_nif(supplier_nif, tenant_id=tenant_id, allow_external=True)
             vendor_name = vendor_profile.get("name")
             if vendor_name:
                 extraction["vendor"] = vendor_name
             if vendor_profile.get("address") and not extraction.get("vendor_address"):
                 extraction["vendor_address"] = vendor_profile["address"]
+            if vendor_profile.get("contact") and not extraction.get("vendor_contact"):
+                extraction["vendor_contact"] = vendor_profile["contact"]
         customer_nif = _normalize_tax_id(qr_data.get("customer_nif"))
         if customer_nif:
             extraction["customer_nif"] = customer_nif
@@ -993,6 +1522,8 @@ def extract_invoice_data(
             extraction["vendor"] = vendor_name
         if vendor_profile.get("address") and not extraction.get("vendor_address"):
             extraction["vendor_address"] = vendor_profile["address"]
+        if vendor_profile.get("contact") and not extraction.get("vendor_contact"):
+            extraction["vendor_contact"] = vendor_profile["contact"]
 
     is_invoice, detected_type, validation_reason = _determine_document_type(text=text, extraction=extraction, qr_data=qr_data)
     extraction["is_invoice"] = is_invoice
@@ -1122,14 +1653,18 @@ def build_extraction_from_text(
     *,
     correction_message: str | None = None,
     previous_payload: str | None = None,
+    context_headers: dict[str, str] | None = None,
+    qr_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    ai_data, usage, extraction_model = _extract_with_llm(
+    ai_data, usage = _extract_with_ai_service(
         text=text,
         file_name=file_name,
         correction_message=correction_message,
         previous_payload=previous_payload,
+        context_headers=context_headers,
+        qr_data=qr_data,
     )
-    vendor = ai_data.get("vendor") or Path(file_name).stem
+    vendor = ai_data.get("vendor") or _guess_vendor_name_from_text(text)
     vendor_address = ai_data.get("vendor_address")
     vendor_contact = ai_data.get("vendor_contact")
     customer_name = ai_data.get("customer_name")
@@ -1156,9 +1691,16 @@ def build_extraction_from_text(
         vendor, customer_name = customer_name or vendor, vendor
         supplier_nif, customer_nif = customer_nif, supplier_nif
 
+    if _looks_like_placeholder_vendor_name(vendor):
+        vendor = None
+
     category = guess_category(f"{vendor} {text} {ai_data.get('notes', '')}")
 
     subtotal = _to_decimal(ai_data.get("subtotal"))
+
+    qr_line_items = _extract_qr_line_items(qr_data) if qr_data else []
+    ai_line_items = ai_data.get("line_items")
+    line_item_source = _select_line_item_source(qr_line_items, ai_line_items)
 
     result = {
         "vendor": vendor,
@@ -1177,14 +1719,14 @@ def build_extraction_from_text(
         "currency": ai_data.get("currency") or "EUR",
         "raw_text": text,
         "ai_payload": json.dumps(ai_data, ensure_ascii=False),
-        "extraction_model": extraction_model,
+        "extraction_model": settings.extraction_model,
         "token_input": usage["input"],
         "token_output": usage["output"],
         "token_total": usage["total"],
         "notes": ai_data.get("notes") or f"Documento processado por IA: {file_name}",
         "line_items": _normalize_line_items(
-            ai_data.get("line_items"),
-            fallback_description=vendor or file_name,
+            line_item_source,
+            fallback_description=None if qr_data else (vendor or file_name),
             subtotal=subtotal,
         ),
     }

@@ -1,0 +1,83 @@
+# ─── Add to the MAIN docker-compose.yml ─────────────────────────
+
+  mod-email:
+    build:
+      context: ./modules/email
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      MOD_EMAIL_PORT: "4004"
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_email
+      AI_SERVICE_URL: http://ai-service:4010
+      AI_AGENT_ID: email
+      EMAIL_CREDENTIALS_SECRET: ${EMAIL_CREDENTIALS_SECRET:-change-me-email-credentials-secret}
+      EMAIL_SYNC_INTERVAL_SECONDS: ${EMAIL_SYNC_INTERVAL_SECONDS:-300}
+      ALLOW_DEMO_TENANT: "false"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4004/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  email-sync-worker:
+    build:
+      context: ./modules/email
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["python", "worker.py"]
+    environment:
+      <<: *common-env
+      MOD_EMAIL_PORT: "4004"
+      DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_email
+      AI_SERVICE_URL: http://ai-service:4010
+      AI_AGENT_ID: email
+      EMAIL_CREDENTIALS_SECRET: ${EMAIL_CREDENTIALS_SECRET:-change-me-email-credentials-secret}
+      EMAIL_SYNC_INTERVAL_SECONDS: ${EMAIL_SYNC_INTERVAL_SECONDS:-300}
+      ALLOW_DEMO_TENANT: "false"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mod-email:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 192M
+
+  email-frontend:
+    build:
+      context: ./modules/email/frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      SERVER_API_BASE_URL: http://mod-email:4004
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+    depends_on:
+      - mod-email
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+# ─── Add to gateway environment: ──────────────────────────────────
+# MOD_EMAIL_URL: http://mod-email:4004

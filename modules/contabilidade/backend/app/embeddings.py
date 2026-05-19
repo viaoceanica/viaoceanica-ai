@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 import logging
+import os
 from functools import lru_cache
 from typing import Any
-
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 
+from .ai_client import embeddings_create as ai_embeddings_create
 from .config import get_settings
-from .llm_client import create_embedding
 from .models import Invoice
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 COLLECTION_NAME = "invoice_embeddings"
 VECTOR_SIZE = settings.embedding_vector_size
+DEFAULT_AI_USER_ID = os.getenv("DEFAULT_USER_ID", "1")
 
 
 def _build_embedding_text(invoice: Invoice) -> str:
@@ -54,9 +55,7 @@ def _ensure_collection() -> None:
     try:
         collection = client.get_collection(COLLECTION_NAME)
         existing_size = _vector_size_from_collection(collection)
-        if existing_size is None:
-            return
-        if existing_size == VECTOR_SIZE:
+        if existing_size is None or existing_size == VECTOR_SIZE:
             return
         count_result = client.count(collection_name=COLLECTION_NAME)
         count = int(getattr(count_result, "count", 0) or 0)
@@ -76,35 +75,31 @@ def _ensure_collection() -> None:
             f"Qdrant collection {COLLECTION_NAME} uses vector size {existing_size}, expected {VECTOR_SIZE}. "
             "Refuse to mix embeddings with different dimensions."
         )
-    except Exception as exc:
-        if isinstance(exc, RuntimeError):
-            raise
+    except Exception:
         client.recreate_collection(
             collection_name=COLLECTION_NAME,
             vectors_config=qmodels.VectorParams(size=VECTOR_SIZE, distance=qmodels.Distance.COSINE),
         )
 
 
-def _embed_text(value: str) -> list[float]:
-    response = create_embedding(model=settings.embedding_model, input_value=value)
-    vector = response.data[0].embedding
-    vector_size = len(vector)
-    if vector_size != VECTOR_SIZE:
-        raise RuntimeError(
-            f"Embedding model {settings.embedding_model} returned {vector_size} dims, expected {VECTOR_SIZE}. "
-            "OpenAI fallback is intentionally disabled for embeddings unless dimensions match."
-        )
-    return vector
+def _embedding_context_headers(tenant_id: str, request_id: str) -> dict[str, str]:
+    return {
+        "X-Viao-User-Id": DEFAULT_AI_USER_ID,
+        "X-Viao-Tenant-Id": str(tenant_id),
+        "X-Viao-Module-Key": "contabilidade",
+        "X-Viao-Request-Id": request_id,
+    }
 
 
 def upsert_invoice_embedding(invoice: Invoice) -> None:
-    if not settings.openai_api_key:
-        return
-
     try:
         _ensure_collection()
         text = _build_embedding_text(invoice)
-        embedding = _embed_text(text)
+        embedding = ai_embeddings_create(
+            input_text=text,
+            model=settings.embedding_model,
+            context_headers=_embedding_context_headers(invoice.tenant_id, f"embedding-upsert-{invoice.id}"),
+        )
         payload = {
             "invoice_id": str(invoice.id),
             "tenant_id": invoice.tenant_id,
@@ -129,13 +124,15 @@ def upsert_invoice_embedding(invoice: Invoice) -> None:
 
 
 def search_invoice_embeddings(question: str, tenant_id: str, top_k: int = 5):
-    if not settings.openai_api_key:
-        return []
     question = question.strip()
     if not question:
         return []
     _ensure_collection()
-    embedding = _embed_text(question)
+    embedding = ai_embeddings_create(
+        input_text=question,
+        model=settings.embedding_model,
+        context_headers=_embedding_context_headers(tenant_id, "embedding-search"),
+    )
     client = _get_qdrant_client()
     try:
         response = client.query_points(

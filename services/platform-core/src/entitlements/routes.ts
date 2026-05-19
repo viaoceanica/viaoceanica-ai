@@ -31,6 +31,20 @@ function requireAuth(req: Request, res: Response, next: Function) {
   next();
 }
 
+function requireTenantAdmin(req: Request, res: Response, next: Function) {
+  const platformRoles = String(req.headers["x-viao-platform-roles"] || "");
+  if (platformRoles.includes("admin")) {
+    return next();
+  }
+
+  const companyRole = String(req.headers["x-viao-company-role"] || "");
+  if (["owner", "admin"].some((role) => companyRole.split(",").map((value) => value.trim()).includes(role))) {
+    return next();
+  }
+
+  return res.status(403).json({ success: false, error: { code: "FORBIDDEN", message: "Apenas administradores do tenant podem gerir módulos" } });
+}
+
 // ─── GET /modules — Tenant's enabled modules ────────────────────────
 
 router.get("/modules", requireAuth, async (req: Request, res: Response) => {
@@ -66,7 +80,7 @@ router.get("/modules", requireAuth, async (req: Request, res: Response) => {
 
 // ─── PUT /modules/:moduleKey — Enable/disable module for tenant ─────
 
-router.put("/modules/:moduleKey", requireAuth, async (req: Request, res: Response) => {
+router.put("/modules/:moduleKey", requireTenantAdmin, async (req: Request, res: Response) => {
   try {
     const tenantId = getTenantId(req);
     if (!tenantId) return res.status(400).json({ success: false, error: { code: "NO_TENANT" } });
@@ -114,7 +128,7 @@ router.put("/modules/:moduleKey", requireAuth, async (req: Request, res: Respons
 
 // ─── GET /modules/:moduleKey/permissions ─────────────────────────────
 
-router.get("/modules/:moduleKey/permissions", requireAuth, async (req: Request, res: Response) => {
+router.get("/modules/:moduleKey/permissions", requireTenantAdmin, async (req: Request, res: Response) => {
   try {
     const tenantId = getTenantId(req);
     if (!tenantId) return res.status(400).json({ success: false, error: { code: "NO_TENANT" } });
@@ -137,7 +151,7 @@ router.get("/modules/:moduleKey/permissions", requireAuth, async (req: Request, 
 
 // ─── PUT /modules/:moduleKey/permissions ─────────────────────────────
 
-router.put("/modules/:moduleKey/permissions", requireAuth, async (req: Request, res: Response) => {
+router.put("/modules/:moduleKey/permissions", requireTenantAdmin, async (req: Request, res: Response) => {
   try {
     const tenantId = getTenantId(req);
     if (!tenantId) return res.status(400).json({ success: false, error: { code: "NO_TENANT" } });

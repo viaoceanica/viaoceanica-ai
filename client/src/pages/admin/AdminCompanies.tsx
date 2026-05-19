@@ -6,15 +6,50 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useQuery, useDynamicMutation } from "@/hooks/useApi";
-import { Building2, Coins, Eye } from "lucide-react";
+import { useQuery, useMutation, useDynamicMutation } from "@/hooks/useApi";
+import { Building2, Coins, Eye, Plus, Pencil, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 
+type CompanyForm = {
+  name: string;
+  sector: string;
+  email: string;
+  ownerPassword: string;
+  phone: string;
+  address: string;
+  website: string;
+  planId: string;
+};
+
+const defaultCompanyForm: CompanyForm = {
+  name: "",
+  sector: "",
+  email: "",
+  ownerPassword: "",
+  phone: "",
+  address: "",
+  website: "",
+  planId: "",
+};
+
 export default function AdminCompanies() {
   const { data: companies, isLoading, refetch } = useQuery<any[]>("/api/platform/tenants/admin/companies");
   const { data: plans } = useQuery<any[]>("/api/platform/tenants/admin/plans");
+
+  const createCompanyMut = useMutation<any, any>("/api/platform/tenants/admin/companies", "POST", {
+    onSuccess: () => { refetch(); toast.success("Tenant criado com sucesso"); },
+    onError: (e) => toast.error(e.message),
+  });
+  const updateCompanyMut = useDynamicMutation("PUT", {
+    onSuccess: () => { refetch(); toast.success("Tenant atualizado"); },
+    onError: (e) => toast.error(e.message),
+  });
+  const deleteCompanyMut = useDynamicMutation("DELETE", {
+    onSuccess: () => { refetch(); toast.success("Tenant removido"); },
+    onError: (e) => toast.error(e.message),
+  });
 
   const grantTokensMut = useDynamicMutation("POST", {
     onSuccess: () => { refetch(); toast.success("Tokens atribuídos"); },
@@ -24,6 +59,10 @@ export default function AdminCompanies() {
     onSuccess: () => { refetch(); toast.success("Plano atribuído"); },
     onError: (e) => toast.error(e.message),
   });
+
+  const [companyDialog, setCompanyDialog] = useState<{ open: boolean; editId: number | null }>({ open: false, editId: null });
+  const [companyForm, setCompanyForm] = useState<CompanyForm>(defaultCompanyForm);
+  const [deleteDialog, setDeleteDialog] = useState<{ open: boolean; companyId: number; companyName: string }>({ open: false, companyId: 0, companyName: "" });
 
   const [grantDialog, setGrantDialog] = useState<{ open: boolean; companyId: number; companyName: string }>({ open: false, companyId: 0, companyName: "" });
   const [grantAmount, setGrantAmount] = useState("");
@@ -41,11 +80,78 @@ export default function AdminCompanies() {
     { enabled: detailDialog.open && detailDialog.companyId > 0 }
   );
 
+  const openCreateCompany = () => {
+    setCompanyForm(defaultCompanyForm);
+    setCompanyDialog({ open: true, editId: null });
+  };
+
+  const openEditCompany = (company: any) => {
+    setCompanyForm({
+      name: company.name || "",
+      sector: company.sector || "",
+      email: company.email || "",
+      ownerPassword: "",
+      phone: company.phone || "",
+      address: company.address || "",
+      website: company.website || "",
+      planId: company.planId ? String(company.planId) : "",
+    });
+    setCompanyDialog({ open: true, editId: company.id });
+  };
+
+  const handleSaveCompany = async () => {
+    if (!companyForm.name.trim()) {
+      toast.error("Nome do tenant é obrigatório");
+      return;
+    }
+
+    if (!companyDialog.editId) {
+      if (!companyForm.email.trim()) {
+        toast.error("Email de login do tenant é obrigatório");
+        return;
+      }
+      if (companyForm.ownerPassword.length < 6) {
+        toast.error("Password inicial deve ter pelo menos 6 caracteres");
+        return;
+      }
+    } else if (companyForm.ownerPassword && companyForm.ownerPassword.length < 6) {
+      toast.error("Nova password deve ter pelo menos 6 caracteres");
+      return;
+    }
+
+    const payload = {
+      name: companyForm.name.trim(),
+      sector: companyForm.sector || null,
+      email: companyForm.email || null,
+      ownerEmail: companyForm.email ? companyForm.email.trim().toLowerCase() : null,
+      ownerPassword: companyForm.ownerPassword || null,
+      phone: companyForm.phone || null,
+      address: companyForm.address || null,
+      website: companyForm.website || null,
+      planId: companyForm.planId ? Number(companyForm.planId) : null,
+    };
+
+    if (companyDialog.editId) {
+      await updateCompanyMut.mutateAsync(`/api/platform/tenants/admin/companies/${companyDialog.editId}`, payload);
+    } else {
+      await createCompanyMut.mutateAsync(payload);
+    }
+
+    setCompanyDialog({ open: false, editId: null });
+    setCompanyForm(defaultCompanyForm);
+  };
+
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Empresas</h1>
-        <p className="text-muted-foreground mt-1">Gerir todas as empresas registadas na plataforma</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Empresas / Tenants</h1>
+          <p className="text-muted-foreground mt-1">CRUD de tenants da plataforma e gestão operacional</p>
+        </div>
+        <Button onClick={openCreateCompany}>
+          <Plus className="h-4 w-4 mr-1.5" />
+          Novo tenant
+        </Button>
       </div>
 
       <Card className="border-border/50">
@@ -60,7 +166,7 @@ export default function AdminCompanies() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Empresa</TableHead>
+                  <TableHead>Tenant</TableHead>
                   <TableHead>Sector</TableHead>
                   <TableHead>Tokens Int.</TableHead>
                   <TableHead>Tokens Ext.</TableHead>
@@ -99,6 +205,14 @@ export default function AdminCompanies() {
                           <Button
                             variant="ghost"
                             size="sm"
+                            onClick={() => openEditCompany(c)}
+                          >
+                            <Pencil className="h-3 w-3 mr-1" />
+                            Editar
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
                             onClick={() => setGrantDialog({ open: true, companyId: c.id, companyName: c.name })}
                           >
                             <Coins className="h-3 w-3 mr-1" />
@@ -107,9 +221,20 @@ export default function AdminCompanies() {
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => setPlanDialog({ open: true, companyId: c.id, companyName: c.name })}
+                            onClick={() => {
+                              setSelectedPlan(c.planId ? String(c.planId) : "");
+                              setPlanDialog({ open: true, companyId: c.id, companyName: c.name });
+                            }}
                           >
                             Plano
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => setDeleteDialog({ open: true, companyId: c.id, companyName: c.name })}
+                          >
+                            <Trash2 className="h-3 w-3" />
                           </Button>
                         </div>
                       </TableCell>
@@ -129,6 +254,96 @@ export default function AdminCompanies() {
         </CardContent>
       </Card>
 
+      {/* Create/Edit tenant dialog */}
+      <Dialog open={companyDialog.open} onOpenChange={(open) => setCompanyDialog((p) => ({ ...p, open }))}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{companyDialog.editId ? "Editar tenant" : "Novo tenant"}</DialogTitle>
+            <DialogDescription>
+              {companyDialog.editId ? "Atualizar dados da empresa e, se necessário, redefinir password do proprietário" : "Criar um novo tenant manualmente no portal admin"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 py-3">
+            <div className="space-y-2">
+              <Label>Nome</Label>
+              <Input value={companyForm.name} onChange={(e) => setCompanyForm((p) => ({ ...p, name: e.target.value }))} placeholder="Nome da empresa" />
+            </div>
+            <div className="space-y-2">
+              <Label>Sector</Label>
+              <Input value={companyForm.sector} onChange={(e) => setCompanyForm((p) => ({ ...p, sector: e.target.value }))} placeholder="Ex: Turismo" />
+            </div>
+            <div className="space-y-2">
+              <Label>{companyDialog.editId ? "Email" : "Email de login (admin do tenant)"}</Label>
+              <Input value={companyForm.email} onChange={(e) => setCompanyForm((p) => ({ ...p, email: e.target.value }))} placeholder="admin@empresa.com" />
+            </div>
+            <div className="space-y-2">
+              <Label>{companyDialog.editId ? "Nova password do proprietário (opcional)" : "Password inicial"}</Label>
+              <Input
+                type="password"
+                value={companyForm.ownerPassword}
+                onChange={(e) => setCompanyForm((p) => ({ ...p, ownerPassword: e.target.value }))}
+                placeholder={companyDialog.editId ? "Deixar em branco para não alterar" : "Mínimo 6 caracteres"}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Telefone</Label>
+              <Input value={companyForm.phone} onChange={(e) => setCompanyForm((p) => ({ ...p, phone: e.target.value }))} placeholder="+351 ..." />
+            </div>
+            <div className="space-y-2 md:col-span-2">
+              <Label>Morada</Label>
+              <Input value={companyForm.address} onChange={(e) => setCompanyForm((p) => ({ ...p, address: e.target.value }))} placeholder="Morada" />
+            </div>
+            <div className="space-y-2">
+              <Label>Website</Label>
+              <Input value={companyForm.website} onChange={(e) => setCompanyForm((p) => ({ ...p, website: e.target.value }))} placeholder="https://..." />
+            </div>
+            <div className="space-y-2">
+              <Label>Plano</Label>
+              <Select value={companyForm.planId || "none"} onValueChange={(value) => setCompanyForm((p) => ({ ...p, planId: value === "none" ? "" : value }))}>
+                <SelectTrigger><SelectValue placeholder="Sem plano" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Sem plano</SelectItem>
+                  {plans?.map((p: any) => (
+                    <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCompanyDialog((p) => ({ ...p, open: false }))}>Cancelar</Button>
+            <Button onClick={handleSaveCompany} disabled={createCompanyMut.isPending || updateCompanyMut.isPending}>
+              {companyDialog.editId ? "Guardar" : "Criar tenant"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete tenant dialog */}
+      <Dialog open={deleteDialog.open} onOpenChange={(open) => setDeleteDialog((p) => ({ ...p, open }))}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Eliminar tenant</DialogTitle>
+            <DialogDescription>
+              Vai eliminar <strong>{deleteDialog.companyName}</strong> e respetiva estrutura (equipas, permissões e convites). Esta ação não pode ser desfeita.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteDialog((p) => ({ ...p, open: false }))}>Cancelar</Button>
+            <Button
+              variant="destructive"
+              onClick={async () => {
+                await deleteCompanyMut.mutateAsync(`/api/platform/tenants/admin/companies/${deleteDialog.companyId}`);
+                setDeleteDialog({ open: false, companyId: 0, companyName: "" });
+              }}
+              disabled={deleteCompanyMut.isPending}
+            >
+              Eliminar tenant
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Grant tokens dialog */}
       <Dialog open={grantDialog.open} onOpenChange={(open) => setGrantDialog(p => ({ ...p, open }))}>
         <DialogContent>
@@ -143,7 +358,7 @@ export default function AdminCompanies() {
             </div>
             <div className="space-y-2">
               <Label>Tipo de token</Label>
-              <Select value={grantSource} onValueChange={(v) => setGrantSource(v as "internal" | "external")}>
+              <Select value={grantSource} onValueChange={(v) => setGrantSource(v as "internal" | "external") }>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="internal">Interno</SelectItem>
@@ -188,9 +403,10 @@ export default function AdminCompanies() {
           <div className="space-y-4 py-4">
             <div className="space-y-2">
               <Label>Plano</Label>
-              <Select value={selectedPlan} onValueChange={setSelectedPlan}>
+              <Select value={selectedPlan || "none"} onValueChange={(value) => setSelectedPlan(value === "none" ? "" : value)}>
                 <SelectTrigger><SelectValue placeholder="Selecionar plano" /></SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="none">Sem plano</SelectItem>
                   {plans?.map((p: any) => (
                     <SelectItem key={p.id} value={p.id.toString()}>{p.name}</SelectItem>
                   ))}
@@ -202,17 +418,16 @@ export default function AdminCompanies() {
             <Button variant="outline" onClick={() => setPlanDialog(p => ({ ...p, open: false }))}>Cancelar</Button>
             <Button
               onClick={async () => {
-                if (!selectedPlan) { toast.error("Selecione um plano"); return; }
                 await assignPlanMut.mutateAsync(
                   `/api/platform/tenants/admin/companies/${planDialog.companyId}/plan`,
-                  { planId: parseInt(selectedPlan) }
+                  { planId: selectedPlan ? parseInt(selectedPlan) : null }
                 );
                 setSelectedPlan("");
                 setPlanDialog(p => ({ ...p, open: false }));
               }}
               disabled={assignPlanMut.isPending}
             >
-              Atribuir
+              Guardar
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -251,6 +466,13 @@ export default function AdminCompanies() {
           )}
         </DialogContent>
       </Dialog>
+
+      {(!companies || companies.length === 0) && !isLoading && (
+        <div className="text-center py-10 text-muted-foreground">
+          <Building2 className="h-9 w-9 mx-auto mb-2 opacity-50" />
+          <p>Nenhum tenant criado manualmente.</p>
+        </div>
+      )}
     </div>
   );
 }

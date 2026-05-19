@@ -19,8 +19,12 @@
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `AI_PROVIDER_API_KEY` | API key for AI provider (e.g., OpenAI) | Yes |
-| `AI_PROVIDER_BASE_URL` | Base URL for AI provider API (default: `https://api.openai.com/v1`) | No |
+| `AI_PROVIDER_API_KEY` | API key for AI provider (e.g., Ollama-compatible, LiteLLM proxy) | Yes |
+| `AI_PROVIDER_BASE_URL` | Base URL for the LiteLLM proxy or other OpenAI-compatible AI provider (default: `https://api.openai.com/v1`) | No |
+| `LOCAL_AI_BASE_URL` | Local OpenAI-compatible base URL preferred by the LiteLLM proxy | No |
+| `LOCAL_AI_API_KEY` | API key for the local OpenAI-compatible provider (Ollama accepts any non-empty value) | No |
+| `FALLBACK_AI_BASE_URL` | Optional fallback OpenAI-compatible base URL used only if local fails | No |
+| `FALLBACK_AI_API_KEY` | Optional API key for the fallback provider | No |
 
 ## Redis
 

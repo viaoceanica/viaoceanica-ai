@@ -34,12 +34,8 @@ export default function Login() {
       }
 
       toast.success("Login efetuado com sucesso");
-      // Check if admin
-      if (data.data?.user?.platformRole === "admin") {
-        setLocation("/admin");
-      } else {
-        setLocation("/dashboard");
-      }
+      const hasTenantSection = Boolean(data.data?.user?.companyRole);
+      setLocation(hasTenantSection ? "/dashboard" : data.data?.user?.platformRole === "admin" ? "/admin" : "/dashboard");
     } catch {
       toast.error("Erro de ligação ao servidor");
     } finally {

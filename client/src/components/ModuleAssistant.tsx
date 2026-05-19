@@ -9,11 +9,44 @@ import { Button } from "@/components/ui/button";
 import { AIChatBox, type Message } from "@/components/AIChatBox";
 import { useAgentChat, type ExportedFile } from "@/hooks/useAgentChat";
 
+const EMAIL_ASSISTANT_CONTEXT_EVENT = "viao-email-assistant-context";
+
+type EmailAssistantUiContext = {
+  selectedEmailId?: string;
+  selectedEmailIds?: string[];
+  selectedMailboxId?: string;
+  selectedFolder?: string;
+  selectedEmail?: {
+    id?: string;
+    subject?: string;
+    from?: string;
+    fromAddress?: string;
+    toAddresses?: string;
+    folder?: string;
+    receivedAt?: string;
+    snippet?: string;
+    bodyPreview?: string;
+    isSeen?: boolean;
+    isFlagged?: boolean;
+    hasAttachments?: boolean;
+  } | null;
+} | null;
+
 const AGENT_NAMES: Record<string, { name: string; emoji: string; greeting: string }> = {
   contabilidade: {
     name: "Assistente Contabilidade",
     emoji: "📊",
     greeting: "Olá! Sou o assistente de contabilidade. Posso ajudar com SNC, IVA, IRS, IRC e questões fiscais portuguesas. Também posso exportar relatórios e classificações para ficheiro.",
+  },
+  helpdesk: {
+    name: "Assistente Helpdesk",
+    emoji: "🎫",
+    greeting: "Olá! Sou o assistente de helpdesk. Posso ajudar com triagem de tickets, SLAs, prioridades, respostas a clientes e organização da operação de suporte.",
+  },
+  email: {
+    name: "Assistente Email",
+    emoji: "✉️",
+    greeting: "Olá! Sou o assistente de email. Posso ajudar com campanhas, automações, segmentação, follow-up comercial e operação de caixas de entrada.",
   },
   platform: {
     name: "Assistente Via Oceânica",
@@ -53,11 +86,32 @@ function FileDownloadCard({ file }: { file: ExportedFile }) {
 export function ModuleAssistant({ moduleKey = "platform" }: ModuleAssistantProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
+  const [emailContext, setEmailContext] = useState<EmailAssistantUiContext>(null);
   const { messages, isLoading, quota, sendMessage, clearHistory, fetchQuota } = useAgentChat({
     moduleKey,
+    getRequestContext: () => moduleKey === "email" && emailContext ? { emailContext } : undefined,
   });
 
   const agent = AGENT_NAMES[moduleKey] || AGENT_NAMES.platform;
+
+  useEffect(() => {
+    if (moduleKey !== "email" || typeof window === "undefined") return;
+
+    const current = (window as Window & { __viaEmailAssistantContext?: EmailAssistantUiContext }).__viaEmailAssistantContext;
+    if (current) {
+      setEmailContext(current);
+    }
+
+    const handleContext = (event: Event) => {
+      const customEvent = event as CustomEvent<EmailAssistantUiContext>;
+      setEmailContext(customEvent.detail || null);
+    };
+
+    window.addEventListener(EMAIL_ASSISTANT_CONTEXT_EVENT, handleContext as EventListener);
+    return () => {
+      window.removeEventListener(EMAIL_ASSISTANT_CONTEXT_EVENT, handleContext as EventListener);
+    };
+  }, [moduleKey]);
 
   // Fetch quota when widget opens
   useEffect(() => {
@@ -95,6 +149,29 @@ export function ModuleAssistant({ moduleKey = "platform" }: ModuleAssistantProps
   const handleClear = useCallback(async () => {
     await clearHistory();
   }, [clearHistory]);
+
+  const selectedEmailSummary = emailContext?.selectedEmail || null;
+  const selectedEmailCount = Math.max(emailContext?.selectedEmailIds?.length || 0, selectedEmailSummary?.id ? 1 : 0);
+
+  const assistantShortcuts = useMemo(() => {
+    if (moduleKey !== "email" || selectedEmailCount === 0) return [] as string[];
+    if (selectedEmailCount > 1) {
+      return [
+        "Resume os emails selecionados",
+        "Arquiva os emails selecionados",
+        "Marca os emails selecionados como lidos",
+        "Apaga os emails selecionados",
+      ];
+    }
+    return [
+      "Resume o email aberto",
+      "Rascunha uma resposta curta e profissional a este email",
+      "Rascunha uma resposta simpática e curta a este email",
+      "Rascunha uma resposta firme e objetiva a este email",
+      "Arquiva este email",
+      "Marca este email como importante",
+    ];
+  }, [moduleKey, selectedEmailCount, selectedEmailSummary]);
 
   // Render file download cards after the chat box for messages with files
   const fileCards = useMemo(() => {
@@ -199,6 +276,31 @@ export function ModuleAssistant({ moduleKey = "platform" }: ModuleAssistantProps
         </div>
       )}
 
+      {moduleKey === "email" && selectedEmailCount > 0 && (
+        <div className="border-b border-gray-100 bg-emerald-50/70 px-3 py-2">
+          <p className="text-xs font-medium text-emerald-800">
+            {selectedEmailCount > 1 ? `A usar ${selectedEmailCount} emails selecionados como contexto` : "A usar o email aberto como contexto"}
+          </p>
+          <p className="truncate text-xs text-emerald-700">
+            {selectedEmailCount > 1
+              ? `${selectedEmailSummary?.subject || "(Sem assunto)"} · ${selectedEmailSummary?.from || "Remetente desconhecido"} · +${selectedEmailCount - 1} selecionado(s)`
+              : `${selectedEmailSummary?.subject || "(Sem assunto)"} · ${selectedEmailSummary?.from || "Remetente desconhecido"}`}
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {assistantShortcuts.map((shortcut) => (
+              <button
+                key={shortcut}
+                type="button"
+                onClick={() => handleSend(shortcut)}
+                className="rounded-full border border-emerald-200 bg-white px-2.5 py-1 text-[11px] font-medium text-emerald-700 transition-colors hover:bg-emerald-100"
+              >
+                {shortcut}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Chat body */}
       <AIChatBox
         messages={chatMessages}
@@ -231,6 +333,18 @@ function getSuggestedPrompts(moduleKey: string): string[] {
         "Como classifico uma fatura de material de escritório no SNC?",
         "Qual a taxa de IVA para serviços de consultoria?",
         "Exporta uma tabela com as contas SNC mais comuns",
+      ];
+    case "helpdesk":
+      return [
+        "Como devo priorizar tickets urgentes vs normais?",
+        "Que regras de SLA devo aplicar para incidentes críticos?",
+        "Ajuda-me a escrever uma resposta clara para um cliente sobre atraso",
+      ];
+    case "email":
+      return [
+        "Ajuda-me a criar uma sequência de follow-up comercial",
+        "Como devo segmentar uma campanha para leads quentes?",
+        "Escreve um email curto para reativar contactos frios",
       ];
     default:
       return [

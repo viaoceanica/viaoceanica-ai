@@ -1010,28 +1010,6 @@ export default function Home() {
         } catch (fileError) {
           const storageReason = fileError instanceof Error ? fileError.message : "Falha no upload para storage";
           const loweredStorageReason = storageReason.toLowerCase();
-          const shouldFallbackToDirectIngest =
-            loweredStorageReason.includes("failed to fetch") ||
-            loweredStorageReason.includes("cors") ||
-            loweredStorageReason.includes("falha no envio para storage") ||
-            loweredStorageReason.includes("upload para storage");
-
-          if (!shouldFallbackToDirectIngest) {
-            let reason = storageReason;
-            try {
-              const failedResponse = await fetch(`${apiBase}/api/tenants/${tenantId}/failed-imports`);
-              const failedData = await parseResponse(failedResponse);
-              const latestMatch = (failedData?.items ?? []).find((item: FailedImportRow) => item.filename === file.name);
-              if (latestMatch?.reason) {
-                reason = latestMatch.reason;
-              }
-            } catch {
-              // keep original reason
-            }
-            aggregated.rejected.push({ filename: file.name, reason, detected_type: "storage_upload_error" });
-            continue;
-          }
-
           try {
             // Fallback path only when browser-to-storage upload fails.
             const fallbackFormData = new FormData();

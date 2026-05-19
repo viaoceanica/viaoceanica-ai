@@ -8,18 +8,37 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { useQuery, useMutation, useDynamicMutation, apiFetch } from "@/hooks/useApi";
+import { useQuery, useMutation, useDynamicMutation } from "@/hooks/useApi";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Plus, Send, Trash2, Users, UserPlus, MoreHorizontal, ShieldCheck, User, UserMinus } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 
+type PortalMember = {
+  id: number;
+  name?: string | null;
+  email?: string | null;
+  companyRole?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+
+type PortalTeam = {
+  id: number;
+  name: string;
+  description?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  memberCount?: number;
+  members?: PortalMember[];
+};
+
 export default function TeamManagement() {
   const { user: currentUser } = useAuth();
 
-  const { data: members, isLoading: membersLoading, refetch: refetchMembers } = useQuery<any[]>("/api/platform/tenants/members");
-  const { data: teams, isLoading: teamsLoading, refetch: refetchTeams } = useQuery<any[]>("/api/platform/tenants/teams");
+  const { data: members, isLoading: membersLoading, refetch: refetchMembers } = useQuery<PortalMember[]>("/api/platform/tenants/members");
+  const { data: teams, isLoading: teamsLoading, refetch: refetchTeams } = useQuery<PortalTeam[]>("/api/platform/tenants/teams");
   const { data: pendingInvites, refetch: refetchInvites } = useQuery<any[]>("/api/platform/tenants/invitations");
 
   const createTeam = useMutation<{ name: string }>("/api/platform/tenants/teams", "POST", {
@@ -33,7 +52,7 @@ export default function TeamManagement() {
   });
 
   const inviteMut = useMutation<{ email: string; role: string }>("/api/platform/tenants/invitations", "POST", {
-    onSuccess: () => { refetchInvites(); toast.success("Convite enviado"); },
+    onSuccess: () => { refetchMembers(); refetchTeams(); refetchInvites(); toast.success("Convite enviado"); },
     onError: (e) => toast.error(e.message),
   });
 
@@ -47,11 +66,22 @@ export default function TeamManagement() {
     onError: (e) => toast.error(e.message),
   });
 
+  const addTeamMemberMut = useDynamicMutation("POST", {
+    onSuccess: () => { refetchTeams(); toast.success("Membro adicionado à equipa"); },
+    onError: (e) => toast.error(e.message),
+  });
+
+  const removeTeamMemberMut = useDynamicMutation("DELETE", {
+    onSuccess: () => { refetchTeams(); toast.success("Membro removido da equipa"); },
+    onError: (e) => toast.error(e.message),
+  });
+
   const [newTeamName, setNewTeamName] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<"admin" | "member">("member");
   const [teamDialogOpen, setTeamDialogOpen] = useState(false);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
+  const [teamMemberSelection, setTeamMemberSelection] = useState<Record<number, string>>({});
 
   const canManageMembers = currentUser?.companyRole === "owner" || currentUser?.companyRole === "admin";
 
@@ -77,7 +107,7 @@ export default function TeamManagement() {
             <CardTitle className="text-lg">Membros</CardTitle>
             <CardDescription>Utilizadores com acesso à empresa</CardDescription>
           </div>
-          <Dialog open={inviteDialogOpen} onOpenChange={setInviteDialogOpen}>
+          {canManageMembers ? <Dialog open={inviteDialogOpen} onOpenChange={setInviteDialogOpen}>
             <DialogTrigger asChild>
               <Button size="sm">
                 <UserPlus className="h-4 w-4 mr-1" />
@@ -128,7 +158,7 @@ export default function TeamManagement() {
                 </Button>
               </DialogFooter>
             </DialogContent>
-          </Dialog>
+          </Dialog> : null}
         </CardHeader>
         <CardContent>
           {membersLoading ? (
@@ -156,7 +186,7 @@ export default function TeamManagement() {
                     <TableRow key={m.id}>
                       <TableCell className="font-medium">{m.name || "—"}</TableCell>
                       <TableCell>{m.email || "—"}</TableCell>
-                      <TableCell>{getRoleBadge(m.companyRole)}</TableCell>
+                      <TableCell>{getRoleBadge(m.companyRole || null)}</TableCell>
                       <TableCell className="text-muted-foreground text-sm">
                         {m.createdAt ? new Date(m.createdAt).toLocaleDateString("pt-PT") : "—"}
                       </TableCell>
@@ -267,7 +297,7 @@ export default function TeamManagement() {
             <CardTitle className="text-lg">Equipas</CardTitle>
             <CardDescription>Organize os membros em equipas para partilhar recursos</CardDescription>
           </div>
-          <Dialog open={teamDialogOpen} onOpenChange={setTeamDialogOpen}>
+          {canManageMembers ? <Dialog open={teamDialogOpen} onOpenChange={setTeamDialogOpen}>
             <DialogTrigger asChild>
               <Button size="sm" variant="outline">
                 <Plus className="h-4 w-4 mr-1" />
@@ -304,7 +334,7 @@ export default function TeamManagement() {
                 </Button>
               </DialogFooter>
             </DialogContent>
-          </Dialog>
+          </Dialog> : null}
         </CardHeader>
         <CardContent>
           {teamsLoading ? (
@@ -315,45 +345,128 @@ export default function TeamManagement() {
             <div className="space-y-3">
               {teams.map((team) => (
                 <div key={team.id} className="flex items-center justify-between p-4 rounded-lg border border-border/50 hover:bg-muted/30 transition-colors">
-                  <div className="flex items-center gap-3">
-                    <div className="h-9 w-9 rounded-lg bg-primary/10 flex items-center justify-center">
-                      <Users className="h-4 w-4 text-primary" />
+                  <div className="flex-1 space-y-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div className="h-9 w-9 rounded-lg bg-primary/10 flex items-center justify-center">
+                          <Users className="h-4 w-4 text-primary" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <p className="font-medium">{team.name}</p>
+                            <Badge variant="outline" className="text-xs">{team.memberCount ?? team.members?.length ?? 0} membros</Badge>
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            {team.createdAt ? `Criada em ${new Date(team.createdAt).toLocaleDateString("pt-PT")}` : ""}
+                          </p>
+                        </div>
+                      </div>
+                      {canManageMembers ? (
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="text-muted-foreground hover:text-destructive"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>Eliminar equipa</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                Tem a certeza que deseja eliminar a equipa <strong>{team.name}</strong>? Todos os membros serão removidos da equipa.
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                              <AlertDialogAction
+                                onClick={() => deleteTeamMut.mutateAsync(`/api/platform/tenants/teams/${team.id}`)}
+                                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                              >
+                                Eliminar
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                      ) : null}
                     </div>
-                    <div>
-                      <p className="font-medium">{team.name}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {team.createdAt ? `Criada em ${new Date(team.createdAt).toLocaleDateString("pt-PT")}` : ""}
-                      </p>
+
+                    <div className="space-y-2">
+                      <div className="text-xs font-medium uppercase tracking-[0.08em] text-muted-foreground">Membros da equipa</div>
+                      {(team.members || []).length > 0 ? (
+                        <div className="space-y-2">
+                          {(team.members || []).map((member) => (
+                            <div key={`${team.id}-${member.id}`} className="flex items-center justify-between gap-3 rounded-lg bg-muted/40 px-3 py-2">
+                              <div>
+                                <div className="text-sm font-medium">{member.name || member.email || `Membro ${member.id}`}</div>
+                                <div className="text-xs text-muted-foreground">{member.email || "Sem email"}</div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <Badge variant="secondary" className="text-xs">{member.companyRole || "member"}</Badge>
+                                {canManageMembers ? (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                                    onClick={() => removeTeamMemberMut.mutateAsync(`/api/platform/tenants/teams/${team.id}/members/${member.id}`)}
+                                  >
+                                    <UserMinus className="h-4 w-4" />
+                                  </Button>
+                                ) : null}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="rounded-lg border border-dashed border-border/60 px-3 py-4 text-sm text-muted-foreground">
+                          Nenhum membro atribuído. O Helpdesk só considera técnicos que pertençam a uma equipa no portal.
+                        </div>
+                      )}
                     </div>
+
+                    {canManageMembers ? (() => {
+                      const assignedMemberIds = new Set((team.members || []).map((member) => member.id));
+                      const availableMembers = (members || []).filter((member) => !assignedMemberIds.has(member.id));
+
+                      if (availableMembers.length === 0) {
+                        return <div className="text-xs text-muted-foreground">Todos os membros da empresa já estão atribuídos a esta equipa.</div>;
+                      }
+
+                      return (
+                        <div className="flex flex-col gap-2 sm:flex-row">
+                          <Select
+                            value={teamMemberSelection[team.id] || undefined}
+                            onValueChange={(value) => setTeamMemberSelection((prev) => ({ ...prev, [team.id]: value }))}
+                          >
+                            <SelectTrigger className="sm:flex-1">
+                              <SelectValue placeholder="Selecionar membro para adicionar" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {availableMembers.map((member) => (
+                                <SelectItem key={member.id} value={String(member.id)}>
+                                  {(member.name || member.email || `Membro ${member.id}`) + (member.email ? ` • ${member.email}` : "")}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Button
+                            size="sm"
+                            onClick={async () => {
+                              const selectedUserId = teamMemberSelection[team.id];
+                              if (!selectedUserId) return;
+                              await addTeamMemberMut.mutateAsync(`/api/platform/tenants/teams/${team.id}/members`, { userId: Number(selectedUserId) });
+                              setTeamMemberSelection((prev) => ({ ...prev, [team.id]: "" }));
+                            }}
+                            disabled={!teamMemberSelection[team.id] || addTeamMemberMut.isPending}
+                          >
+                            Adicionar membro
+                          </Button>
+                        </div>
+                      );
+                    })() : null}
                   </div>
-                  <AlertDialog>
-                    <AlertDialogTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="text-muted-foreground hover:text-destructive"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </AlertDialogTrigger>
-                    <AlertDialogContent>
-                      <AlertDialogHeader>
-                        <AlertDialogTitle>Eliminar equipa</AlertDialogTitle>
-                        <AlertDialogDescription>
-                          Tem a certeza que deseja eliminar a equipa <strong>{team.name}</strong>? Todos os membros serão removidos da equipa.
-                        </AlertDialogDescription>
-                      </AlertDialogHeader>
-                      <AlertDialogFooter>
-                        <AlertDialogCancel>Cancelar</AlertDialogCancel>
-                        <AlertDialogAction
-                          onClick={() => deleteTeamMut.mutateAsync(`/api/platform/tenants/teams/${team.id}`)}
-                          className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                        >
-                          Eliminar
-                        </AlertDialogAction>
-                      </AlertDialogFooter>
-                    </AlertDialogContent>
-                  </AlertDialog>
                 </div>
               ))}
             </div>

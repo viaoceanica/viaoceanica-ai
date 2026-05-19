@@ -22,7 +22,7 @@ class LLMResult:
 
 def _client() -> OpenAI:
     if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY não configurada")
+        raise RuntimeError("Chave do provedor de IA não configurada")
     return OpenAI(
         api_key=settings.openai_api_key,
         base_url=settings.openai_api_base,

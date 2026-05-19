@@ -28,6 +28,7 @@
 
 x-common-env: &common-env
   NODE_ENV: production
+  TZ: ${TZ:-Atlantic/Azores}
   JWT_SECRET: ${JWT_SECRET:-viao-change-me-in-production-2024}
   COOKIE_NAME: viao_session
   REDIS_URL: redis://redis:6379
@@ -40,6 +41,8 @@ services:
     ports:
       - "5434:5432"
     environment:
+      TZ: ${TZ:-Atlantic/Azores}
+      PGTZ: ${TZ:-Atlantic/Azores}
       POSTGRES_DB: viaoceanica_platform
       POSTGRES_USER: viaoceanica
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-viao_db_2024_secure}
@@ -65,6 +68,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Atlantic/Azores}
     volumes:
       - redis-data:/data
     deploy:
@@ -151,6 +156,35 @@ services:
       timeout: 5s
       retries: 3
 
+  # ─── LiteLLM Proxy ────────────────────────────────────────────────
+  litellm-proxy:
+    build:
+      context: ./services/litellm-proxy
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      PORT: "4025"
+      LOCAL_AI_BASE_URL: "http://host.docker.internal:11434"
+      LOCAL_AI_API_KEY: "ollama"
+      DEFAULT_CHAT_MODEL: "qwen2.5:14b-instruct"
+      DEFAULT_EMBEDDING_MODEL: "qwen3-embedding:8b"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:4025/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
   # ─── AI Service ────────────────────────────────────────────────────
   ai-service:
     build:
@@ -160,8 +194,8 @@ services:
     environment:
       <<: *common-env
       AI_SERVICE_PORT: "4010"
-      AI_PROVIDER_API_KEY: "02b66928fff526825f93311ceedb87ee25a83d1003b7bce9"
-      AI_PROVIDER_BASE_URL: "http://host.docker.internal:18789/v1"
+      AI_PROVIDER_API_KEY: "litellm-proxy"
+      AI_PROVIDER_BASE_URL: "http://litellm-proxy:4025/v1"
       DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
       extra_hosts:
        - "host.docker.internal:host-gateway"
@@ -169,6 +203,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      litellm-proxy:
         condition: service_healthy
     deploy:
       resources:
@@ -219,6 +255,8 @@ services:
       context: .
       dockerfile: shell/Dockerfile
     restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Atlantic/Azores}
     deploy:
       resources:
         limits:
@@ -237,6 +275,8 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Atlantic/Azores}
     volumes:
       - qdrant-data:/qdrant/storage
     deploy:
@@ -261,6 +301,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
+      TZ: ${TZ:-Atlantic/Azores}
       DATABASE_URL: postgresql+psycopg2://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_contabilidade
       QDRANT_URL: http://qdrant:6333
       OPENAI_API_KEY: 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
@@ -298,6 +339,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
+      TZ: ${TZ:-Atlantic/Azores}
       SERVER_API_BASE_URL: http://mod-contabilidade:4003
     depends_on:
       - mod-contabilidade
@@ -319,6 +361,8 @@ services:
   nginx:
     image: nginx:alpine
     restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Atlantic/Azores}
     ports:
       - "8200:80"
     volumes:

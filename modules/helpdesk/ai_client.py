@@ -9,10 +9,24 @@ from typing import Optional
 
 logger = logging.getLogger("helpdesk.ai")
 
-AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://host.docker.internal:4000/v1")
-AI_SERVICE_API_KEY = os.getenv("AI_SERVICE_API_KEY", "")
+AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://ai-service:4010")
 AI_AGENT_ID = os.getenv("AI_AGENT_ID", "helpdesk")
-AI_MODEL = os.getenv("AI_MODEL", "helpdesk-chat")
+
+
+def _parse_reply(data: dict) -> str:
+    nested = data.get("data")
+    if isinstance(nested, dict):
+        if isinstance(nested.get("reply"), str):
+            return nested["reply"]
+        choice = (nested.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+    choice = (data.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    return message.get("content", "") if isinstance(message, dict) else ""
 
 
 async def ask_assistant(
@@ -20,7 +34,7 @@ async def ask_assistant(
     session_id: str,
     agent_id: Optional[str] = None,
     context: Optional[dict] = None,
-    model: Optional[str] = None,
+    model: str = "qwen2.5:14b-instruct",
 ) -> dict:
     """
     Send a message to the module's OpenClaw AI agent.
@@ -30,13 +44,27 @@ async def ask_assistant(
         session_id: Unique session ID (typically tenant_id-user_id)
         agent_id: OpenClaw agent ID (defaults to module slug)
         context: Additional context to include in the system prompt
-        model: Model identifier (default: "openclaw" which routes through OpenClaw)
+        model: Model identifier (default: local Ollama chat model)
 
     Returns:
         dict with 'reply' (str) and 'usage' (dict)
     """
     agent = agent_id or AI_AGENT_ID
-    selected_model = model or AI_MODEL
+    headers = {
+        "Content-Type": "application/json",
+        "X-OpenClaw-Agent": agent,
+    }
+    if context:
+        headers.update(
+            {
+                "X-Viao-Tenant-Id": str(context.get("tenant_id", "")),
+                "X-Viao-User-Id": str(context.get("user_id", "")),
+                "X-Viao-Module-Key": str(context.get("module", agent)),
+            }
+        )
+        company_role = context.get("company_role")
+        if company_role:
+            headers["X-Viao-Company-Role"] = str(company_role)
 
     system_prompt = f"Estás a responder como assistente do módulo {agent}."
     if context:
@@ -45,29 +73,24 @@ async def ask_assistant(
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{AI_SERVICE_URL}/chat/completions",
+                f"{AI_SERVICE_URL}/api/v1/chat/completions",
                 json={
-                    "model": selected_model,
+                    "model": model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": message},
                     ],
                     "user": session_id,
                 },
-                headers={
-                    "Content-Type": "application/json",
-                    "X-OpenClaw-Agent": agent,
-                    **({"Authorization": f"Bearer {AI_SERVICE_API_KEY}"} if AI_SERVICE_API_KEY else {}),
-                },
+                headers=headers,
             )
             response.raise_for_status()
             data = response.json()
 
-            choice = data.get("choices", [{}])[0]
             return {
-                "reply": choice.get("message", {}).get("content", ""),
-                "usage": data.get("usage", {}),
-                "model": data.get("model", selected_model),
+                "reply": _parse_reply(data),
+                "usage": (data.get("data") or {}).get("usage", data.get("usage", {})),
+                "model": (data.get("data") or {}).get("model", data.get("model", model)),
             }
 
     except httpx.HTTPStatusError as e:

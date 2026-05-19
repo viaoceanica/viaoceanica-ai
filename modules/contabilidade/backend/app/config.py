@@ -9,15 +9,14 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg2://viacontab:viacontab@postgres:5432/viacontab"
     qdrant_url: str = "http://qdrant:6333"
+    ai_service_url: str = "http://ai-service:4010"
     openai_api_key: str = ""
-    openai_api_base: str = Field("http://host.docker.internal:4000/v1", validation_alias="OPENAI_API_BASE")
     nif_lookup_key: str = Field("", validation_alias="NIF_PT_API_KEY")
-    extraction_model: str = "contab-extract"
-    repair_model: str = "contab-repair"
-    chat_model: str = "contab-chat"
-    vision_model: str = "contab-vision"
-    embedding_model: str = "contab-embedding"
+    extraction_model: str = "qwen2.5:14b-instruct"
+    embedding_model: str = "qwen3-embedding:8b"
+    vision_model: str = "qwen2.5vl:7b"
     embedding_vector_size: int = 4096
+    ocr_languages: str = "por+eng"
     debug_learning: bool = False
     skip_db_init: bool = False
     allowed_origins: list[str] = Field(default_factory=lambda: ["*"])

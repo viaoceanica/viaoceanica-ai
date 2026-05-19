@@ -2,20 +2,21 @@ import { useLocation } from "wouter";
 import { Card, CardContent, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useQuery } from "@/hooks/useApi";
-import { Puzzle, Construction, ShieldAlert, Loader2, Receipt, BookOpen } from "lucide-react";
+import { Puzzle, Construction, ShieldAlert, Loader2, Receipt, BookOpen, Mail } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { Settings } from "lucide-react";
 
 const iconMap: Record<string, React.ElementType> = {
   contabilidade: Receipt,
   helpdesk: BookOpen,
+  email: Mail,
 };
 
 const nameMap: Record<string, string> = {
   contabilidade: "Contabilidade",
   helpdesk: "Helpdesk",
+  email: "Email",
 };
 
 /**
@@ -27,8 +28,9 @@ const nameMap: Record<string, string> = {
  * and is accessible via the nginx reverse proxy at /module/contabilidade/
  */
 const iframeModules: Record<string, string> = {
-  contabilidade: "/module/contabilidade/",
-  helpdesk: "/module/helpdesk/",
+  contabilidade: "/module/contabilidade",
+  helpdesk: "/module/helpdesk",
+  email: "/module/email",
 };
 
 export default function ModulePage() {
@@ -39,20 +41,30 @@ export default function ModulePage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const { user } = useAuth();
-  const canAdminModule = (user?.companyRole === "owner" || user?.companyRole === "admin") && (slug === "contabilidade" || slug === "helpdesk");
-  const adminTarget = `/dashboard/module/${slug}/admin`;
+  const canAdminModule = user?.companyRole === "owner" || user?.companyRole === "admin";
+  const [moduleView, setModuleView] = useState<"main" | "admin">("main");
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("view") === "admin") {
+      setModuleView("admin");
+    }
+  }, []);
 
   // Check if user has access to this module
-  const { data: activeModules, isLoading } = useQuery<any[]>("/api/platform/entitlements/modules");
+  const { data: activeModules, isLoading } = useQuery<any[]>("/api/platform/entitlements/active");
 
   const sendIframeContext = () => {
     if (iframeRef.current?.contentWindow && user) {
       iframeRef.current.contentWindow.postMessage(
         {
           type: "viao-context",
-          tenantId: user.companyId ? String(user.companyId) : "demo",
+          tenantId: user.companyId ? String(user.companyId) : "",
           userId: String(user.id),
           companyName: user.companyName || "",
+          companyRole: user.companyRole || "",
+          platformRoles: user.platformRole ? String(user.platformRole) : "",
         },
         "*"
       );
@@ -85,7 +97,7 @@ export default function ModulePage() {
     );
   }
 
-  const hasAccess = activeModules?.some((m: any) => m.moduleKey === slug && m.enabled);
+  const hasAccess = activeModules?.some((m: any) => m.moduleKey === slug);
 
   if (!hasAccess) {
     return (
@@ -119,6 +131,15 @@ export default function ModulePage() {
 
   // Check if this module has an iframe frontend
   const iframeSrc = iframeModules[slug];
+  const adminIframeModules: Record<string, string> = {
+    helpdesk: "/module/helpdesk/admin?v=20260427b",
+    email: "/module/email/admin",
+  };
+  const adminIframeSrc = adminIframeModules[slug];
+  const resolvedIframeSrcBase = moduleView === "admin" && adminIframeSrc
+    ? adminIframeSrc
+    : iframeSrc;
+  const resolvedIframeSrc = resolvedIframeSrcBase;
 
   if (iframeSrc) {
     return (
@@ -132,14 +153,21 @@ export default function ModulePage() {
             <p className="text-muted-foreground mt-0.5">Módulo de IA</p>
           </div>
           <Badge variant="default" className="ml-2">Ativo</Badge>
-          {canAdminModule && (
-            <Button variant="outline" size="sm" className="ml-auto" onClick={() => setLocation(adminTarget)}>
-              <Settings className="h-4 w-4 mr-2" /> Administração
-            </Button>
+          {canAdminModule && adminIframeSrc && (
+            <div className="ml-auto flex gap-2">
+              <Button variant="outline" size="sm" onClick={() => {
+                setIframeLoaded(false);
+                setModuleView((prev) => (prev === "admin" ? "main" : "admin"));
+                const target = document.getElementById("module-iframe-container");
+                target?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }}>
+                {moduleView === "admin" ? "Ver interface" : "Administração"}
+              </Button>
+            </div>
           )}
         </div>
 
-        <div className="relative w-full rounded-lg border bg-card overflow-hidden" style={{ minHeight: "calc(100vh - 200px)" }}>
+        <div id="module-iframe-container" className="relative w-full rounded-lg border bg-card overflow-hidden" style={{ minHeight: "calc(100vh - 200px)" }}>
           {!iframeLoaded && (
             <div className="absolute inset-0 flex items-center justify-center bg-background/80 z-10">
               <div className="flex flex-col items-center gap-3">
@@ -150,7 +178,7 @@ export default function ModulePage() {
           )}
           <iframe
             ref={iframeRef}
-            src={iframeSrc}
+            src={resolvedIframeSrc}
             className="w-full border-0"
             style={{ height: "calc(100vh - 200px)", minHeight: "600px" }}
             onLoad={() => setIframeLoaded(true)}

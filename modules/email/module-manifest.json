@@ -1,0 +1,21 @@
+{
+  "module_key": "email",
+  "name": "Email",
+  "version": "1.0.0",
+  "description": "Operação de email, campanhas e automações com apoio de IA na plataforma Via Oceânica.",
+  "route": "/module/email",
+  "frontend_mount_type": "iframe",
+  "backend_service_url": "http://mod-email:4004",
+  "health_endpoint": "/health",
+  "readiness_endpoint": "/ready",
+  "status": "active",
+  "icon": "Mail",
+  "capabilities": [
+    "ai",
+    "email",
+    "analytics"
+  ],
+  "ai_agent_id": "email",
+  "min_plan": null,
+  "tenant_restricted": false
+}
