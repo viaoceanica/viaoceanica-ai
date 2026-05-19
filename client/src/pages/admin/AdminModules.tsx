@@ -518,7 +518,7 @@ export default function AdminModules() {
           capabilities: moduleForm.capabilities,
           port: moduleForm.port,
         }),
-      });
+      }) as { base64: string; filename: string };
       // Convert base64 to blob and trigger download
       const byteChars = atob(res.base64);
       const byteNumbers = new Array(byteChars.length);
