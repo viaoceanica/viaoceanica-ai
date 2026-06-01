@@ -61,7 +61,7 @@ services:
       resources:
         limits:
           cpus: "1.0"
-          memory: 512M
+          memory: 256M
         reservations:
           cpus: "0.25"
           memory: 128M
@@ -180,6 +180,10 @@ services:
       LOCAL_AI_API_KEY: "ollama"
       DEFAULT_CHAT_MODEL: "qwen2.5:14b-instruct"
       DEFAULT_EMBEDDING_MODEL: "qwen3-embedding:8b"
+      OPENROUTER_IMAGE_MODEL: "google/gemini-2.5-flash-image-preview"
+      OPENROUTER_API_KEY: ${AI_PROVIDER_API_KEY:-}
+      OPENAI_IMAGE_MODEL: "dall-e-3"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     deploy:
@@ -207,12 +211,12 @@ services:
       AI_SERVICE_PORT: "4010"
       AI_PROVIDER_API_KEY: "litellm-proxy"
       AI_PROVIDER_BASE_URL: "http://litellm-proxy:4025/v1"
-      R2_ACCOUNT_ID: "fe5ebe6feef4f417587cad5f5557ff03"
-      R2_ACCESS_KEY_ID: "fe0b581079c9242dd889535c43ea7630"
-      R2_SECRET_ACCESS_KEY: "4631168c8f0f7a5fc4b16d11eb1b9fd4efc7a0074c117c053bb0960cc5217e36"
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
       R2_BUCKET: "viaoceanica"
-      R2_PUBLIC_URL: "https://pub-a13384e123be4d79b99448c764b9dec0.r2.dev"
-      R2_ENDPOINT: "https://fe5ebe6feef4f417587cad5f5557ff03.r2.cloudflarestorage.com"
+      R2_PUBLIC_URL: ${R2_PUBLIC_URL:-}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
       DATABASE_URL: postgresql://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_platform
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -227,7 +231,7 @@ services:
       resources:
         limits:
           cpus: "1.0"
-          memory: 512M
+          memory: 256M
         reservations:
           cpus: "0.2"
           memory: 128M
@@ -358,7 +362,7 @@ services:
       resources:
         limits:
           cpus: "0.5"
-          memory: 512M
+          memory: 256M
         reservations:
           cpus: "0.1"
           memory: 128M
@@ -379,16 +383,16 @@ services:
       TZ: ${TZ:-Atlantic/Azores}
       DATABASE_URL: postgresql+psycopg2://viaoceanica:${POSTGRES_PASSWORD:-viao_db_2024_secure}@postgres:5432/viaoceanica_contabilidade
       QDRANT_URL: http://qdrant:6333
-      OPENAI_API_KEY: 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
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       VISION_MODEL: qwen2.5vl:7b
       EMBEDDING_MODEL: qwen3-embedding:8b
       EMBEDDING_VECTOR_SIZE: "4096"
       NIF_PT_API_KEY: ${NIF_PT_API_KEY:-}
-      R2_ACCOUNT_ID: fe5ebe6feef4f417587cad5f5557ff03
-      R2_ACCESS_KEY_ID: fe0b581079c9242dd889535c43ea7630
-      R2_SECRET_ACCESS_KEY: 4631168c8f0f7a5fc4b16d11eb1b9fd4efc7a0074c117c053bb0960cc5217e36
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
       R2_BUCKET: ${R2_BUCKET:-viaoceanica}
-      R2_ENDPOINT: https://fe5ebe6feef4f417587cad5f5557ff03.r2.cloudflarestorage.com
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
       DEFAULT_TENANT_ID: "1"
     depends_on:
       postgres:
@@ -461,7 +465,7 @@ services:
       resources:
         limits:
           cpus: "0.5"
-          memory: 256M
+          memory: 768M
         reservations:
           cpus: "0.1"
           memory: 64M
@@ -487,6 +491,7 @@ services:
       AI_AGENT_ID: email
       EMAIL_CREDENTIALS_SECRET: ${EMAIL_CREDENTIALS_SECRET:-change-me-email-credentials-secret}
       EMAIL_SYNC_INTERVAL_SECONDS: ${EMAIL_SYNC_INTERVAL_SECONDS:-300}
+      EMAIL_IMAP_SYNC_BATCH_SIZE: ${EMAIL_IMAP_SYNC_BATCH_SIZE:-100}
       ALLOW_DEMO_TENANT: "false"
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -501,10 +506,10 @@ services:
       resources:
         limits:
           cpus: "0.25"
-          memory: 192M
+          memory: 1024M
         reservations:
           cpus: "0.05"
-          memory: 64M
+          memory: 128M
 
   # ─── Module: Email (Frontend) ──────────────────────────────────────
   email-frontend:

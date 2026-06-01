@@ -4,12 +4,14 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "dev": "NODE_ENV=development tsx watch server/_core/index.ts",
-    "build": "vite build && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
-    "start": "NODE_ENV=production node dist/index.js",
+    "dev": "vite --config shell/vite.config.ts --host 0.0.0.0",
+    "build": "vite build --config shell/vite.config.ts",
+    "start": "vite preview --config shell/vite.config.ts --host 0.0.0.0 --port 3001",
     "check": "tsc --noEmit",
     "format": "prettier --write .",
     "test": "vitest run",
+    "test:email-actions": "cd services/ai-service && node --test tests-emailDraftActions.test.mjs",
+    "test:regression": "npm test && npm run test:email-actions",
     "db:push": "drizzle-kit generate && drizzle-kit migrate"
   },
   "dependencies": {

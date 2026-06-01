@@ -16,6 +16,7 @@ import { createServer } from "http";
 import cors from "cors";
 import pg from "pg";
 import { randomUUID } from "crypto";
+import { buildDraftSaveConfirmation, buildDraftSavePayload, buildDraftPreviewReply, buildDraftSavedEmailAction, buildDraftSaveSystemPrompt, buildSelectedEmailContextRequiredReply, buildSelectedEmailSummaryReply, hasUsableSelectedEmailContext, parseAssistantDraftInstruction, requiresSelectedEmailContext, type DraftSavePayload } from "./emailDraftActions";
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
@@ -937,13 +938,28 @@ type EmailChatContext = {
 };
 
 const emailPendingActions: Map<string, {
+  kind?: "email_action" | "save_draft";
   action: string;
   emailIds: string[];
   targetFolder?: string;
+  draftPayload?: DraftSavePayload;
   confirmationPrompt: string;
   emailCount: number;
   createdAt: number;
 }> = new Map();
+
+type EmailQueryState = {
+  intent: "count" | "summary" | "dates" | "urgency";
+  senderQueries: string[];
+  recipientQueries: string[];
+  subjectQueries: string[];
+  keywordTerms: string[];
+  folderQuery?: string;
+  updatedAt: number;
+};
+
+const emailLastQueries: Map<string, EmailQueryState> = new Map();
+const EMAIL_QUERY_STATE_TTL_MS = 30 * 60 * 1000;
 
 function isAffirmativeConfirmation(message: string): boolean {
   const normalized = message.trim().toLowerCase();
@@ -1207,6 +1223,84 @@ function isEmailCountQuestion(message: string): boolean {
     && /(email|emails|mail|mensagem|mensagens)/.test(normalized);
 }
 
+function hasEmailDateOrScopeRefinement(message: string): boolean {
+  const normalized = normalizeEmailAssistantText(message);
+  return /\b(?:em|no ano|ano|durante|in|year)\s+(?:19|20)\d{2}\b/.test(normalized)
+    || /\b(?:19|20)\d{2}\b/.test(normalized)
+    || /\b(?:este ano|this year|ano passado|last year|hoje|today|ontem|yesterday|esta semana|this week)\b/.test(normalized)
+    || /\b(?:inbox|caixa de entrada|arquivo|archive|spam|junk|lixo|trash|sent|enviados|rascunhos|drafts)\b/.test(normalized)
+    || /\b(?:por ler|nao lido|não lido|unread|importante|important|flagged|anexos|attachments?)\b/.test(normalized);
+}
+
+function getEmailQueryState(sessionKey: string): EmailQueryState | null {
+  const state = emailLastQueries.get(sessionKey);
+  if (!state) return null;
+  if (Date.now() - state.updatedAt > EMAIL_QUERY_STATE_TTL_MS) {
+    emailLastQueries.delete(sessionKey);
+    return null;
+  }
+  return state;
+}
+
+function isEmailCountRefinementQuestion(message: string, sessionKey: string): boolean {
+  if (isEmailCountQuestion(message)) return true;
+  const state = getEmailQueryState(sessionKey);
+  return state?.intent === "count" && hasEmailDateOrScopeRefinement(message);
+}
+
+function buildEmailRefinedQuestion(message: string, sessionKey: string): string {
+  if (isEmailCountQuestion(message)) return message;
+  const state = getEmailQueryState(sessionKey);
+  if (!state || state.intent !== "count") return message;
+
+  const parts = ["Quantos emails"];
+  if (state.senderQueries.length > 0) parts.push(`de ${state.senderQueries[0]}`);
+  if (state.recipientQueries.length > 0) parts.push(`para ${state.recipientQueries[0]}`);
+  if (state.subjectQueries.length > 0) parts.push(`com assunto ${state.subjectQueries[0]}`);
+  if (state.keywordTerms.length > 0 && state.senderQueries.length === 0 && state.recipientQueries.length === 0) {
+    parts.push(`com ${state.keywordTerms.join(" ")}`);
+  }
+  if (state.folderQuery && !/\b(?:inbox|caixa de entrada|arquivo|archive|spam|junk|lixo|trash|sent|enviados|rascunhos|drafts)\b/.test(normalizeEmailAssistantText(message))) {
+    parts.push(`na ${state.folderQuery}`);
+  }
+  const baseQuestion = parts.join(" ").replace(/\s+/g, " ").trim();
+  return `${baseQuestion}, ${message}`.replace(/\s+/g, " ").trim();
+}
+
+function rememberEmailQueryState(sessionKey: string, emailContextPayload: any, intent: EmailQueryState["intent"]): void {
+  const filters = emailContextPayload?.query_scope?.filters || {};
+  const state: EmailQueryState = {
+    intent,
+    senderQueries: Array.isArray(filters.sender_queries) ? filters.sender_queries.filter(Boolean).slice(0, 3) : [],
+    recipientQueries: Array.isArray(filters.recipient_queries) ? filters.recipient_queries.filter(Boolean).slice(0, 3) : [],
+    subjectQueries: Array.isArray(filters.subject_queries) ? filters.subject_queries.filter(Boolean).slice(0, 3) : [],
+    keywordTerms: Array.isArray(filters.keyword_terms) ? filters.keyword_terms.filter(Boolean).slice(0, 4) : [],
+    folderQuery: typeof filters.folder_query === "string" && filters.folder_query ? filters.folder_query : undefined,
+    updatedAt: Date.now(),
+  };
+  const hasReusableScope = state.senderQueries.length > 0
+    || state.recipientQueries.length > 0
+    || state.subjectQueries.length > 0
+    || state.keywordTerms.length > 0
+    || Boolean(state.folderQuery);
+  if (hasReusableScope) emailLastQueries.set(sessionKey, state);
+}
+
+function formatEmailDateScope(filters: any, language: "pt-PT" | "en"): string {
+  const after = typeof filters?.received_after === "string" ? filters.received_after.slice(0, 10) : "";
+  const before = typeof filters?.received_before === "string" ? filters.received_before.slice(0, 10) : "";
+  if (!after && !before) return "";
+
+  const afterYear = after.match(/^(\d{4})-01-01$/)?.[1];
+  const beforeYear = before.match(/^(\d{4})-01-01$/)?.[1];
+  if (afterYear && beforeYear && Number(beforeYear) === Number(afterYear) + 1) {
+    return language === "en" ? ` in ${afterYear}` : ` em ${afterYear}`;
+  }
+  if (after && before) return language === "en" ? ` between ${after} and ${before}` : ` entre ${after} e ${before}`;
+  if (after) return language === "en" ? ` since ${after}` : ` desde ${after}`;
+  return language === "en" ? ` before ${before}` : ` antes de ${before}`;
+}
+
 function getRequestedEmailWindow(message: string, fallback = 12, maximum = 50): number {
   const normalized = normalizeEmailAssistantText(message);
   const explicitMatch = normalized.match(/\b(?:last|latest|recent|recentes|ultimos|últimos|ultimas|últimas)\s+(\d{1,2})\s+(?:emails?|mails?|mensagens?)\b/)
@@ -1332,14 +1426,16 @@ function buildEmailCountFallbackReply(emailContextPayload: any, message: string)
   const language = inferEmailAssistantReplyLanguage(message);
   const senderMatches = Array.isArray(emailContextPayload?.sender_matches) ? emailContextPayload.sender_matches : [];
   const recipientMatches = Array.isArray(emailContextPayload?.recipient_matches) ? emailContextPayload.recipient_matches : [];
+  const filters = emailContextPayload?.query_scope?.filters || {};
+  const dateScope = formatEmailDateScope(filters, language);
 
   if (senderMatches.length > 0) {
     const primary = senderMatches[0] || {};
     const total = Number(primary?.total || 0);
     const query = primary?.query || (language === "en" ? "the requested sender" : "o remetente indicado");
     return language === "en"
-      ? `You have ${total} email(s) from ${query}.`
-      : `Tens ${total} email(s) de ${query}.`;
+      ? `You have ${total} email(s) from ${query}${dateScope}.`
+      : `Tens ${total} email(s) de ${query}${dateScope}.`;
   }
 
   if (recipientMatches.length > 0) {
@@ -1347,15 +1443,38 @@ function buildEmailCountFallbackReply(emailContextPayload: any, message: string)
     const total = Number(primary?.total || 0);
     const query = primary?.query || (language === "en" ? "the requested recipient" : "o destinatário indicado");
     return language === "en"
-      ? `You have ${total} email(s) for ${query}.`
-      : `Tens ${total} email(s) para ${query}.`;
+      ? `You have ${total} email(s) for ${query}${dateScope}.`
+      : `Tens ${total} email(s) para ${query}${dateScope}.`;
   }
 
   const scopedTotal = Number(emailContextPayload?.query_scope?.total);
   if (Number.isFinite(scopedTotal)) {
+    const folderQuery = String(filters?.folder_query || "").toLowerCase();
+    const keywordTerms = Array.isArray(filters?.keyword_terms) ? filters.keyword_terms.filter(Boolean) : [];
+    const senderQueries = Array.isArray(filters?.sender_queries) ? filters.sender_queries : [];
+    const recipientQueries = Array.isArray(filters?.recipient_queries) ? filters.recipient_queries : [];
+    const subjectQueries = Array.isArray(filters?.subject_queries) ? filters.subject_queries : [];
+    const hasOnlyKeywordScope = keywordTerms.length > 0
+      && !folderQuery
+      && senderQueries.length === 0
+      && recipientQueries.length === 0
+      && subjectQueries.length === 0;
+
+    if (folderQuery === "inbox") {
+      return language === "en"
+        ? `You have ${scopedTotal} email(s) in the Inbox${dateScope}.`
+        : `Tens ${scopedTotal} email(s) na Caixa de entrada${dateScope}.`;
+    }
+
+    if (hasOnlyKeywordScope) {
+      return language === "en"
+        ? `You have ${scopedTotal} email(s) containing that term${dateScope}.`
+        : `Tens ${scopedTotal} email(s) com esse termo${dateScope}.`;
+    }
+
     return language === "en"
-      ? `You have ${scopedTotal} email(s) matching that criterion.`
-      : `Tens ${scopedTotal} email(s) para esse critério.`;
+      ? `You have ${scopedTotal} email(s) matching that criterion${dateScope}.`
+      : `Tens ${scopedTotal} email(s) para esse critério${dateScope}.`;
   }
 
   return null;
@@ -1663,7 +1782,7 @@ async function buildEmailRuntimeContext(ctx: TenantContext, message: string, ema
     const summary = payload?.summary || {};
     const mailboxes = Array.isArray(payload?.mailboxes) ? payload.mailboxes : [];
     const recentEmails = Array.isArray(payload?.recent_emails) ? payload.recent_emails : [];
-    const selectedEmail = payload?.selected_email || null;
+    const selectedEmail = payload?.selected_email || emailContext?.selectedEmail || null;
     const selectedEmails = Array.isArray(payload?.selected_emails) ? payload.selected_emails : [];
     const senderMatches = Array.isArray(payload?.sender_matches) ? payload.sender_matches : [];
     const recipientMatches = Array.isArray(payload?.recipient_matches) ? payload.recipient_matches : [];
@@ -1725,7 +1844,17 @@ async function buildEmailRuntimeContext(ctx: TenantContext, message: string, ema
       lines.push(`- formato=${draftReplyPreferences.format}`);
       lines.push(`- incluir_assunto=${draftReplyPreferences.includeSubject ? "sim" : "nao"}`);
       lines.push(`- resposta_direta=${draftReplyPreferences.directDraftOnly ? "sim" : "nao"}`);
-      lines.push("- instrucao=Se o utilizador pediu um rascunho, devolve o texto final pronto a enviar e evita comentários introdutórios desnecessários.");
+      lines.push(buildDraftSaveSystemPrompt(selectedEmail ? {
+        subject: selectedEmail.subject,
+        from: selectedEmail.from,
+        fromAddress: selectedEmail.from_address || selectedEmail.fromAddress,
+        toAddresses: selectedEmail.to_addresses || selectedEmail.toAddresses,
+        receivedAt: selectedEmail.received_at || selectedEmail.receivedAt,
+        folder: selectedEmail.folder,
+        snippet: selectedEmail.snippet,
+        bodyPreview: selectedEmail.body_preview || selectedEmail.bodyPreview,
+        hasAttachments: selectedEmail.has_attachments ?? selectedEmail.hasAttachments,
+      } : null));
     }
 
     if (senderMatches.length > 0) {
@@ -1852,6 +1981,65 @@ async function previewEmailAssistantAction(ctx: TenantContext, message: string, 
     console.warn("[AI Service] Failed to preview email assistant action:", err);
     return null;
   }
+}
+
+async function saveEmailAssistantDraft(ctx: TenantContext, payload: DraftSavePayload): Promise<any> {
+  const response = await fetch(`${EMAIL_MODULE_URL}/api/v1/mailboxes/${encodeURIComponent(payload.mailboxId)}/save-draft`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-viao-user-id": String(ctx.userId),
+      "x-viao-tenant-id": String(ctx.tenantId),
+      "x-viao-request-id": `${ctx.requestId}-email-save-draft`,
+    },
+    body: JSON.stringify({
+      to: payload.to,
+      cc: payload.cc,
+      bcc: payload.bcc,
+      subject: payload.subject,
+      body_text: payload.body_text,
+      body_html: payload.body_html,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Email save draft endpoint failed with ${response.status}: ${errorText}`);
+  }
+
+  const body = await response.json() as any;
+  return body?.data || {};
+}
+
+function buildEmailDraftSavedReply(result: any, payload: DraftSavePayload): string {
+  const idLine = result?.id ? `ID: ${result.id}` : null;
+  const folderLine = `Pasta: ${result?.folder || "INBOX.Drafts"}`;
+  return [
+    "Concluído. Guardei o rascunho em Drafts.",
+    `Para: ${payload.to}`,
+    `Assunto: ${payload.subject}`,
+    folderLine,
+    idLine,
+    "Podes abrir a pasta Drafts/Rascunhos para rever, editar ou enviar.",
+  ].filter(Boolean).join("\n");
+}
+
+function maybeBuildPendingDraftSave(
+  emailContext: EmailChatContext | null | undefined,
+  draftText: string,
+  message: string,
+): { payload: DraftSavePayload; confirmationPrompt: string } | null {
+  const instruction = parseAssistantDraftInstruction(message);
+  if (!instruction.requested || !instruction.shouldSaveDraft) return null;
+  const payload = buildDraftSavePayload({
+    mailboxId: emailContext?.selectedMailboxId,
+    selectedEmail: emailContext?.selectedEmail || null,
+    draftText,
+  });
+  return {
+    payload,
+    confirmationPrompt: buildDraftSaveConfirmation(payload),
+  };
 }
 
 async function executeEmailAssistantAction(ctx: TenantContext, pendingAction: {
@@ -2033,6 +2221,45 @@ app.post("/api/v1/agent/chat", async (req, res) => {
   const agentId = AGENT_MAP[effectiveModule] || "platform";
   const sessionKey = getSessionKey(ctx.tenantId, ctx.userId, effectiveModule);
   const requestText = message.trim();
+
+  const selectedEmailContextRequired = effectiveModule === "email" && requiresSelectedEmailContext(message);
+  const hasSelectedEmailContext = hasUsableSelectedEmailContext(emailContext);
+
+  if (selectedEmailContextRequired && !hasSelectedEmailContext) {
+    return res.json({
+      success: true,
+      data: {
+        reply: buildSelectedEmailContextRequiredReply(),
+        agent: agentId,
+        module: effectiveModule,
+        model: "local-context-required",
+        usage: {
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+          estimated_cost_usd: 0,
+        },
+      },
+    });
+  }
+
+  if (selectedEmailContextRequired && hasSelectedEmailContext && isEmailSummaryQuestion(message)) {
+    return res.json({
+      success: true,
+      data: {
+        reply: buildSelectedEmailSummaryReply(emailContext),
+        agent: agentId,
+        module: effectiveModule,
+        model: "local-selected-email-summary",
+        usage: {
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+          estimated_cost_usd: 0,
+        },
+      },
+    });
+  }
   const logAssistantEvent = async (event: {
     provider: string;
     model: string;
@@ -2086,6 +2313,7 @@ app.post("/api/v1/agent/chat", async (req, res) => {
   if (clearHistory) {
     agentSessions.delete(sessionKey);
     emailPendingActions.delete(sessionKey);
+    emailLastQueries.delete(sessionKey);
   }
 
   if (effectiveModule === "email") {
@@ -2094,9 +2322,18 @@ app.post("/api/v1/agent/chat", async (req, res) => {
     if (pendingAction) {
       if (isAffirmativeConfirmation(message)) {
         try {
-          const execution = await executeEmailAssistantAction(ctx, pendingAction);
+          let reply: string;
+          let emailAction: any = null;
+          if (pendingAction.kind === "save_draft") {
+            if (!pendingAction.draftPayload) throw new Error("A ação pendente não contém o rascunho a guardar.");
+            const execution = await saveEmailAssistantDraft(ctx, pendingAction.draftPayload);
+            reply = buildEmailDraftSavedReply(execution, pendingAction.draftPayload);
+            emailAction = buildDraftSavedEmailAction(execution, pendingAction.draftPayload);
+          } else {
+            const execution = await executeEmailAssistantAction(ctx, pendingAction);
+            reply = buildEmailActionExecutionReply(execution);
+          }
           emailPendingActions.delete(sessionKey);
-          const reply = buildEmailActionExecutionReply(execution);
           appendToSession(sessionKey, [
             { role: "user", content: message },
             { role: "assistant", content: reply },
@@ -2191,10 +2428,12 @@ app.post("/api/v1/agent/chat", async (req, res) => {
       });
     }
 
-    const shouldBypassActionPreview = isEmailCountQuestion(message)
+    const shouldBypassActionPreview = !selectedEmailContextRequired && (
+      isEmailCountRefinementQuestion(message, sessionKey)
       || isEmailUrgencyQuestion(message)
       || isEmailSummaryQuestion(message)
-      || isEmailDatesQuestion(message);
+      || isEmailDatesQuestion(message)
+    );
 
     if (!shouldBypassActionPreview) {
       const actionPreview = await previewEmailAssistantAction(ctx, message, emailContext);
@@ -2218,6 +2457,7 @@ app.post("/api/v1/agent/chat", async (req, res) => {
         }
 
         emailPendingActions.set(sessionKey, {
+          kind: "email_action",
           action: actionPreview.action,
           emailIds: Array.isArray(actionPreview.email_ids) ? actionPreview.email_ids : [],
           targetFolder: actionPreview.target_folder || undefined,
@@ -2251,15 +2491,19 @@ app.post("/api/v1/agent/chat", async (req, res) => {
   }
 
   if (effectiveModule === "email") {
-    const shouldUseDeterministicReply = isEmailCountQuestion(message)
+    const isCountIntent = isEmailCountRefinementQuestion(message, sessionKey);
+    const contextQuestion = isCountIntent ? buildEmailRefinedQuestion(message, sessionKey) : message;
+    const shouldUseDeterministicReply = !selectedEmailContextRequired && (
+      isCountIntent
       || isEmailUrgencyQuestion(message)
       || isEmailSummaryQuestion(message)
-      || isEmailDatesQuestion(message);
+      || isEmailDatesQuestion(message)
+    );
 
     if (shouldUseDeterministicReply) {
-      const contextPayload = await fetchEmailAssistantContextPayload(ctx, message, emailContext);
-      const countReply = contextPayload && isEmailCountQuestion(message)
-        ? buildEmailCountFallbackReply(contextPayload, message)
+      const contextPayload = await fetchEmailAssistantContextPayload(ctx, contextQuestion, emailContext);
+      const countReply = contextPayload && isCountIntent
+        ? buildEmailCountFallbackReply(contextPayload, contextQuestion)
         : null;
       const urgencyReply = contextPayload && isEmailUrgencyQuestion(message)
         ? buildEmailUrgencyFallbackReply(contextPayload, message)
@@ -2273,6 +2517,13 @@ app.post("/api/v1/agent/chat", async (req, res) => {
       const fallbackReply = countReply || urgencyReply || summaryReply || datesReply;
 
       if (fallbackReply) {
+        if (contextPayload) {
+          rememberEmailQueryState(
+            sessionKey,
+            contextPayload,
+            countReply ? "count" : urgencyReply ? "urgency" : summaryReply ? "summary" : "dates"
+          );
+        }
         appendToSession(sessionKey, [
           { role: "user", content: message },
           { role: "assistant", content: fallbackReply },
@@ -2396,6 +2647,41 @@ app.post("/api/v1/agent/chat", async (req, res) => {
       durationMs,
     });
 
+    if (effectiveModule === "email" && draftReplyPreferences?.requested) {
+      try {
+        const pendingDraft = maybeBuildPendingDraftSave(emailContext, cleanReply, message);
+        if (pendingDraft) {
+          emailPendingActions.set(sessionKey, {
+            kind: "save_draft",
+            action: "save_draft",
+            emailIds: [],
+            draftPayload: pendingDraft.payload,
+            confirmationPrompt: pendingDraft.confirmationPrompt,
+            emailCount: 1,
+            createdAt: Date.now(),
+          });
+          return res.json({
+            success: true,
+            data: {
+              reply: buildDraftPreviewReply(pendingDraft.payload),
+              agent: agentId,
+              module: effectiveModule,
+              model: actualModel,
+              files: files.length > 0 ? files : undefined,
+              usage: {
+                prompt_tokens: usage.prompt_tokens,
+                completion_tokens: usage.completion_tokens,
+                total_tokens: usage.total_tokens,
+                estimated_cost_usd: cost,
+              },
+            },
+          });
+        }
+      } catch (draftError: any) {
+        console.warn("[AI Service] Failed to prepare email draft save:", draftError?.message || draftError);
+      }
+    }
+
     return res.json({
       success: true,
       data: {
@@ -2416,16 +2702,34 @@ app.post("/api/v1/agent/chat", async (req, res) => {
     if (effectiveModule === "email" && isAbortLikeError(error)) {
       if (draftReplyPreferences?.requested) {
         const fallbackReply = buildEmailDraftFallbackReply(emailContext, draftReplyPreferences);
+        let reply = fallbackReply;
+        try {
+          const pendingDraft = maybeBuildPendingDraftSave(emailContext, fallbackReply, message);
+          if (pendingDraft) {
+            emailPendingActions.set(sessionKey, {
+              kind: "save_draft",
+              action: "save_draft",
+              emailIds: [],
+              draftPayload: pendingDraft.payload,
+              confirmationPrompt: pendingDraft.confirmationPrompt,
+              emailCount: 1,
+              createdAt: Date.now(),
+            });
+            reply = buildDraftPreviewReply(pendingDraft.payload);
+          }
+        } catch (draftError: any) {
+          console.warn("[AI Service] Failed to prepare fallback email draft save:", draftError?.message || draftError);
+        }
 
         appendToSession(sessionKey, [
           { role: "user", content: message },
-          { role: "assistant", content: fallbackReply },
+          { role: "assistant", content: reply },
         ]);
 
         return res.json({
           success: true,
           data: {
-            reply: fallbackReply,
+            reply,
             agent: agentId,
             module: effectiveModule,
             model: "local-draft-fallback",
@@ -2439,9 +2743,10 @@ app.post("/api/v1/agent/chat", async (req, res) => {
         });
       }
 
-      if (isEmailCountQuestion(message)) {
-        const contextPayload = await fetchEmailAssistantContextPayload(ctx, message, emailContext);
-        const fallbackReply = contextPayload ? buildEmailCountFallbackReply(contextPayload, message) : null;
+      if (isEmailCountRefinementQuestion(message, sessionKey)) {
+        const contextQuestion = buildEmailRefinedQuestion(message, sessionKey);
+        const contextPayload = await fetchEmailAssistantContextPayload(ctx, contextQuestion, emailContext);
+        const fallbackReply = contextPayload ? buildEmailCountFallbackReply(contextPayload, contextQuestion) : null;
 
         if (fallbackReply) {
           appendToSession(sessionKey, [

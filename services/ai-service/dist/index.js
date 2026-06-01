@@ -4,6 +4,164 @@ import { createServer } from "http";
 import cors from "cors";
 import pg from "pg";
 import { randomUUID } from "crypto";
+
+// src/emailDraftActions.ts
+function hasUsableSelectedEmailContext(context) {
+  if (!context) return false;
+  const selectedEmailId = String(context.selectedEmailId || context.selectedEmail?.id || "").trim();
+  if (selectedEmailId) return true;
+  return Array.isArray(context.selectedEmailIds) && context.selectedEmailIds.some((id) => String(id || "").trim().length > 0);
+}
+function requiresSelectedEmailContext(message) {
+  const normalized = normalizeText(message || "");
+  if (!normalized) return false;
+  const mentionsEmail = /\b(?:email|emails|mail|mails|mensagem|mensagens|isto|isso)\b/.test(normalized);
+  const deicticReference = /\b(?:este|esta|estes|estas|esse|essa|esses|essas|isto|isso|aberto|aberta|selecionado|selecionada|selecionados|selecionadas|selected|open|this|these)\b/.test(normalized);
+  const selectedIntent = /\b(?:resume|resumir|sumariza|summari[sz]e|rascunh\w*|responde\w*|reply|arquiv\w*|apaga\w*|delete|marca\w*|move|mover|sinaliza\w*|importante|lido|unread|read|encaminh\w*|forward)\b/.test(normalized);
+  const broadInventoryQuestion = /\b(?:quantos|quantas|count|how many|numero|lista|listar|todos|todas|inbox|caixa de entrada|recebidos)\b/.test(normalized);
+  return mentionsEmail && deicticReference && selectedIntent && !broadInventoryQuestion;
+}
+function buildSelectedEmailSummaryReply(context) {
+  const email = context?.selectedEmail || null;
+  const count = Array.isArray(context?.selectedEmailIds) ? context.selectedEmailIds.filter((id) => String(id || "").trim()).length : 0;
+  if (!email && count > 1) {
+    return `Tens ${count} emails selecionados. Abre um deles ou pede "resume os emails selecionados" para resumir o conjunto.`;
+  }
+  const subject = String(email?.subject || "(Sem assunto)").trim();
+  const from = String(email?.from || email?.fromAddress || "Remetente desconhecido").trim();
+  const folder = String(email?.folder || "").trim();
+  const receivedAt = String(email?.receivedAt || "").trim();
+  const body = String(email?.bodyPreview || email?.snippet || "").replace(/\s+/g, " ").trim();
+  const summary = body ? body.slice(0, 900) : "O contexto recebido identifica o email selecionado, mas ainda n\xE3o inclui o corpo/resumo carregado.";
+  return [
+    `Resumo do email selecionado: ${subject}`,
+    `De: ${from}`,
+    receivedAt ? `Data: ${receivedAt}` : null,
+    folder ? `Pasta: ${folder}` : null,
+    "",
+    summary
+  ].filter((line) => line !== null).join("\n");
+}
+function buildSelectedEmailContextRequiredReply() {
+  return [
+    "N\xE3o tenho nenhum email aberto ou selecionado como contexto neste momento.",
+    'Abre ou seleciona o email no m\xF3dulo Email e volta a pedir, por exemplo: "resume este email" ou "rascunha uma resposta a este email".'
+  ].join("\n");
+}
+function normalizeText(value) {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+function parseAssistantDraftInstruction(message) {
+  const normalized = normalizeText(message || "");
+  const requested = /\b(?:rascunh\w*|draft(?:ing)?|responde\s+a|reply\s+to|resposta\s+a|reply|responder\s+a|cria(?:r)?\s+(?:um\s+)?email|create\s+(?:an?\s+)?email)\b/.test(normalized) && /(email|mail|mensagem|isto|este|esta|resposta|reply|rascunho|draft)/.test(normalized);
+  const shouldSaveDraft = /\b(?:guardar|guarda|salvar|salva|save|criar|cria|create|gravar|grava)\b/.test(normalized) && /\b(?:rascunho|draft)\b/.test(normalized);
+  const kind = /\b(?:novo\s+email|new\s+email|cria(?:r)?\s+(?:um\s+)?email|create\s+(?:an?\s+)?email)\b/.test(normalized) && !/\b(?:resposta|reply|responder)\b/.test(normalized) ? "new" : "reply";
+  return { requested, shouldSaveDraft, kind };
+}
+function escapeHtml(value) {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function textToHtml(value) {
+  return escapeHtml(value).split(/\n{2,}/).map((paragraph) => `<p>${paragraph.replace(/\n/g, "<br>")}</p>`).join("");
+}
+function stripSubjectPrefix(value) {
+  return value.replace(/^\s*(?:assunto|subject|asunto)\s*:\s*/i, "").trim();
+}
+function sanitizeDraftBody(body) {
+  const withoutGenericPlaceholderLines = String(body || "").replace(/\r\n/g, "\n").split("\n").filter((line) => !/^\s*\[[^\]\n]{1,80}\]\s*$/.test(line)).join("\n");
+  return withoutGenericPlaceholderLines.replace(/\n{3,}/g, "\n\n").trim();
+}
+function splitDraftSubjectAndBody(draftText, fallbackSubject) {
+  const text = String(draftText || "").replace(/\r\n/g, "\n").trim();
+  const lines = text.split("\n");
+  const subjectLineIndex = lines.findIndex((line, index) => index <= 5 && /^\s*(?:assunto|subject|asunto)\s*:/i.test(line));
+  if (subjectLineIndex >= 0) {
+    const subject = stripSubjectPrefix(lines[subjectLineIndex] || "") || fallbackSubject;
+    const body = sanitizeDraftBody(lines.slice(subjectLineIndex + 1).join("\n").trim() || text);
+    return { subject, body };
+  }
+  return { subject: fallbackSubject, body: sanitizeDraftBody(text) };
+}
+function buildReplySubject(subject) {
+  const clean = (subject || "").trim() || "(Sem assunto)";
+  return /^re\s*:/i.test(clean) ? clean : `Re: ${clean}`;
+}
+function extractEmailAddress(value) {
+  const text = (value || "").trim();
+  const angleMatch = text.match(/<([^<>\s]+@[^<>\s]+)>/);
+  if (angleMatch) return angleMatch[1].trim();
+  const plainMatch = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return plainMatch ? plainMatch[0].trim() : "";
+}
+function buildDraftSavePayload(input) {
+  const mailboxId = (input.mailboxId || "").trim();
+  if (!mailboxId) throw new Error("\xC9 preciso selecionar uma mailbox antes de guardar o rascunho.");
+  const fallbackSubject = input.explicitSubject?.trim() || buildReplySubject(input.selectedEmail?.subject);
+  const { subject, body } = splitDraftSubjectAndBody(input.draftText, fallbackSubject);
+  const to = input.explicitTo?.trim() || extractEmailAddress(input.selectedEmail?.fromAddress) || extractEmailAddress(input.selectedEmail?.from) || "";
+  if (!to) throw new Error("N\xE3o consegui identificar o destinat\xE1rio do rascunho.");
+  if (!body.trim()) throw new Error("O rascunho gerado est\xE1 vazio.");
+  return {
+    mailboxId,
+    to,
+    cc: "",
+    bcc: "",
+    subject: subject.slice(0, 512),
+    body_text: body,
+    body_html: textToHtml(body)
+  };
+}
+function buildDraftSaveConfirmation(payload) {
+  return [
+    "Preparei um rascunho para guardar na mailbox.",
+    `Para: ${payload.to}`,
+    `Assunto: ${payload.subject}`,
+    "",
+    'Responde "confirmar" para guardar o rascunho ou "cancelar" para abortar.'
+  ].join("\n");
+}
+function buildDraftPreviewReply(payload) {
+  return [
+    `Assunto: ${payload.subject}`,
+    "",
+    payload.body_text.trim(),
+    "",
+    buildDraftSaveConfirmation(payload)
+  ].filter((part) => String(part || "").trim().length > 0).join("\n");
+}
+function buildDraftSavedEmailAction(result, payload) {
+  return {
+    type: "draft_saved",
+    draftId: String(result?.id || ""),
+    mailboxId: payload.mailboxId,
+    folder: String(result?.folder || "INBOX.Drafts"),
+    subject: payload.subject,
+    to: payload.to
+  };
+}
+function buildDraftSaveSystemPrompt(selectedEmail) {
+  const lines = [
+    "INSTRU\xC7\xD5ES_RASCUNHO_EMAIL:",
+    "- Escreve apenas o rascunho final pronto a enviar, sem introdu\xE7\xF5es, sem coment\xE1rios e sem placeholders gen\xE9ricos se houver contexto suficiente.",
+    "- Usa portugu\xEAs profissional de Portugal por defeito.",
+    '- Come\xE7a com uma linha "Assunto: ..." seguida de uma linha em branco e depois o corpo do email.',
+    "- Baseia a resposta estritamente no email selecionado e no pedido do utilizador."
+  ];
+  if (selectedEmail) {
+    lines.push("EMAIL_SELECIONADO_FORNECIDO_PELO_UI:");
+    lines.push(`- de=${selectedEmail.from || selectedEmail.fromAddress || "Remetente desconhecido"}`);
+    lines.push(`- para=${selectedEmail.toAddresses || "\u2014"}`);
+    lines.push(`- assunto=${selectedEmail.subject || "(Sem assunto)"}`);
+    lines.push(`- pasta=${selectedEmail.folder || "INBOX"}`);
+    lines.push(`- data=${selectedEmail.receivedAt || "sem_data"}`);
+    lines.push(`- anexos=${selectedEmail.hasAttachments ? "sim" : "nao"}`);
+    if (selectedEmail.snippet) lines.push(`- resumo=${selectedEmail.snippet}`);
+    if (selectedEmail.bodyPreview) lines.push(`- corpo=${selectedEmail.bodyPreview}`);
+  }
+  return lines.join("\n");
+}
+
+// src/index.ts
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 var PORT = parseInt(process.env.AI_SERVICE_PORT || "4010");
@@ -770,6 +928,8 @@ var AGENT_MAP = {
 var agentSessions = /* @__PURE__ */ new Map();
 var MAX_HISTORY = 20;
 var emailPendingActions = /* @__PURE__ */ new Map();
+var emailLastQueries = /* @__PURE__ */ new Map();
+var EMAIL_QUERY_STATE_TTL_MS = 30 * 60 * 1e3;
 function isAffirmativeConfirmation(message) {
   const normalized = message.trim().toLowerCase();
   return ["confirmar", "confirm", "sim", "yes", "ok", "okay", "proceed", "avanca", "avan\xE7ar"].includes(normalized);
@@ -1003,6 +1163,68 @@ function isEmailCountQuestion(message) {
   const normalized = normalizeEmailAssistantText(message);
   return /(quantos|quantas|count|how many|numero)/.test(normalized) && /(email|emails|mail|mensagem|mensagens)/.test(normalized);
 }
+function hasEmailDateOrScopeRefinement(message) {
+  const normalized = normalizeEmailAssistantText(message);
+  return /\b(?:em|no ano|ano|durante|in|year)\s+(?:19|20)\d{2}\b/.test(normalized) || /\b(?:19|20)\d{2}\b/.test(normalized) || /\b(?:este ano|this year|ano passado|last year|hoje|today|ontem|yesterday|esta semana|this week)\b/.test(normalized) || /\b(?:inbox|caixa de entrada|arquivo|archive|spam|junk|lixo|trash|sent|enviados|rascunhos|drafts)\b/.test(normalized) || /\b(?:por ler|nao lido|não lido|unread|importante|important|flagged|anexos|attachments?)\b/.test(normalized);
+}
+function getEmailQueryState(sessionKey) {
+  const state = emailLastQueries.get(sessionKey);
+  if (!state) return null;
+  if (Date.now() - state.updatedAt > EMAIL_QUERY_STATE_TTL_MS) {
+    emailLastQueries.delete(sessionKey);
+    return null;
+  }
+  return state;
+}
+function isEmailCountRefinementQuestion(message, sessionKey) {
+  if (isEmailCountQuestion(message)) return true;
+  const state = getEmailQueryState(sessionKey);
+  return state?.intent === "count" && hasEmailDateOrScopeRefinement(message);
+}
+function buildEmailRefinedQuestion(message, sessionKey) {
+  if (isEmailCountQuestion(message)) return message;
+  const state = getEmailQueryState(sessionKey);
+  if (!state || state.intent !== "count") return message;
+  const parts = ["Quantos emails"];
+  if (state.senderQueries.length > 0) parts.push(`de ${state.senderQueries[0]}`);
+  if (state.recipientQueries.length > 0) parts.push(`para ${state.recipientQueries[0]}`);
+  if (state.subjectQueries.length > 0) parts.push(`com assunto ${state.subjectQueries[0]}`);
+  if (state.keywordTerms.length > 0 && state.senderQueries.length === 0 && state.recipientQueries.length === 0) {
+    parts.push(`com ${state.keywordTerms.join(" ")}`);
+  }
+  if (state.folderQuery && !/\b(?:inbox|caixa de entrada|arquivo|archive|spam|junk|lixo|trash|sent|enviados|rascunhos|drafts)\b/.test(normalizeEmailAssistantText(message))) {
+    parts.push(`na ${state.folderQuery}`);
+  }
+  const baseQuestion = parts.join(" ").replace(/\s+/g, " ").trim();
+  return `${baseQuestion}, ${message}`.replace(/\s+/g, " ").trim();
+}
+function rememberEmailQueryState(sessionKey, emailContextPayload, intent) {
+  const filters = emailContextPayload?.query_scope?.filters || {};
+  const state = {
+    intent,
+    senderQueries: Array.isArray(filters.sender_queries) ? filters.sender_queries.filter(Boolean).slice(0, 3) : [],
+    recipientQueries: Array.isArray(filters.recipient_queries) ? filters.recipient_queries.filter(Boolean).slice(0, 3) : [],
+    subjectQueries: Array.isArray(filters.subject_queries) ? filters.subject_queries.filter(Boolean).slice(0, 3) : [],
+    keywordTerms: Array.isArray(filters.keyword_terms) ? filters.keyword_terms.filter(Boolean).slice(0, 4) : [],
+    folderQuery: typeof filters.folder_query === "string" && filters.folder_query ? filters.folder_query : void 0,
+    updatedAt: Date.now()
+  };
+  const hasReusableScope = state.senderQueries.length > 0 || state.recipientQueries.length > 0 || state.subjectQueries.length > 0 || state.keywordTerms.length > 0 || Boolean(state.folderQuery);
+  if (hasReusableScope) emailLastQueries.set(sessionKey, state);
+}
+function formatEmailDateScope(filters, language) {
+  const after = typeof filters?.received_after === "string" ? filters.received_after.slice(0, 10) : "";
+  const before = typeof filters?.received_before === "string" ? filters.received_before.slice(0, 10) : "";
+  if (!after && !before) return "";
+  const afterYear = after.match(/^(\d{4})-01-01$/)?.[1];
+  const beforeYear = before.match(/^(\d{4})-01-01$/)?.[1];
+  if (afterYear && beforeYear && Number(beforeYear) === Number(afterYear) + 1) {
+    return language === "en" ? ` in ${afterYear}` : ` em ${afterYear}`;
+  }
+  if (after && before) return language === "en" ? ` between ${after} and ${before}` : ` entre ${after} e ${before}`;
+  if (after) return language === "en" ? ` since ${after}` : ` desde ${after}`;
+  return language === "en" ? ` before ${before}` : ` antes de ${before}`;
+}
 function getRequestedEmailWindow(message, fallback = 12, maximum = 50) {
   const normalized = normalizeEmailAssistantText(message);
   const explicitMatch = normalized.match(/\b(?:last|latest|recent|recentes|ultimos|últimos|ultimas|últimas)\s+(\d{1,2})\s+(?:emails?|mails?|mensagens?)\b/) || normalized.match(/\b(?:emails?|mails?|mensagens?)\s+(\d{1,2})\b/) || normalized.match(/\b(\d{1,2})\s+(?:emails?|mails?|mensagens?)\b/);
@@ -1101,21 +1323,35 @@ function buildEmailCountFallbackReply(emailContextPayload, message) {
   const language = inferEmailAssistantReplyLanguage(message);
   const senderMatches = Array.isArray(emailContextPayload?.sender_matches) ? emailContextPayload.sender_matches : [];
   const recipientMatches = Array.isArray(emailContextPayload?.recipient_matches) ? emailContextPayload.recipient_matches : [];
+  const filters = emailContextPayload?.query_scope?.filters || {};
+  const dateScope = formatEmailDateScope(filters, language);
   if (senderMatches.length > 0) {
     const primary = senderMatches[0] || {};
     const total = Number(primary?.total || 0);
     const query = primary?.query || (language === "en" ? "the requested sender" : "o remetente indicado");
-    return language === "en" ? `You have ${total} email(s) from ${query}.` : `Tens ${total} email(s) de ${query}.`;
+    return language === "en" ? `You have ${total} email(s) from ${query}${dateScope}.` : `Tens ${total} email(s) de ${query}${dateScope}.`;
   }
   if (recipientMatches.length > 0) {
     const primary = recipientMatches[0] || {};
     const total = Number(primary?.total || 0);
     const query = primary?.query || (language === "en" ? "the requested recipient" : "o destinat\xE1rio indicado");
-    return language === "en" ? `You have ${total} email(s) for ${query}.` : `Tens ${total} email(s) para ${query}.`;
+    return language === "en" ? `You have ${total} email(s) for ${query}${dateScope}.` : `Tens ${total} email(s) para ${query}${dateScope}.`;
   }
   const scopedTotal = Number(emailContextPayload?.query_scope?.total);
   if (Number.isFinite(scopedTotal)) {
-    return language === "en" ? `You have ${scopedTotal} email(s) matching that criterion.` : `Tens ${scopedTotal} email(s) para esse crit\xE9rio.`;
+    const folderQuery = String(filters?.folder_query || "").toLowerCase();
+    const keywordTerms = Array.isArray(filters?.keyword_terms) ? filters.keyword_terms.filter(Boolean) : [];
+    const senderQueries = Array.isArray(filters?.sender_queries) ? filters.sender_queries : [];
+    const recipientQueries = Array.isArray(filters?.recipient_queries) ? filters.recipient_queries : [];
+    const subjectQueries = Array.isArray(filters?.subject_queries) ? filters.subject_queries : [];
+    const hasOnlyKeywordScope = keywordTerms.length > 0 && !folderQuery && senderQueries.length === 0 && recipientQueries.length === 0 && subjectQueries.length === 0;
+    if (folderQuery === "inbox") {
+      return language === "en" ? `You have ${scopedTotal} email(s) in the Inbox${dateScope}.` : `Tens ${scopedTotal} email(s) na Caixa de entrada${dateScope}.`;
+    }
+    if (hasOnlyKeywordScope) {
+      return language === "en" ? `You have ${scopedTotal} email(s) containing that term${dateScope}.` : `Tens ${scopedTotal} email(s) com esse termo${dateScope}.`;
+    }
+    return language === "en" ? `You have ${scopedTotal} email(s) matching that criterion${dateScope}.` : `Tens ${scopedTotal} email(s) para esse crit\xE9rio${dateScope}.`;
   }
   return null;
 }
@@ -1362,7 +1598,7 @@ async function buildEmailRuntimeContext(ctx, message, emailContext) {
     const summary = payload?.summary || {};
     const mailboxes = Array.isArray(payload?.mailboxes) ? payload.mailboxes : [];
     const recentEmails = Array.isArray(payload?.recent_emails) ? payload.recent_emails : [];
-    const selectedEmail = payload?.selected_email || null;
+    const selectedEmail = payload?.selected_email || emailContext?.selectedEmail || null;
     const selectedEmails = Array.isArray(payload?.selected_emails) ? payload.selected_emails : [];
     const senderMatches = Array.isArray(payload?.sender_matches) ? payload.sender_matches : [];
     const recipientMatches = Array.isArray(payload?.recipient_matches) ? payload.recipient_matches : [];
@@ -1419,7 +1655,17 @@ async function buildEmailRuntimeContext(ctx, message, emailContext) {
       lines.push(`- formato=${draftReplyPreferences.format}`);
       lines.push(`- incluir_assunto=${draftReplyPreferences.includeSubject ? "sim" : "nao"}`);
       lines.push(`- resposta_direta=${draftReplyPreferences.directDraftOnly ? "sim" : "nao"}`);
-      lines.push("- instrucao=Se o utilizador pediu um rascunho, devolve o texto final pronto a enviar e evita coment\xE1rios introdut\xF3rios desnecess\xE1rios.");
+      lines.push(buildDraftSaveSystemPrompt(selectedEmail ? {
+        subject: selectedEmail.subject,
+        from: selectedEmail.from,
+        fromAddress: selectedEmail.from_address || selectedEmail.fromAddress,
+        toAddresses: selectedEmail.to_addresses || selectedEmail.toAddresses,
+        receivedAt: selectedEmail.received_at || selectedEmail.receivedAt,
+        folder: selectedEmail.folder,
+        snippet: selectedEmail.snippet,
+        bodyPreview: selectedEmail.body_preview || selectedEmail.bodyPreview,
+        hasAttachments: selectedEmail.has_attachments ?? selectedEmail.hasAttachments
+      } : null));
     }
     if (senderMatches.length > 0) {
       lines.push("CONSULTAS_DE_REMETENTE:");
@@ -1537,6 +1783,56 @@ async function previewEmailAssistantAction(ctx, message, emailContext) {
     console.warn("[AI Service] Failed to preview email assistant action:", err);
     return null;
   }
+}
+async function saveEmailAssistantDraft(ctx, payload) {
+  const response = await fetch(`${EMAIL_MODULE_URL}/api/v1/mailboxes/${encodeURIComponent(payload.mailboxId)}/save-draft`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-viao-user-id": String(ctx.userId),
+      "x-viao-tenant-id": String(ctx.tenantId),
+      "x-viao-request-id": `${ctx.requestId}-email-save-draft`
+    },
+    body: JSON.stringify({
+      to: payload.to,
+      cc: payload.cc,
+      bcc: payload.bcc,
+      subject: payload.subject,
+      body_text: payload.body_text,
+      body_html: payload.body_html
+    })
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Email save draft endpoint failed with ${response.status}: ${errorText}`);
+  }
+  const body = await response.json();
+  return body?.data || {};
+}
+function buildEmailDraftSavedReply(result, payload) {
+  const idLine = result?.id ? `ID: ${result.id}` : null;
+  const folderLine = `Pasta: ${result?.folder || "INBOX.Drafts"}`;
+  return [
+    "Conclu\xEDdo. Guardei o rascunho em Drafts.",
+    `Para: ${payload.to}`,
+    `Assunto: ${payload.subject}`,
+    folderLine,
+    idLine,
+    "Podes abrir a pasta Drafts/Rascunhos para rever, editar ou enviar."
+  ].filter(Boolean).join("\n");
+}
+function maybeBuildPendingDraftSave(emailContext, draftText, message) {
+  const instruction = parseAssistantDraftInstruction(message);
+  if (!instruction.requested || !instruction.shouldSaveDraft) return null;
+  const payload = buildDraftSavePayload({
+    mailboxId: emailContext?.selectedMailboxId,
+    selectedEmail: emailContext?.selectedEmail || null,
+    draftText
+  });
+  return {
+    payload,
+    confirmationPrompt: buildDraftSaveConfirmation(payload)
+  };
 }
 async function executeEmailAssistantAction(ctx, pendingAction) {
   const response = await fetch(`${EMAIL_MODULE_URL}/api/v1/assistant/action-execute`, {
@@ -1671,6 +1967,42 @@ app.post("/api/v1/agent/chat", async (req, res) => {
   const agentId = AGENT_MAP[effectiveModule] || "platform";
   const sessionKey = getSessionKey(ctx.tenantId, ctx.userId, effectiveModule);
   const requestText = message.trim();
+  const selectedEmailContextRequired = effectiveModule === "email" && requiresSelectedEmailContext(message);
+  const hasSelectedEmailContext = hasUsableSelectedEmailContext(emailContext);
+  if (selectedEmailContextRequired && !hasSelectedEmailContext) {
+    return res.json({
+      success: true,
+      data: {
+        reply: buildSelectedEmailContextRequiredReply(),
+        agent: agentId,
+        module: effectiveModule,
+        model: "local-context-required",
+        usage: {
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+          estimated_cost_usd: 0
+        }
+      }
+    });
+  }
+  if (selectedEmailContextRequired && hasSelectedEmailContext && isEmailSummaryQuestion(message)) {
+    return res.json({
+      success: true,
+      data: {
+        reply: buildSelectedEmailSummaryReply(emailContext),
+        agent: agentId,
+        module: effectiveModule,
+        model: "local-selected-email-summary",
+        usage: {
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+          estimated_cost_usd: 0
+        }
+      }
+    });
+  }
   const logAssistantEvent = async (event) => recordUsageEvent({
     tenantId: ctx.tenantId,
     userId: ctx.userId,
@@ -1707,15 +2039,25 @@ app.post("/api/v1/agent/chat", async (req, res) => {
   if (clearHistory) {
     agentSessions.delete(sessionKey);
     emailPendingActions.delete(sessionKey);
+    emailLastQueries.delete(sessionKey);
   }
   if (effectiveModule === "email") {
     const pendingAction = emailPendingActions.get(sessionKey);
     if (pendingAction) {
       if (isAffirmativeConfirmation(message)) {
         try {
-          const execution = await executeEmailAssistantAction(ctx, pendingAction);
+          let reply;
+          let emailAction = null;
+          if (pendingAction.kind === "save_draft") {
+            if (!pendingAction.draftPayload) throw new Error("A a\xE7\xE3o pendente n\xE3o cont\xE9m o rascunho a guardar.");
+            const execution = await saveEmailAssistantDraft(ctx, pendingAction.draftPayload);
+            reply = buildEmailDraftSavedReply(execution, pendingAction.draftPayload);
+            emailAction = buildDraftSavedEmailAction(execution, pendingAction.draftPayload);
+          } else {
+            const execution = await executeEmailAssistantAction(ctx, pendingAction);
+            reply = buildEmailActionExecutionReply(execution);
+          }
           emailPendingActions.delete(sessionKey);
-          const reply = buildEmailActionExecutionReply(execution);
           appendToSession(sessionKey, [
             { role: "user", content: message },
             { role: "assistant", content: reply }
@@ -1807,7 +2149,7 @@ Tenho esta a\xE7\xE3o pendente. Responde 'confirmar' para executar ou 'cancelar'
         }
       });
     }
-    const shouldBypassActionPreview = isEmailCountQuestion(message) || isEmailUrgencyQuestion(message) || isEmailSummaryQuestion(message) || isEmailDatesQuestion(message);
+    const shouldBypassActionPreview = !selectedEmailContextRequired && (isEmailCountRefinementQuestion(message, sessionKey) || isEmailUrgencyQuestion(message) || isEmailSummaryQuestion(message) || isEmailDatesQuestion(message));
     if (!shouldBypassActionPreview) {
       const actionPreview = await previewEmailAssistantAction(ctx, message, emailContext);
       if (actionPreview?.matched) {
@@ -1829,6 +2171,7 @@ Tenho esta a\xE7\xE3o pendente. Responde 'confirmar' para executar ou 'cancelar'
           });
         }
         emailPendingActions.set(sessionKey, {
+          kind: "email_action",
           action: actionPreview.action,
           emailIds: Array.isArray(actionPreview.email_ids) ? actionPreview.email_ids : [],
           targetFolder: actionPreview.target_folder || void 0,
@@ -1859,15 +2202,24 @@ Tenho esta a\xE7\xE3o pendente. Responde 'confirmar' para executar ou 'cancelar'
     }
   }
   if (effectiveModule === "email") {
-    const shouldUseDeterministicReply = isEmailCountQuestion(message) || isEmailUrgencyQuestion(message) || isEmailSummaryQuestion(message) || isEmailDatesQuestion(message);
+    const isCountIntent = isEmailCountRefinementQuestion(message, sessionKey);
+    const contextQuestion = isCountIntent ? buildEmailRefinedQuestion(message, sessionKey) : message;
+    const shouldUseDeterministicReply = !selectedEmailContextRequired && (isCountIntent || isEmailUrgencyQuestion(message) || isEmailSummaryQuestion(message) || isEmailDatesQuestion(message));
     if (shouldUseDeterministicReply) {
-      const contextPayload = await fetchEmailAssistantContextPayload(ctx, message, emailContext);
-      const countReply = contextPayload && isEmailCountQuestion(message) ? buildEmailCountFallbackReply(contextPayload, message) : null;
+      const contextPayload = await fetchEmailAssistantContextPayload(ctx, contextQuestion, emailContext);
+      const countReply = contextPayload && isCountIntent ? buildEmailCountFallbackReply(contextPayload, contextQuestion) : null;
       const urgencyReply = contextPayload && isEmailUrgencyQuestion(message) ? buildEmailUrgencyFallbackReply(contextPayload, message) : null;
       const summaryReply = contextPayload && isEmailSummaryQuestion(message) ? buildEmailSummaryFallbackReply(contextPayload, message) : null;
       const datesReply = contextPayload && isEmailDatesQuestion(message) ? buildEmailDatesFallbackReply(contextPayload, message) : null;
       const fallbackReply = countReply || urgencyReply || summaryReply || datesReply;
       if (fallbackReply) {
+        if (contextPayload) {
+          rememberEmailQueryState(
+            sessionKey,
+            contextPayload,
+            countReply ? "count" : urgencyReply ? "urgency" : summaryReply ? "summary" : "dates"
+          );
+        }
         appendToSession(sessionKey, [
           { role: "user", content: message },
           { role: "assistant", content: fallbackReply }
@@ -1969,6 +2321,40 @@ ${runtimeContexts.join("\n\n")}` : systemPrompt;
       status: "success",
       durationMs
     });
+    if (effectiveModule === "email" && draftReplyPreferences?.requested) {
+      try {
+        const pendingDraft = maybeBuildPendingDraftSave(emailContext, cleanReply, message);
+        if (pendingDraft) {
+          emailPendingActions.set(sessionKey, {
+            kind: "save_draft",
+            action: "save_draft",
+            emailIds: [],
+            draftPayload: pendingDraft.payload,
+            confirmationPrompt: pendingDraft.confirmationPrompt,
+            emailCount: 1,
+            createdAt: Date.now()
+          });
+          return res.json({
+            success: true,
+            data: {
+              reply: buildDraftPreviewReply(pendingDraft.payload),
+              agent: agentId,
+              module: effectiveModule,
+              model: actualModel,
+              files: files.length > 0 ? files : void 0,
+              usage: {
+                prompt_tokens: usage.prompt_tokens,
+                completion_tokens: usage.completion_tokens,
+                total_tokens: usage.total_tokens,
+                estimated_cost_usd: cost
+              }
+            }
+          });
+        }
+      } catch (draftError) {
+        console.warn("[AI Service] Failed to prepare email draft save:", draftError?.message || draftError);
+      }
+    }
     return res.json({
       success: true,
       data: {
@@ -1989,14 +2375,32 @@ ${runtimeContexts.join("\n\n")}` : systemPrompt;
     if (effectiveModule === "email" && isAbortLikeError(error)) {
       if (draftReplyPreferences?.requested) {
         const fallbackReply = buildEmailDraftFallbackReply(emailContext, draftReplyPreferences);
+        let reply = fallbackReply;
+        try {
+          const pendingDraft = maybeBuildPendingDraftSave(emailContext, fallbackReply, message);
+          if (pendingDraft) {
+            emailPendingActions.set(sessionKey, {
+              kind: "save_draft",
+              action: "save_draft",
+              emailIds: [],
+              draftPayload: pendingDraft.payload,
+              confirmationPrompt: pendingDraft.confirmationPrompt,
+              emailCount: 1,
+              createdAt: Date.now()
+            });
+            reply = buildDraftPreviewReply(pendingDraft.payload);
+          }
+        } catch (draftError) {
+          console.warn("[AI Service] Failed to prepare fallback email draft save:", draftError?.message || draftError);
+        }
         appendToSession(sessionKey, [
           { role: "user", content: message },
-          { role: "assistant", content: fallbackReply }
+          { role: "assistant", content: reply }
         ]);
         return res.json({
           success: true,
           data: {
-            reply: fallbackReply,
+            reply,
             agent: agentId,
             module: effectiveModule,
             model: "local-draft-fallback",
@@ -2009,9 +2413,10 @@ ${runtimeContexts.join("\n\n")}` : systemPrompt;
           }
         });
       }
-      if (isEmailCountQuestion(message)) {
-        const contextPayload = await fetchEmailAssistantContextPayload(ctx, message, emailContext);
-        const fallbackReply = contextPayload ? buildEmailCountFallbackReply(contextPayload, message) : null;
+      if (isEmailCountRefinementQuestion(message, sessionKey)) {
+        const contextQuestion = buildEmailRefinedQuestion(message, sessionKey);
+        const contextPayload = await fetchEmailAssistantContextPayload(ctx, contextQuestion, emailContext);
+        const fallbackReply = contextPayload ? buildEmailCountFallbackReply(contextPayload, contextQuestion) : null;
         if (fallbackReply) {
           appendToSession(sessionKey, [
             { role: "user", content: message },

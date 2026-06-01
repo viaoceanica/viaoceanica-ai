@@ -264,7 +264,6 @@ export default function EmailPage() {
   const mailListRef = useRef<HTMLDivElement | null>(null);
   const syncPollTimerRef = useRef<number | null>(null);
   const dragExpandTimerRef = useRef<number | null>(null);
-  const bgLoadAbortRef = useRef<{ cancelled: boolean }>({ cancelled: false });
   const [tenantId, setTenantId] = useState("");
   const [userId, setUserId] = useState("");
   const [companyRole, setCompanyRole] = useState("");
@@ -274,7 +273,7 @@ export default function EmailPage() {
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null);
   const [emails, setEmails] = useState<EmailMessage[]>([]);
   const [selectedMailboxId, setSelectedMailboxId] = useState("");
-  const [selectedFolder, setSelectedFolder] = useState<string>("INBOX");
+  const [selectedFolder, setSelectedFolder] = useState<string>(ALL_FOLDERS_KEY);
   const [selectedEmailId, setSelectedEmailId] = useState("");
   const [selectedEmailIds, setSelectedEmailIds] = useState<string[]>([]);
   const [folderOptionsByMailbox, setFolderOptionsByMailbox] = useState<Record<string, string[]>>({});
@@ -284,9 +283,6 @@ export default function EmailPage() {
   const [draggingEmailId, setDraggingEmailId] = useState("");
   const [dragHoverFolder, setDragHoverFolder] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
-  const [serverSearchQuery, setServerSearchQuery] = useState("");
-  const [searchLoading, setSearchLoading] = useState(false);
-  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showUnreadOnly, setShowUnreadOnly] = useState(false);
   const [showAttachmentsOnly, setShowAttachmentsOnly] = useState(false);
   const [showFlaggedOnly, setShowFlaggedOnly] = useState(false);
@@ -320,79 +316,19 @@ export default function EmailPage() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewIndex, setPreviewIndex] = useState(0);
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewFullscreen, setPreviewFullscreen] = useState(false);
-  const [allowExternalImages, setAllowExternalImages] = useState(false);
-  const [bodyLoading, setBodyLoading] = useState(false);
   const previewCacheRef = useRef<Record<string, string>>({});
-  const previewModalRef = useRef<HTMLDivElement>(null);
-  const attachmentCacheRef = useRef<Record<string, Array<{index: number; filename: string; content_type: string; size: number}>>>({});
-  const prefetchStartedRef = useRef(false);
 
   // Compose / Reply state
-  type ComposeMode = "reply" | "reply_all" | "forward" | "new" | null;
+  type ComposeMode = "reply" | "reply_all" | "forward" | null;
   const [composeMode, setComposeMode] = useState<ComposeMode>(null);
   const [composeTo, setComposeTo] = useState("");
   const [composeCc, setComposeCc] = useState("");
-  const [composeBcc, setComposeBcc] = useState("");
-  const [showBcc, setShowBcc] = useState(false);
   const [composeSubject, setComposeSubject] = useState("");
   const [composeBody, setComposeBody] = useState("");
   const [composeSending, setComposeSending] = useState(false);
   const [composeAttachments, setComposeAttachments] = useState<File[]>([]);
-  const [composeForwardHtml, setComposeForwardHtml] = useState<string | null>(null);
-  const [composeDraftId, setComposeDraftId] = useState<string | null>(null);
-  const [composeSaving, setComposeSaving] = useState(false);
-  const composeBodyRef = useRef<HTMLDivElement>(null);
+  const composeBodyRef = useRef<HTMLTextAreaElement>(null);
   const composeFileInputRef = useRef<HTMLInputElement>(null);
-  const autoSaveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // Ponto 10: Auto-save de rascunho a cada 60 segundos
-  useEffect(() => {
-    if (composeMode === "new" && (composeBody.trim() || composeTo.trim() || composeSubject.trim())) {
-      if (autoSaveTimerRef.current) clearInterval(autoSaveTimerRef.current);
-      autoSaveTimerRef.current = setInterval(async () => {
-        if (!tenantId || !selectedMailboxId || composeSending) return;
-        try {
-          const editorContent = composeBodyRef.current?.innerHTML || "";
-          const bodyHtml = editorContent.trim()
-            ? `<div style="font-family:sans-serif;font-size:14px;">${editorContent}</div>`
-            : "";
-          const bodyText = composeBodyRef.current?.innerText || composeBody;
-          const response = await fetch(`${API_BASE}/api/mailboxes/${selectedMailboxId}/save-draft`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", ...buildHeaders(tenantId) },
-            body: JSON.stringify({
-              to: composeTo.trim(),
-              cc: composeCc.trim() || undefined,
-              bcc: composeBcc.trim() || undefined,
-              subject: composeSubject.trim(),
-              body_html: bodyHtml,
-              body_text: bodyText,
-              draft_id: composeDraftId || undefined,
-            }),
-          });
-          if (response.ok) {
-            const payload = await response.json();
-            const newDraftId = payload?.data?.id;
-            if (newDraftId) setComposeDraftId(newDraftId);
-          }
-        } catch (e) {
-          // Silent fail on auto-save
-        }
-      }, 60000);
-    } else {
-      if (autoSaveTimerRef.current) {
-        clearInterval(autoSaveTimerRef.current);
-        autoSaveTimerRef.current = null;
-      }
-    }
-    return () => {
-      if (autoSaveTimerRef.current) {
-        clearInterval(autoSaveTimerRef.current);
-        autoSaveTimerRef.current = null;
-      }
-    };
-  }, [composeMode, composeBody, composeTo, composeSubject, tenantId, selectedMailboxId, composeSending, composeDraftId, composeCc, composeBcc]);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const shellRef = useRef<HTMLElement>(null);
 
@@ -401,7 +337,6 @@ export default function EmailPage() {
     const handleFsChange = () => {
       if (!document.fullscreenElement) {
         setIsFullscreen(false);
-        setPreviewFullscreen(false);
       }
     };
     document.addEventListener("fullscreenchange", handleFsChange);
@@ -505,7 +440,7 @@ export default function EmailPage() {
     const nextMailboxes = dashboardJson?.data?.mailboxes || [];
     if (nextMailboxes.length === 0) {
       setSelectedMailboxId("");
-      setSelectedFolder("INBOX");
+      setSelectedFolder(ALL_FOLDERS_KEY);
       setSelectedEmailId("");
       setSelectedEmailIds([]);
       setEmails([]);
@@ -518,15 +453,9 @@ export default function EmailPage() {
     return nextMailboxes;
   }
 
-  async function loadEmails(activeTenantId: string, mailboxId?: string, folder?: string, options?: { silent?: boolean; search?: string }) {
+  async function loadEmails(activeTenantId: string, mailboxId?: string, folder?: string, options?: { silent?: boolean }) {
     const isSilent = options?.silent && emails.length > 0;
-    // Only cancel background loading for non-silent loads (user navigated to new folder)
-    // Silent refreshes (after quick-sync) should NOT cancel ongoing background page loads
-    if (!isSilent) {
-      bgLoadAbortRef.current.cancelled = true;
-      bgLoadAbortRef.current = { cancelled: false };
-      setMailLoading(true);
-    }
+    if (!isSilent) setMailLoading(true);
     try {
       const headers = buildHeaders(activeTenantId);
       const params = new URLSearchParams();
@@ -535,98 +464,32 @@ export default function EmailPage() {
         params.set("folder", folder);
         if (shouldIncludeFolderChildren(folder)) params.set("include_children", "true");
       }
-      if (options?.search) params.set("search", options.search);
-      // For search: use larger limit to get all results at once
-      // For normal browsing: use progressive loading with PAGE_SIZE
-      const PAGE_SIZE = 50;
-      const SEARCH_LIMIT = 500;
-      params.set("limit", String(options?.search ? SEARCH_LIMIT : PAGE_SIZE));
-      params.set("offset", "0");
+      params.set("limit", "100");
       const url = `${API_BASE}/api/emails?${params.toString()}`;
       const response = await fetch(url, { headers });
       const payload = await parseApiPayload(response);
       if (!response.ok) throw new Error((payload as { detail?: string } | null)?.detail || "Falha ao carregar os emails sincronizados");
-      const firstBatch = Array.isArray((payload as { data?: EmailMessage[] } | null)?.data) ? (payload as { data?: EmailMessage[] }).data || [] : [];
-      const hasMore = (payload as { has_more?: boolean } | null)?.has_more || false;
+      const freshEmails = Array.isArray((payload as { data?: EmailMessage[] } | null)?.data) ? (payload as { data?: EmailMessage[] }).data || [] : [];
       if (isSilent) {
-        // Silent refresh: merge new emails at the top, update existing ones
+        // Incremental merge: keep existing emails, add new ones at the top, update changed ones
         setEmails((current) => {
           const existingMap = new Map(current.map((e) => [e.id, e]));
-          // Update/add emails from the fresh batch
-          for (const email of firstBatch) {
-            existingMap.set(email.id, email);
+          const merged: EmailMessage[] = [];
+          const seenIds = new Set<string>();
+          for (const email of freshEmails) {
+            merged.push(email);
+            seenIds.add(email.id);
           }
-          return Array.from(existingMap.values()).sort((a, b) => {
-            const dateA = new Date(a.received_at || 0).getTime();
-            const dateB = new Date(b.received_at || 0).getTime();
-            return dateB - dateA;
-          });
+          // Keep any locally-known emails that are no longer in the API response
+          // (they might have been moved/deleted, so we don't keep them)
+          return merged;
         });
       } else {
-        // Normal load: show first batch immediately
-        setEmails(firstBatch);
-        setMailLoading(false);
-        // Load remaining pages in background if there are more
-        if (hasMore) {
-          const loadPageSize = options?.search ? 500 : PAGE_SIZE;
-          loadRemainingEmails(activeTenantId, mailboxId, folder, options, loadPageSize, firstBatch, bgLoadAbortRef.current);
-        }
+        setEmails(freshEmails);
       }
-    } catch (err) {
+    } finally {
       if (!isSilent) setMailLoading(false);
-      throw err;
     }
-  }
-
-  function loadRemainingEmails(
-    activeTenantId: string,
-    mailboxId: string | undefined,
-    folder: string | undefined,
-    options: { silent?: boolean; search?: string } | undefined,
-    pageSize: number,
-    initialBatch: EmailMessage[],
-    abortSignal: { cancelled: boolean }
-  ) {
-    let currentOffset = pageSize;
-    let accumulated = [...initialBatch];
-
-    async function loadNextPage() {
-      if (abortSignal.cancelled) return; // Stop if navigation changed
-      try {
-        const headers = buildHeaders(activeTenantId);
-        const params = new URLSearchParams();
-        if (mailboxId) params.set("mailbox_id", mailboxId);
-        if (folder && folder !== ALL_FOLDERS_KEY) {
-          params.set("folder", folder);
-          if (shouldIncludeFolderChildren(folder)) params.set("include_children", "true");
-        }
-        if (options?.search) params.set("search", options.search);
-        params.set("limit", String(pageSize));
-        params.set("offset", String(currentOffset));
-        const url = `${API_BASE}/api/emails?${params.toString()}`;
-        const response = await fetch(url, { headers });
-        if (abortSignal.cancelled) return; // Check again after fetch
-        if (!response.ok) return; // Stop silently on error
-        const payload = await parseApiPayload(response);
-        const nextBatch = Array.isArray((payload as { data?: EmailMessage[] } | null)?.data) ? (payload as { data?: EmailMessage[] }).data || [] : [];
-        const hasMore = (payload as { has_more?: boolean } | null)?.has_more || false;
-        if (nextBatch.length > 0 && !abortSignal.cancelled) {
-          accumulated = [...accumulated, ...nextBatch];
-          // Merge into state without disrupting the UI
-          setEmails([...accumulated]);
-          currentOffset += pageSize;
-          // Continue loading if there are more pages
-          if (hasMore) {
-            // Small delay to avoid overwhelming the server
-            setTimeout(loadNextPage, 150);
-          }
-        }
-      } catch {
-        // Stop silently on error - user already has the first batch
-      }
-    }
-
-    loadNextPage();
   }
 
   async function loadFolders(activeTenantId: string, mailboxId: string) {
@@ -642,18 +505,6 @@ export default function EmailPage() {
       setFolderStatsByMailbox((current) => ({ ...current, [mailboxId]: folderStatsData }));
     } finally {
       setFoldersLoading(false);
-    }
-  }
-
-  async function triggerServerSearch(term: string) {
-    if (!tenantId || !selectedMailboxId) return;
-    setSearchLoading(true);
-    setServerSearchQuery(term);
-    try {
-      // Search within the currently selected folder (respects user's folder selection)
-      await loadEmails(tenantId, selectedMailboxId, selectedFolder, { search: term });
-    } finally {
-      setSearchLoading(false);
     }
   }
 
@@ -676,78 +527,29 @@ export default function EmailPage() {
 
   useEffect(() => {
     if (!selectedMailboxId) {
-      setSelectedFolder("INBOX");
+      setSelectedFolder(ALL_FOLDERS_KEY);
       setSelectedEmailId("");
       setSelectedEmailIds([]);
       return;
     }
-    setSelectedFolder("INBOX");
+    setSelectedFolder(ALL_FOLDERS_KEY);
     setSelectedEmailId("");
     setSelectedEmailIds([]);
     setBulkMoveTarget("");
     setSearchQuery("");
-    setServerSearchQuery("");
     setShowUnreadOnly(false);
     setShowAttachmentsOnly(false);
     setShowFlaggedOnly(false);
   }, [selectedMailboxId]);
 
-  // Re-trigger search in new folder when folder changes during active search
-  useEffect(() => {
-    if (serverSearchQuery && tenantId && selectedMailboxId) {
-      // Re-run the same search in the new folder context
-      setSearchLoading(true);
-      loadEmails(tenantId, selectedMailboxId, selectedFolder, { search: serverSearchQuery })
-        .finally(() => setSearchLoading(false));
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedFolder]);
-
   useEffect(() => {
     if (!tenantId || !selectedMailboxId) return;
-    // Load emails and folders immediately (fast - from DB)
-    Promise.all([
-      loadEmails(tenantId, selectedMailboxId, selectedFolder).catch((err) => {
-        setError(err instanceof Error ? err.message : "Erro ao carregar os emails");
-      }),
-      loadFolders(tenantId, selectedMailboxId).catch((err) => {
-        setError(err instanceof Error ? err.message : "Erro ao carregar as pastas da mailbox");
-      }),
-    ]).then(() => {
-      // After initial load, do quick-sync in background and refresh silently
-      const folder = selectedFolder && selectedFolder !== ALL_FOLDERS_KEY ? selectedFolder : undefined;
-      const qsParams = new URLSearchParams();
-      if (folder) qsParams.set("folder", folder);
-      fetch(`${API_BASE}/api/mailboxes/${selectedMailboxId}/quick-sync${qsParams.toString() ? "?" + qsParams.toString() : ""}`, {
-        method: "POST",
-        headers: buildHeaders(tenantId),
-      }).then(() => {
-        // After sync, silently merge any new emails (only first page) without disrupting background loading
-        const syncHeaders = buildHeaders(tenantId);
-        const syncParams = new URLSearchParams();
-        if (selectedMailboxId) syncParams.set("mailbox_id", selectedMailboxId);
-        if (folder) { syncParams.set("folder", folder); syncParams.set("include_children", "true"); }
-        syncParams.set("limit", "50");
-        syncParams.set("offset", "0");
-        fetch(`${API_BASE}/api/emails?${syncParams.toString()}`, { headers: syncHeaders })
-          .then(r => r.ok ? r.json() : null)
-          .then(payload => {
-            if (!payload?.data) return;
-            const freshEmails = payload.data as EmailMessage[];
-            setEmails((current) => {
-              const existingMap = new Map(current.map((e) => [e.id, e]));
-              for (const email of freshEmails) existingMap.set(email.id, email);
-              return Array.from(existingMap.values()).sort((a, b) => {
-                const dateA = new Date(a.received_at || 0).getTime();
-                const dateB = new Date(b.received_at || 0).getTime();
-                return dateB - dateA;
-              });
-            });
-          }).catch(() => {});
-        loadFolders(tenantId, selectedMailboxId).catch(() => {});
-      }).catch(() => { /* quick-sync failure is non-blocking */ });
+    loadEmails(tenantId, selectedMailboxId, selectedFolder).catch((err) => {
+      setError(err instanceof Error ? err.message : "Erro ao carregar os emails");
     });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    loadFolders(tenantId, selectedMailboxId).catch((err) => {
+      setError(err instanceof Error ? err.message : "Erro ao carregar as pastas da mailbox");
+    });
   }, [tenantId, selectedMailboxId, selectedFolder, userId, companyRole, platformRoles]);
 
   const summary = dashboard?.data?.summary || {};
@@ -786,36 +588,24 @@ export default function EmailPage() {
   }, [emails, selectedMailboxId]);
 
   const flaggedCount = useMemo(() => mailboxEmails.filter((item) => item.is_flagged).length, [mailboxEmails]);
-  const unreadCount = useMemo(() => {
-    // Use backend unread_count when available (accurate total), fall back to local count
-    if (selectedMailbox?.unread_count !== undefined && selectedMailbox.unread_count > 0) {
-      return selectedMailbox.unread_count;
-    }
-    return mailboxEmails.filter((item) => !item.is_seen).length;
-  }, [mailboxEmails, selectedMailbox?.unread_count]);
+  const unreadCount = useMemo(() => mailboxEmails.filter((item) => !item.is_seen).length, [mailboxEmails]);
   const attachmentsCount = useMemo(() => mailboxEmails.filter((item) => item.has_attachments).length, [mailboxEmails]);
 
   const filteredEmails = useMemo(() => {
     let scoped = mailboxEmails;
-    // When server search is active, emails are already filtered by the server - skip folder & local text filter
-    if (!serverSearchQuery) {
-      if (selectedFolder !== ALL_FOLDERS_KEY) scoped = scoped.filter((item) => isFolderWithinScope(item.folder, selectedFolder));
-    }
-    if (showUnreadOnly) scoped = scoped.filter((item) => !item.is_seen || item.id === selectedEmailId);
+    if (selectedFolder !== ALL_FOLDERS_KEY) scoped = scoped.filter((item) => isFolderWithinScope(item.folder, selectedFolder));
+    if (showUnreadOnly) scoped = scoped.filter((item) => !item.is_seen);
     if (showAttachmentsOnly) scoped = scoped.filter((item) => item.has_attachments);
     if (showFlaggedOnly) scoped = scoped.filter((item) => item.is_flagged);
-    // Only apply local text filter when NOT doing server search (server already filtered)
-    if (!serverSearchQuery) {
-      const query = searchQuery.trim().toLowerCase();
-      if (query) {
-        scoped = scoped.filter((item) => {
-          const haystack = [item.subject, item.from_name, item.from_address, item.to_addresses, item.snippet, item.folder].filter(Boolean).join(" ").toLowerCase();
-          return haystack.includes(query);
-        });
-      }
+    const query = searchQuery.trim().toLowerCase();
+    if (query) {
+      scoped = scoped.filter((item) => {
+        const haystack = [item.subject, item.from_name, item.from_address, item.to_addresses, item.snippet, item.body_text, item.folder].filter(Boolean).join(" ").toLowerCase();
+        return haystack.includes(query);
+      });
     }
     return [...scoped].sort((left, right) => parseDateValue(right.received_at) - parseDateValue(left.received_at));
-  }, [mailboxEmails, searchQuery, serverSearchQuery, selectedFolder, showAttachmentsOnly, showFlaggedOnly, showUnreadOnly, selectedEmailId]);
+  }, [mailboxEmails, searchQuery, selectedFolder, showAttachmentsOnly, showFlaggedOnly, showUnreadOnly]);
 
   useEffect(() => {
     if (!emails.length) return;
@@ -823,8 +613,9 @@ export default function EmailPage() {
       const next = { ...current };
       for (const item of emails) {
         if (next[item.id]) continue;
-        // Default to the email's current folder so the dropdown shows where it is
-        next[item.id] = item.folder || "INBOX";
+        const folders = folderOptionsByMailbox[item.mailbox_id] || [];
+        const fallback = folders.find((folder) => folder !== (item.folder || "INBOX")) || item.folder || "INBOX";
+        next[item.id] = fallback;
       }
       return next;
     });
@@ -849,7 +640,7 @@ export default function EmailPage() {
   const canMoveSelected = !!selectedEmail && !!selectedMoveTarget && selectedMoveTarget !== (selectedEmail.folder || "INBOX") && canWriteSelected;
   const bulkCanWrite = !!selectedMailbox && selectedMailbox.access_mode === "read_write" && selectedEmails.length > 0 && selectedEmails.every((item) => !item.remote_deleted);
   const bulkCanMove = bulkCanWrite && !!bulkMoveTarget;
-  const activeFilterCount = [showUnreadOnly, showAttachmentsOnly, showFlaggedOnly, !!searchQuery.trim() || !!serverSearchQuery].filter(Boolean).length;
+  const activeFilterCount = [showUnreadOnly, showAttachmentsOnly, showFlaggedOnly, !!searchQuery.trim()].filter(Boolean).length;
   const folderSelectionLabel = folderLabel(selectedFolder);
   const selectedFolderMeta = getFolderMeta(selectedFolder);
   const selectedEmailFolderMeta = getFolderMeta(selectedEmail?.folder || "INBOX");
@@ -868,7 +659,7 @@ export default function EmailPage() {
       folder: selectedEmail.folder || "INBOX",
       receivedAt: selectedEmail.received_at || "",
       snippet: selectedEmail.snippet || "",
-      bodyPreview: truncateAssistantBody(selectedEmail.body_text || selectedEmail.snippet || selectedEmail.body_html || "(a carregar...)"),
+      bodyPreview: truncateAssistantBody(selectedEmail.body_text || selectedEmail.snippet || selectedEmail.body_html || ""),
       isSeen: selectedEmail.is_seen,
       isFlagged: selectedEmail.is_flagged,
       hasAttachments: selectedEmail.has_attachments,
@@ -882,41 +673,14 @@ export default function EmailPage() {
     };
     (window as Window & { __viaEmailAssistantContext?: typeof detail }).__viaEmailAssistantContext = detail;
     window.dispatchEvent(new CustomEvent(EMAIL_ASSISTANT_CONTEXT_EVENT, { detail }));
+    window.parent?.postMessage({ type: EMAIL_ASSISTANT_CONTEXT_EVENT, detail }, "*");
   }, [selectedEmail, selectedEmailIds, selectedMailboxId, selectedFolder]);
 
-  // Load email body on demand when selected (list no longer includes body_text/body_html)
-  useEffect(() => {
-    if (!selectedEmail || !tenantId) { setBodyLoading(false); return; }
-    // If body is already loaded (from detail fetch or old cached data), skip
-    if (selectedEmail.body_html !== undefined || selectedEmail.body_text !== undefined) { setBodyLoading(false); return; }
-    setBodyLoading(true);
-    fetch(`${API_BASE}/api/emails?id=${encodeURIComponent(selectedEmail.id)}&exclude_body=false&limit=1`, { headers: buildHeaders(tenantId) })
-      .then(r => r.json())
-      .then(d => {
-        if (d.success && d.data && d.data.length > 0) {
-          const detail = d.data[0];
-          // Merge body into the emails array so the selectedEmail derivation picks it up
-          setEmails(prev => prev.map(e => e.id === detail.id ? { ...e, body_text: detail.body_text, body_html: detail.body_html } : e));
-        }
-      })
-      .catch(() => {})
-      .finally(() => setBodyLoading(false));
-  }, [selectedEmail?.id, tenantId]);
-
-  // Load attachments when an email with attachments is selected (uses pre-cache if available)
+  // Load attachments when an email with attachments is selected
   useEffect(() => {
     if (!selectedEmail?.has_attachments || !tenantId) {
       setAttachments([]);
       setAttachmentsExpanded(false);
-      setAllowExternalImages(false);
-      return;
-    }
-    // Check if we already have cached attachment list from pre-fetch
-    const cached = attachmentCacheRef.current[selectedEmail.id];
-    if (cached && cached.length > 0) {
-      setAttachments(cached);
-      setAttachmentsExpanded(true);
-      setAttachmentsLoading(false);
       return;
     }
     setAttachmentsLoading(true);
@@ -924,80 +688,25 @@ export default function EmailPage() {
       headers: buildHeaders(tenantId)
     })
       .then(r => r.json())
-      .then(d => {
-        const atts = d.data || [];
-        setAttachments(atts);
-        setAttachmentsExpanded(true);
-        // Also cache for future use
-        if (atts.length > 0) attachmentCacheRef.current[selectedEmail.id] = atts;
-      })
+      .then(d => { setAttachments(d.data || []); setAttachmentsExpanded(true); })
       .catch(() => setAttachments([]))
       .finally(() => setAttachmentsLoading(false));
   }, [selectedEmail?.id, selectedEmail?.has_attachments, tenantId]);
 
-  // ===== AUTO PRE-CACHE: Fetch attachments from last 24h emails on module load =====
-  // Delayed by 5s after emails load to ensure UI is responsive first
-  useEffect(() => {
-    if (!tenantId || emails.length === 0 || prefetchStartedRef.current) return;
-    prefetchStartedRef.current = true;
-    const now = Date.now();
-    const last24h = now - 24 * 60 * 60 * 1000;
-    const recentWithAttachments = emails.filter(
-      (e) => e.has_attachments && parseDateValue(e.received_at) >= last24h
-    );
-    if (recentWithAttachments.length === 0) return;
-    // Wait 5 seconds after emails appear before starting background pre-cache
-    const startTimer = setTimeout(() => {
-      const idle = typeof window.requestIdleCallback === "function" ? window.requestIdleCallback : (cb: () => void) => setTimeout(cb, 100);
-      idle(() => {
-        let delay = 0;
-        const STAGGER_MS = 800; // Generous stagger to avoid competing with user actions
-        recentWithAttachments.slice(0, 10).forEach((email) => { // Max 10 emails to pre-cache
-          setTimeout(() => {
-            const headers = buildHeaders(tenantId);
-            fetch(`${API_BASE}/api/emails/${email.id}/attachments`, { headers })
-              .then((r) => r.json())
-              .then((d) => {
-                const atts: Array<{index: number; filename: string; content_type: string; size: number}> = d.data || [];
-                if (atts.length === 0) return;
-                attachmentCacheRef.current[email.id] = atts;
-                // Pre-fetch each attachment preview with generous delay
-                atts.forEach((att, i) => {
-                  setTimeout(() => {
-                    const cacheKey = `${email.id}-${att.index}`;
-                    const queryParams = new URLSearchParams(Object.entries(headers)).toString();
-                    if (att.content_type.startsWith("image/")) {
-                      const img = new Image();
-                      img.src = `${API_BASE}/api/emails/${email.id}/attachments/${att.index}?${queryParams}`;
-                      img.onload = () => { previewCacheRef.current[cacheKey] = "loaded"; };
-                    } else if (att.content_type.includes("pdf") || att.filename.match(/\.pdf$/i) || att.content_type.includes("word") || att.content_type.includes("document") || att.filename.match(/\.docx?$/i) || att.content_type.includes("spreadsheet") || att.content_type.includes("excel") || att.filename.match(/\.xlsx?$/i)) {
-                      const previewUrl = `${API_BASE}/api/emails/${email.id}/attachments/${att.index}/preview?${queryParams}`;
-                      fetch(previewUrl).then(() => { previewCacheRef.current[cacheKey] = "loaded"; }).catch(() => {});
-                    }
-                  }, i * 500); // 500ms between each attachment
-                });
-              })
-              .catch(() => {});
-          }, delay);
-          delay += STAGGER_MS;
-        });
-      });
-    }, 5000); // 5 second delay after emails load
-    return () => clearTimeout(startTimer);
-  }, [tenantId, emails]);
-
   // Preload all attachments in background when preview modal opens
   useEffect(() => {
     if (!previewOpen || !selectedEmail || !tenantId || attachments.length === 0) return;
+    previewCacheRef.current = {};
     const emailId = selectedEmail.id;
     attachments.forEach((att) => {
       const cacheKey = `${emailId}-${att.index}`;
-      if (previewCacheRef.current[cacheKey] === "loaded") return; // Already cached
       if (att.content_type.startsWith("image/")) {
+        // Preload images via Image object
         const img = new Image();
         img.src = `${API_BASE}/api/emails/${emailId}/attachments/${att.index}?${new URLSearchParams(Object.entries(buildHeaders(tenantId))).toString()}`;
         img.onload = () => { previewCacheRef.current[cacheKey] = "loaded"; };
       } else if (att.content_type.includes("pdf") || att.filename.match(/\.pdf$/i) || att.content_type.includes("word") || att.content_type.includes("document") || att.filename.match(/\.docx?$/i) || att.content_type.includes("spreadsheet") || att.content_type.includes("excel") || att.filename.match(/\.xlsx?$/i)) {
+        // Preload preview endpoint via fetch (warms server cache)
         const previewUrl = `${API_BASE}/api/emails/${emailId}/attachments/${att.index}/preview?${new URLSearchParams(Object.entries(buildHeaders(tenantId))).toString()}`;
         fetch(previewUrl).then(() => { previewCacheRef.current[cacheKey] = "loaded"; }).catch(() => {});
       }
@@ -1094,12 +803,6 @@ export default function EmailPage() {
     setShowFlaggedOnly(kind === "flagged");
     setShowUnreadOnly(kind === "unread");
     setShowAttachmentsOnly(kind === "attachments");
-    // Clear server search when switching filter categories
-    if (serverSearchQuery) {
-      setSearchQuery("");
-      setServerSearchQuery("");
-      if (tenantId && selectedMailboxId) loadEmails(tenantId, selectedMailboxId, selectedFolder).catch(() => {});
-    }
   }
 
   function moveSelection(direction: -1 | 1) {
@@ -1278,24 +981,6 @@ export default function EmailPage() {
     finally { setActioningEmailId(null); }
   }
 
-  function openNewCompose() {
-    setComposeMode("new");
-    setComposeTo("");
-    setComposeCc("");
-    setComposeBcc("");
-    setShowBcc(false);
-    setComposeSubject("");
-    setComposeBody("");
-    setComposeForwardHtml(null);
-    setComposeAttachments([]);
-    if (composeFileInputRef.current) composeFileInputRef.current.value = "";
-    setTimeout(() => {
-      if (composeBodyRef.current) composeBodyRef.current.innerHTML = "";
-      const toInput = document.querySelector('.compose-modal-input[placeholder*="destinat"]') as HTMLInputElement;
-      if (toInput) toInput.focus();
-    }, 100);
-  }
-
   function openCompose(mode: "reply" | "reply_all" | "forward") {
     if (!selectedEmail) return;
     const email = selectedEmail;
@@ -1318,47 +1003,17 @@ export default function EmailPage() {
     }
     const originalBody = email.body_text?.trim() || email.snippet || "";
     const quotedHeader = `\n\n--- Mensagem original ---\nDe: ${email.from_name || ""} <${email.from_address || ""}>\nData: ${formatLongDate(email.received_at)}\nAssunto: ${email.subject || ""}\n\n`;
-    const bodyContent = mode === "forward" ? quotedHeader + originalBody : "\n" + quotedHeader + originalBody;
-    setComposeBody(bodyContent);
-    // Guardar HTML original para forward/reply
-    if (email.body_html && email.body_html.trim().length > 1) {
-      setComposeForwardHtml(email.body_html);
-    } else {
-      setComposeForwardHtml(null);
-    }
-    // Set the rich text editor content after render
-    setTimeout(() => {
-      if (composeBodyRef.current) {
-        // For reply/forward, put cursor at top with empty line, then quoted text below
-        const escapedBody = bodyContent.replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
-        composeBodyRef.current.innerHTML = `<div><br></div><div style="color:#666;font-size:13px;">${escapedBody}</div>`;
-        // Place cursor at the beginning
-        const range = document.createRange();
-        const sel = window.getSelection();
-        range.setStart(composeBodyRef.current.firstChild!, 0);
-        range.collapse(true);
-        sel?.removeAllRanges();
-        sel?.addRange(range);
-        composeBodyRef.current.focus();
-      }
-    }, 100);
+    setComposeBody(mode === "forward" ? quotedHeader + originalBody : "\n" + quotedHeader + originalBody);
+    setTimeout(() => composeBodyRef.current?.focus(), 200);
   }
 
   function closeCompose() {
-    // Ponto 14: Confirmar se ha conteudo antes de fechar
-    if (composeBody.trim() || composeTo.trim() || composeSubject.trim()) {
-      if (!window.confirm("Descartar este email?")) return;
-    }
     setComposeMode(null);
     setComposeTo("");
-    setComposeForwardHtml(null);
     setComposeCc("");
-    setComposeBcc("");
-    setShowBcc(false);
     setComposeSubject("");
     setComposeBody("");
     setComposeAttachments([]);
-    setComposeDraftId(null);
     if (composeFileInputRef.current) composeFileInputRef.current.value = "";
   }
 
@@ -1369,18 +1024,7 @@ export default function EmailPage() {
     setError("");
     setSuccess("");
     try {
-      // Construir HTML: texto do utilizador + HTML original (forward/reply)
-      const editorHtml = composeBodyRef.current?.innerHTML || "";
-      const userTextHtml = `<div style="font-family:sans-serif;font-size:14px;">${editorHtml}</div>`;
-      const bodyText = composeBodyRef.current?.innerText || composeBody;
-      let bodyHtml: string;
-      if (composeForwardHtml) {
-        // Incluir o HTML original do email abaixo do texto do utilizador
-        const quotedHtmlHeader = `<div style="margin-top:16px;padding-top:12px;border-top:1px solid #ccc;"><p style="color:#666;font-size:12px;">--- Mensagem original ---<br>De: ${selectedEmail?.from_name || ""} &lt;${selectedEmail?.from_address || ""}&gt;<br>Data: ${selectedEmail?.received_at ? formatLongDate(selectedEmail.received_at) : ""}<br>Assunto: ${selectedEmail?.subject || ""}</p></div>`;
-        bodyHtml = userTextHtml + quotedHtmlHeader + `<div style="margin-top:8px;">${composeForwardHtml}</div>`;
-      } else {
-        bodyHtml = userTextHtml;
-      }
+      const bodyHtml = `<div style="font-family:sans-serif;font-size:14px;white-space:pre-wrap">${composeBody.replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>")}</div>`;
       let response: Response;
       if (composeAttachments.length > 0) {
         const formData = new FormData();
@@ -1389,7 +1033,7 @@ export default function EmailPage() {
         formData.append("cc", composeCc.trim());
         formData.append("subject", composeSubject.trim());
         formData.append("body_html", bodyHtml);
-        formData.append("body_text", bodyText);
+        formData.append("body_text", composeBody);
         formData.append("in_reply_to", selectedEmail.message_id_header || "");
         for (const file of composeAttachments) {
           formData.append("attachments", file, file.name);
@@ -1410,7 +1054,7 @@ export default function EmailPage() {
             cc: composeCc.trim() || undefined,
             subject: composeSubject.trim(),
             body_html: bodyHtml,
-            body_text: bodyText,
+            body_text: composeBody,
             in_reply_to: selectedEmail.message_id_header || undefined,
           }),
         });
@@ -1418,179 +1062,12 @@ export default function EmailPage() {
       const payload = await parseApiPayload(response);
       if (!response.ok) throw new Error((payload as { detail?: string } | null)?.detail || "Falha ao enviar o email");
       setSuccess("Email enviado com sucesso!");
-      // Ponto 7: Atualizar a listagem - marcar email original como lido localmente
-      const sendData = (payload as { data?: { was_unread?: boolean; mode?: string } } | null)?.data;
-      if (selectedEmail) {
-        setEmails(prev => prev.map(e => e.id === selectedEmail.id ? { ...e, is_seen: true } : e));
-      }
-      // Recarregar a lista para refletir alteracoes
-      if (tenantId && selectedMailboxId) {
-        loadEmails(tenantId, selectedMailboxId, selectedFolder, { silent: true }).catch(() => {});
-      }
       closeCompose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao enviar o email");
     } finally {
       setComposeSending(false);
     }
-  }
-
-  async function handleSendNew() {
-    if (!tenantId || !selectedMailboxId) return;
-    if (!composeTo.trim()) { setError("É necessário pelo menos um destinatário."); return; }
-    if (!composeSubject.trim()) { setError("É necessário um assunto."); return; }
-    setComposeSending(true);
-    setError("");
-    setSuccess("");
-    try {
-      const editorHtml = composeBodyRef.current?.innerHTML || "";
-      const bodyHtml = `<div style="font-family:sans-serif;font-size:14px;">${editorHtml}</div>`;
-      const bodyText = composeBodyRef.current?.innerText || composeBody;
-      let response: Response;
-      if (composeAttachments.length > 0) {
-        const formData = new FormData();
-        formData.append("to", composeTo.trim());
-        formData.append("cc", composeCc.trim());
-        formData.append("bcc", composeBcc.trim());
-        formData.append("subject", composeSubject.trim());
-        formData.append("body_html", bodyHtml);
-        formData.append("body_text", bodyText);
-        for (const file of composeAttachments) {
-          formData.append("attachments", file, file.name);
-        }
-        const hdrs = buildHeaders(tenantId);
-        response = await fetch(`${API_BASE}/api/mailboxes/${selectedMailboxId}/send-new`, {
-          method: "POST",
-          headers: hdrs,
-          body: formData,
-        });
-      } else {
-        response = await fetch(`${API_BASE}/api/mailboxes/${selectedMailboxId}/send-new`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...buildHeaders(tenantId) },
-          body: JSON.stringify({
-            to: composeTo.trim(),
-            cc: composeCc.trim() || undefined,
-            bcc: composeBcc.trim() || undefined,
-            subject: composeSubject.trim(),
-            body_html: bodyHtml,
-            body_text: bodyText,
-          }),
-        });
-      }
-      const payload = await parseApiPayload(response);
-      if (!response.ok) throw new Error((payload as { detail?: string } | null)?.detail || "Falha ao enviar o email");
-      setSuccess("Email enviado com sucesso!");
-      // Ponto 12: Apagar rascunho após envio bem-sucedido
-      if (composeDraftId && selectedMailboxId) {
-        try {
-          await fetch(`${API_BASE}/api/mailboxes/${selectedMailboxId}/drafts/${composeDraftId}`, {
-            method: "DELETE",
-            headers: buildHeaders(tenantId),
-          });
-        } catch { /* silencioso - rascunho será limpo no próximo sync */ }
-      }
-      // Resetar sem confirmacao (ja enviou)
-      setComposeMode(null);
-      setComposeTo("");
-      setComposeCc("");
-      setComposeBcc("");
-      setShowBcc(false);
-      setComposeSubject("");
-      setComposeBody("");
-      setComposeForwardHtml(null);
-      setComposeAttachments([]);
-      setComposeDraftId(null);
-      if (composeFileInputRef.current) composeFileInputRef.current.value = "";
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erro ao enviar o email");
-    } finally {
-      setComposeSending(false);
-    }
-  }
-
-  async function handleSaveDraft() {
-    if (!tenantId || !selectedMailboxId) return;
-    setComposeSaving(true);
-    setError("");
-    setSuccess("");
-    try {
-      const draftEditorHtml = composeBodyRef.current?.innerHTML || "";
-      const bodyHtml = draftEditorHtml.trim()
-        ? `<div style="font-family:sans-serif;font-size:14px;">${draftEditorHtml}</div>`
-        : "";
-      const bodyText = composeBodyRef.current?.innerText || composeBody;
-      let response: Response;
-      if (composeAttachments.length > 0) {
-        const formData = new FormData();
-        formData.append("to", composeTo.trim());
-        formData.append("cc", composeCc.trim());
-        formData.append("bcc", composeBcc.trim());
-        formData.append("subject", composeSubject.trim());
-        formData.append("body_html", bodyHtml);
-        formData.append("body_text", bodyText);
-        if (composeDraftId) formData.append("draft_id", composeDraftId);
-        for (const file of composeAttachments) {
-          formData.append("attachments", file, file.name);
-        }
-        response = await fetch(`${API_BASE}/api/mailboxes/${selectedMailboxId}/save-draft`, {
-          method: "POST",
-          headers: buildHeaders(tenantId),
-          body: formData,
-        });
-      } else {
-        response = await fetch(`${API_BASE}/api/mailboxes/${selectedMailboxId}/save-draft`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...buildHeaders(tenantId) },
-          body: JSON.stringify({
-            to: composeTo.trim(),
-            cc: composeCc.trim() || undefined,
-            bcc: composeBcc.trim() || undefined,
-            subject: composeSubject.trim(),
-            body_html: bodyHtml,
-            body_text: bodyText,
-            draft_id: composeDraftId || undefined,
-          }),
-        });
-      }
-      const payload = await parseApiPayload(response);
-      if (!response.ok) throw new Error((payload as { detail?: string } | null)?.detail || "Falha ao guardar rascunho");
-      const newDraftId = (payload as { data?: { id?: string } } | null)?.data?.id;
-      if (newDraftId) setComposeDraftId(newDraftId);
-      setSuccess("Rascunho guardado.");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erro ao guardar rascunho");
-    } finally {
-      setComposeSaving(false);
-    }
-  }
-
-  function openDraft(email: EmailMessage) {
-    // Abrir rascunho existente no modal de composição
-    setComposeMode("new");
-    setComposeTo(email.to_addresses || "");
-    setComposeCc("");
-    setComposeBcc("");
-    setShowBcc(false);
-    setComposeSubject(email.subject || "");
-    // Usar body_text se disponível, senão extrair do HTML
-    const bodyText = email.body_text || (email.body_html ? email.body_html.replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "") : "");
-    setComposeBody(bodyText);
-    setComposeForwardHtml(null);
-    setComposeAttachments([]);
-    setComposeDraftId(email.id);
-    if (composeFileInputRef.current) composeFileInputRef.current.value = "";
-    // Set rich text editor content
-    setTimeout(() => {
-      if (composeBodyRef.current) {
-        // If draft has HTML, use it directly; otherwise convert text to HTML
-        if (email.body_html && email.body_html.trim().length > 1) {
-          composeBodyRef.current.innerHTML = email.body_html;
-        } else {
-          composeBodyRef.current.innerHTML = bodyText.replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
-        }
-      }
-    }, 100);
   }
 
   async function applyBulkAction(action: EmailAction, targetFolder?: string, emailIdsOverride?: string[]) {
@@ -1642,16 +1119,16 @@ export default function EmailPage() {
   // ─── RENDER ───────────────────────────────────────────────────────────────────
 
   // Compose Modal rendered as overlay
-  const composeModal = composeMode ? (
+  const composeModal = composeMode && selectedEmail ? (
     <div className="compose-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget && !composeSending) closeCompose(); }}>
       <div className="compose-modal">
         <div className="compose-modal-header">
           <div className="compose-modal-header-left">
             <span className="compose-modal-icon">
-              {composeMode === "new" ? "✏️" : composeMode === "reply" ? "↩" : composeMode === "reply_all" ? "↩↩" : "↪"}
+              {composeMode === "reply" ? "↩" : composeMode === "reply_all" ? "↩↩" : "↪"}
             </span>
             <span className="compose-modal-title">
-              {composeMode === "new" ? "Novo Email" : composeMode === "reply" ? "Responder" : composeMode === "reply_all" ? "Responder a todos" : "Reencaminhar"}
+              {composeMode === "reply" ? "Responder" : composeMode === "reply_all" ? "Responder a todos" : "Reencaminhar"}
             </span>
           </div>
           <button className="compose-modal-close" onClick={closeCompose} disabled={composeSending} type="button" aria-label="Fechar">
@@ -1686,20 +1163,7 @@ export default function EmailPage() {
                 onChange={e => setComposeCc(e.target.value)}
                 placeholder="cc@email.com (opcional)"
               />
-              {!showBcc && <button type="button" className="compose-modal-bcc-toggle" onClick={() => setShowBcc(true)}>+ Bcc</button>}
             </div>
-            {showBcc && (
-              <div className="compose-modal-field">
-                <label className="compose-modal-label">Bcc:</label>
-                <input
-                  type="text"
-                  className="compose-modal-input"
-                  value={composeBcc}
-                  onChange={e => setComposeBcc(e.target.value)}
-                  placeholder="bcc@email.com (oculto)"
-                />
-              </div>
-            )}
             <div className="compose-modal-field">
               <label className="compose-modal-label">Assunto:</label>
               <input
@@ -1712,76 +1176,12 @@ export default function EmailPage() {
           </div>
 
           <div className="compose-modal-editor">
-            {/* Rich Text Toolbar */}
-            <div className="compose-toolbar">
-              <select className="compose-toolbar-select" onChange={e => { document.execCommand('fontName', false, e.target.value); e.target.value = ''; }} defaultValue="">
-                <option value="" disabled>Fonte</option>
-                <option value="Arial">Arial</option>
-                <option value="Helvetica">Helvetica</option>
-                <option value="Times New Roman">Times New Roman</option>
-                <option value="Georgia">Georgia</option>
-                <option value="Verdana">Verdana</option>
-                <option value="Courier New">Courier New</option>
-                <option value="Trebuchet MS">Trebuchet MS</option>
-                <option value="Tahoma">Tahoma</option>
-              </select>
-              <select className="compose-toolbar-select compose-toolbar-select-sm" onChange={e => { document.execCommand('fontSize', false, e.target.value); e.target.value = ''; }} defaultValue="">
-                <option value="" disabled>Tam.</option>
-                <option value="1">8</option>
-                <option value="2">10</option>
-                <option value="3">12</option>
-                <option value="4">14</option>
-                <option value="5">18</option>
-                <option value="6">24</option>
-                <option value="7">36</option>
-              </select>
-              <span className="compose-toolbar-sep" />
-              <button type="button" className="compose-toolbar-btn" onClick={() => document.execCommand('bold')} title="Negrito (Ctrl+B)"><b>B</b></button>
-              <button type="button" className="compose-toolbar-btn" onClick={() => document.execCommand('italic')} title="Itálico (Ctrl+I)"><i>I</i></button>
-              <button type="button" className="compose-toolbar-btn" onClick={() => document.execCommand('underline')} title="Sublinhado (Ctrl+U)"><u>U</u></button>
-              <button type="button" className="compose-toolbar-btn" onClick={() => document.execCommand('strikeThrough')} title="Riscado"><s>S</s></button>
-              <span className="compose-toolbar-sep" />
-              <label className="compose-toolbar-btn compose-toolbar-color" title="Cor do texto">
-                <span style={{color: 'var(--accent)'}}>A</span>
-                <input type="color" defaultValue="#000000" onChange={e => document.execCommand('foreColor', false, e.target.value)} className="compose-toolbar-color-input" />
-              </label>
-              <label className="compose-toolbar-btn compose-toolbar-color" title="Cor de fundo">
-                <span style={{background: '#ffeb3b', padding: '0 3px', borderRadius: '2px', fontSize: '12px'}}>A</span>
-                <input type="color" defaultValue="#ffeb3b" onChange={e => document.execCommand('hiliteColor', false, e.target.value)} className="compose-toolbar-color-input" />
-              </label>
-              <span className="compose-toolbar-sep" />
-              <button type="button" className="compose-toolbar-btn" onClick={() => document.execCommand('justifyLeft')} title="Alinhar à esquerda">⫷</button>
-              <button type="button" className="compose-toolbar-btn" onClick={() => document.execCommand('justifyCenter')} title="Centrar">⫸</button>
-              <button type="button" className="compose-toolbar-btn" onClick={() => document.execCommand('justifyRight')} title="Alinhar à direita">⫸</button>
-              <span className="compose-toolbar-sep" />
-              <button type="button" className="compose-toolbar-btn" onClick={() => document.execCommand('insertUnorderedList')} title="Lista com marcadores">•≡</button>
-              <button type="button" className="compose-toolbar-btn" onClick={() => document.execCommand('insertOrderedList')} title="Lista numerada">1.</button>
-              <button type="button" className="compose-toolbar-btn" onClick={() => document.execCommand('indent')} title="Aumentar avanço">⇥</button>
-              <button type="button" className="compose-toolbar-btn" onClick={() => document.execCommand('outdent')} title="Diminuir avanço">⇤</button>
-              <span className="compose-toolbar-sep" />
-              <button type="button" className="compose-toolbar-btn" onClick={() => { const url = prompt('URL do link:'); if (url) document.execCommand('createLink', false, url); }} title="Inserir link">🔗</button>
-              <button type="button" className="compose-toolbar-btn" onClick={() => document.execCommand('insertHorizontalRule')} title="Linha horizontal">―</button>
-              <button type="button" className="compose-toolbar-btn" onClick={() => document.execCommand('removeFormat')} title="Limpar formatação">⊘</button>
-            </div>
-            {/* Rich Text Editor */}
-            <div
+            <textarea
               ref={composeBodyRef}
-              className="compose-modal-richtext"
-              contentEditable
-              suppressContentEditableWarning
-              data-placeholder="Escreva a sua mensagem..."
-              onKeyDown={e => {
-                if (e.ctrlKey && e.key === "Enter") {
-                  e.preventDefault();
-                  if (composeMode === "new") { void handleSendNew(); }
-                  else { void handleSendReply(); }
-                }
-              }}
-              onInput={() => {
-                if (composeBodyRef.current) {
-                  setComposeBody(composeBodyRef.current.innerText);
-                }
-              }}
+              className="compose-modal-textarea"
+              value={composeBody}
+              onChange={e => setComposeBody(e.target.value)}
+              placeholder="Escreva a sua mensagem..."
             />
           </div>
 
@@ -1839,7 +1239,7 @@ export default function EmailPage() {
           <div className="compose-modal-footer-left">
             <button
               className="compose-modal-btn-send"
-              onClick={() => { if (composeMode === "new") { void handleSendNew(); } else { void handleSendReply(); } }}
+              onClick={() => void handleSendReply()}
               disabled={composeSending || !composeTo.trim()}
               type="button"
             >
@@ -1857,15 +1257,6 @@ export default function EmailPage() {
               title="Anexar ficheiro"
             >
               📎 Anexar
-            </button>
-            <button
-              className="compose-modal-btn-draft"
-              onClick={() => void handleSaveDraft()}
-              disabled={composeSending || composeSaving}
-              type="button"
-              title="Guardar como rascunho"
-            >
-              {composeSaving ? "A guardar..." : "💾 Rascunho"}
             </button>
           </div>
           <div className="compose-modal-footer-right">
@@ -1926,47 +1317,15 @@ export default function EmailPage() {
 
       {/* Compact Toolbar */}
       <div className="mail-toolbar-compact">
-        <button className="toolbar-btn-new-email" onClick={openNewCompose} type="button" title="Novo Email">
-          ✏️ Novo
-        </button>
-        <div className="toolbar-divider" />
         <label className="mail-search" aria-label="Pesquisar emails">
-          <span className="mail-search-icon">{searchLoading ? "⏳" : "⌕"}</span>
+          <span className="mail-search-icon">⌕</span>
           <input
             ref={searchInputRef}
             className="mail-search-input"
             type="text"
             value={searchQuery}
-            onChange={(event) => {
-              const value = event.target.value;
-              setSearchQuery(value);
-              // Debounce server search: trigger after 600ms of no typing
-              if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-              if (value.trim().length >= 2) {
-                searchDebounceRef.current = setTimeout(() => { triggerServerSearch(value.trim()); }, 600);
-              } else if (!value.trim()) {
-                // Clear search - reload normal emails
-                if (serverSearchQuery) {
-                  setServerSearchQuery("");
-                  if (tenantId && selectedMailboxId) loadEmails(tenantId, selectedMailboxId, selectedFolder).catch(() => {});
-                }
-              }
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && searchQuery.trim().length >= 2) {
-                event.preventDefault();
-                if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-                triggerServerSearch(searchQuery.trim());
-              } else if (event.key === "Escape") {
-                setSearchQuery("");
-                if (serverSearchQuery) {
-                  setServerSearchQuery("");
-                  if (tenantId && selectedMailboxId) loadEmails(tenantId, selectedMailboxId, selectedFolder).catch(() => {});
-                }
-                searchInputRef.current?.blur();
-              }
-            }}
-            placeholder="Pesquisar... (Enter)"
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Pesquisar..."
           />
         </label>
         <div className="toolbar-divider" />
@@ -1983,13 +1342,7 @@ export default function EmailPage() {
           Anexos ({attachmentsCount})
         </button>
         {activeFilterCount > 0 ? (
-          <button className="toolbar-chip" type="button" onClick={() => {
-            setSearchQuery(""); setShowUnreadOnly(false); setShowAttachmentsOnly(false); setShowFlaggedOnly(false);
-            if (serverSearchQuery) {
-              setServerSearchQuery("");
-              if (tenantId && selectedMailboxId) loadEmails(tenantId, selectedMailboxId, selectedFolder).catch(() => {});
-            }
-          }}>
+          <button className="toolbar-chip" type="button" onClick={() => { setSearchQuery(""); setShowUnreadOnly(false); setShowAttachmentsOnly(false); setShowFlaggedOnly(false); }}>
             Limpar
           </button>
         ) : null}
@@ -2188,8 +1541,8 @@ export default function EmailPage() {
             <section className="mail-list-column">
               <div className="mail-column-header">
                 <div>
-                  <h3>{serverSearchQuery ? `🔍 Resultados: "${serverSearchQuery}"` : `${selectedFolderMeta.icon} ${folderSelectionLabel}`}</h3>
-                  <p>{searchLoading && filteredEmails.length === 0 ? "A pesquisar..." : mailLoading && filteredEmails.length === 0 ? "A carregar..." : serverSearchQuery ? `${filteredEmails.length} resultado(s)${selectedFolder === ALL_FOLDERS_KEY ? " em todas as pastas" : ` em ${folderSelectionLabel}`}` : `${filteredEmails.length} email(s)${mailLoading ? " (a carregar mais...)" : ""}`}</p>
+                  <h3>{selectedFolderMeta.icon} {folderSelectionLabel}</h3>
+                  <p>{mailLoading ? "A carregar..." : `${filteredEmails.length} email(s)`}</p>
                 </div>
                 <div className="mail-column-actions">
                   <button className="toolbar-chip small" type="button" onClick={() => toggleSelectAllVisible()} disabled={!filteredEmails.length}>
@@ -2216,10 +1569,10 @@ export default function EmailPage() {
                 </div>
               ) : null}
 
-              {(mailLoading || searchLoading) && filteredEmails.length === 0 ? (
-                <div className="empty">{searchLoading ? "A pesquisar..." : "A carregar emails..."}</div>
-              ) : filteredEmails.length === 0 && !mailLoading ? (
-                <div className="empty">{serverSearchQuery ? `Nenhum resultado para "${serverSearchQuery}".` : "Sem emails nesta seleção."}</div>
+              {mailLoading ? (
+                <div className="empty">A carregar emails...</div>
+              ) : filteredEmails.length === 0 ? (
+                <div className="empty">Sem emails nesta seleção.</div>
               ) : (
                 <div className="compact-mail-list" ref={mailListRef}>
                   <div className="mail-list">
@@ -2229,26 +1582,7 @@ export default function EmailPage() {
                         <div
                           key={item.id}
                           className={`mail-row ${selectedEmailId === item.id ? "active" : ""} ${item.is_seen ? "" : "unread"}`}
-                          onClick={() => {
-                            // Se estamos na pasta Drafts, abrir o rascunho no editor
-                            if (selectedFolder === "INBOX.Drafts" && canWriteRow) {
-                              openDraft(item);
-                            } else {
-                              setSelectedEmailId(item.id);
-                              // Mark as read when user clicks on an unread email
-                              if (!item.is_seen && canWriteRow) {
-                                fetch(`${API_BASE}/api/emails/${item.id}/actions`, {
-                                  method: "POST",
-                                  headers: { "Content-Type": "application/json", ...buildHeaders(tenantId) },
-                                  body: JSON.stringify({ action: "mark_read" }),
-                                }).then(r => {
-                                  if (r.ok) {
-                                    setEmails(prev => prev.map(e => e.id === item.id ? { ...e, is_seen: true } : e));
-                                  }
-                                }).catch(() => {});
-                              }
-                            }
-                          }}
+                          onClick={() => setSelectedEmailId(item.id)}
                           onKeyDown={(event) => handleRowKeyDown(event, item.id)}
                           onDragStart={(event) => { if (!canWriteRow) return; setDraggingEmailId(item.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", item.id); }}
                           onDragEnd={() => { setDraggingEmailId(""); setDragHoverFolder(""); }}
@@ -2302,37 +1636,46 @@ export default function EmailPage() {
               ) : (
                 <>
                   <div className="reader-shell">
-                    <div className="reader-compact-header">
-                      <div className="reader-compact-subject">
+                    <div className="reader-header-card">
+                      <div className="reader-persona">
                         <div className="reader-avatar" aria-hidden="true">{senderInitial(selectedEmail)}</div>
-                        <div className="reader-compact-info">
+                        <div>
                           <h3>{selectedEmail.subject || "(Sem assunto)"}</h3>
-                          <p><strong>De:</strong> {displaySender(selectedEmail)} &nbsp;|&nbsp; <strong>Para:</strong> {selectedEmail.to_addresses || "—"} &nbsp;|&nbsp; {formatLongDate(selectedEmail.received_at)}</p>
+                          <p><strong>De:</strong> {displaySender(selectedEmail)}</p>
+                          <p><strong>Para:</strong> {selectedEmail.to_addresses || "—"}</p>
+                          <p><strong>Data:</strong> {formatLongDate(selectedEmail.received_at)}</p>
                         </div>
                       </div>
-                      <div className="reader-compact-tags">
-                        <span className="tag-sm">{selectedEmailFolderMeta.icon} {folderLabel(selectedEmail.folder || "INBOX")}</span>
-                        <span className="tag-sm">{selectedMailbox ? mailboxAccessLabel(selectedMailbox.access_mode) : "Só leitura"}</span>
-                        {selectedEmail.is_flagged ? <span className="tag-sm important">★</span> : null}
-                        {selectedEmail.has_attachments ? <span className="tag-sm">📎</span> : null}
+                      <div className="meta" style={{ marginTop: "8px" }}>
+                        <span className="tag">{selectedEmailFolderMeta.icon} {folderLabel(selectedEmail.folder || "INBOX")}</span>
+                        <span className="tag">{selectedMailbox ? mailboxAccessLabel(selectedMailbox.access_mode) : "Só leitura"}</span>
+                        {selectedEmail.is_flagged ? <span className="tag important">★ Importante</span> : null}
+                        {selectedEmail.has_attachments ? <span className="tag">📎 Anexos</span> : null}
                       </div>
                     </div>
-                    <div className="reader-toolbar">
-                      <div className="reader-toolbar-group">
-                        <button className="toolbar-btn" disabled={!canWriteSelected} onClick={() => openCompose("reply")} type="button" title="Responder">↩</button>
-                        <button className="toolbar-btn" disabled={!canWriteSelected} onClick={() => openCompose("reply_all")} type="button" title="Responder a todos">↩↩</button>
-                        <button className="toolbar-btn" disabled={!canWriteSelected} onClick={() => openCompose("forward")} type="button" title="Reencaminhar">↪</button>
-                        <span className="toolbar-sep">|</span>
-                        <button className={`toolbar-btn ${selectedEmail.is_flagged ? "active" : ""}`} disabled={!canWriteSelected || actioningEmailId === selectedEmail.id} onClick={() => void applyEmailAction(selectedEmail.id, selectedEmail.is_flagged ? "unflag" : "flag")} type="button" title={selectedEmail.is_flagged ? "Remover importante" : "Marcar importante"}>★</button>
-                        <button className="toolbar-btn" disabled={!canWriteSelected || actioningEmailId === selectedEmail.id || selectedEmail.is_seen} onClick={() => void applyEmailAction(selectedEmail.id, "mark_read")} type="button" title="Marcar lido">✓</button>
-                        <button className="toolbar-btn" disabled={!canWriteSelected || actioningEmailId === selectedEmail.id || !selectedEmail.is_seen} onClick={() => void applyEmailAction(selectedEmail.id, "mark_unread")} type="button" title="Marcar por ler">●</button>
-                        <span className="toolbar-sep">|</span>
-                        <select className="toolbar-select" value={selectedMoveTarget} onChange={(event) => setMoveTargetByEmail((current) => ({ ...current, [selectedEmail.id]: event.target.value }))} disabled={!canWriteSelected}>
-                          <option value="">Mover...</option>
+
+                    <div className="reader-ribbon">
+                      <div className="reader-ribbon-title">Ações</div>
+                      <div className="mail-reader-actions">
+                        <button className={`admin-button secondary ${selectedEmail.is_flagged ? "active-toggle" : ""}`} disabled={!canWriteSelected || actioningEmailId === selectedEmail.id} onClick={() => void applyEmailAction(selectedEmail.id, selectedEmail.is_flagged ? "unflag" : "flag")} type="button">
+                          {selectedEmail.is_flagged ? "☆ Remover" : "★ Importante"}
+                        </button>
+                        <button className="admin-button secondary" disabled={!canWriteSelected || actioningEmailId === selectedEmail.id || selectedEmail.is_seen} onClick={() => void applyEmailAction(selectedEmail.id, "mark_read")} type="button">Marcar lido</button>
+                        <button className="admin-button secondary" disabled={!canWriteSelected || actioningEmailId === selectedEmail.id || !selectedEmail.is_seen} onClick={() => void applyEmailAction(selectedEmail.id, "mark_unread")} type="button">Marcar por ler</button>
+                        <select className="admin-input" value={selectedMoveTarget} onChange={(event) => setMoveTargetByEmail((current) => ({ ...current, [selectedEmail.id]: event.target.value }))} disabled={!canWriteSelected} style={{ maxWidth: "140px" }}>
+                          <option value="">Mover para...</option>
                           {folderOptions.map((folder) => (<option key={`${selectedEmail.id}-${folder}`} value={folder}>{folderLabel(folder)}</option>))}
                         </select>
-                        <button className="toolbar-btn" disabled={!canMoveSelected || actioningEmailId === selectedEmail.id || foldersLoading} onClick={() => void applyEmailAction(selectedEmail.id, "move", selectedMoveTarget)} type="button" title="Mover">📁</button>
-                        <button className="toolbar-btn danger" disabled={!canWriteSelected || actioningEmailId === selectedEmail.id} onClick={() => void applyEmailAction(selectedEmail.id, "delete")} type="button" title="Apagar">🗑</button>
+                        <button className="admin-button secondary" disabled={!canMoveSelected || actioningEmailId === selectedEmail.id || foldersLoading} onClick={() => void applyEmailAction(selectedEmail.id, "move", selectedMoveTarget)} type="button">Mover</button>
+                        <button className="admin-button danger" disabled={!canWriteSelected || actioningEmailId === selectedEmail.id} onClick={() => void applyEmailAction(selectedEmail.id, "delete")} type="button">Apagar</button>
+                      </div>
+                    </div>
+                    <div className="reader-ribbon">
+                      <div className="reader-ribbon-title">Responder</div>
+                      <div className="mail-reader-actions">
+                        <button className="admin-button primary" disabled={!canWriteSelected} onClick={() => openCompose("reply")} type="button">↩ Responder</button>
+                        <button className="admin-button secondary" disabled={!canWriteSelected} onClick={() => openCompose("reply_all")} type="button">↩↩ Responder a todos</button>
+                        <button className="admin-button secondary" disabled={!canWriteSelected} onClick={() => openCompose("forward")} type="button">↪ Reencaminhar</button>
                       </div>
                     </div>
                   </div>
@@ -2373,37 +1716,13 @@ export default function EmailPage() {
 
                   {/* Preview Modal */}
                   {previewOpen && attachments.length > 0 && (
-                    <div className="attachment-preview-overlay" onClick={() => { setPreviewOpen(false); setPreviewFullscreen(false); }}>
-                      <div ref={previewModalRef} className={`attachment-preview-modal ${previewFullscreen ? "preview-fullscreen" : ""}`} onClick={e => e.stopPropagation()}>
+                    <div className="attachment-preview-overlay" onClick={() => setPreviewOpen(false)}>
+                      <div className="attachment-preview-modal" onClick={e => e.stopPropagation()}>
                         <div className="preview-modal-header">
                           <span className="preview-modal-title">
                             {attachments[previewIndex]?.filename} ({previewIndex + 1}/{attachments.length})
                           </span>
-                          <div className="preview-header-actions">
-                            <button className="preview-modal-fullscreen" onClick={() => {
-                              if (!previewFullscreen) {
-                                // Enter native fullscreen on the modal element
-                                const el = previewModalRef.current;
-                                if (el?.requestFullscreen) {
-                                  el.requestFullscreen().catch(() => {});
-                                } else if ((el as any)?.webkitRequestFullscreen) {
-                                  (el as any).webkitRequestFullscreen();
-                                }
-                                setPreviewFullscreen(true);
-                              } else {
-                                // Exit native fullscreen
-                                if (document.fullscreenElement) {
-                                  document.exitFullscreen().catch(() => {});
-                                } else if ((document as any).webkitExitFullscreen) {
-                                  (document as any).webkitExitFullscreen();
-                                }
-                                setPreviewFullscreen(false);
-                              }
-                            }} type="button" title={previewFullscreen ? "Sair do ecrã inteiro" : "Ecrã inteiro"}>
-                              {previewFullscreen ? "⊡" : "⊞"}
-                            </button>
-                            <button className="preview-modal-close" onClick={() => { setPreviewOpen(false); if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); setPreviewFullscreen(false); }} type="button">✕</button>
-                          </div>
+                          <button className="preview-modal-close" onClick={() => setPreviewOpen(false)} type="button">✕</button>
                         </div>
                         <div className="preview-modal-body">
                           {previewIndex > 0 && (
@@ -2473,51 +1792,9 @@ export default function EmailPage() {
 
 
                   <div className="mail-reader-body">
-                    {bodyLoading ? (
-                      <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>A carregar conteúdo...</div>
-                    ) : selectedEmail.body_html && selectedEmail.body_html.trim().length > 1 ? (
-                      <>
-                        {!allowExternalImages && (
-                          <div className="external-images-bar">
-                            <span>🔒 Imagens externas bloqueadas por segurança.</span>
-                            <button className="toolbar-btn load-images-btn" onClick={() => setAllowExternalImages(true)} type="button">🖼 Carregar imagens</button>
-                          </div>
-                        )}
-                        <iframe
-                          key={`html-${selectedEmail.id}-${allowExternalImages}`}
-                          srcDoc={allowExternalImages ? selectedEmail.body_html : selectedEmail.body_html.replace(/<img[^>]*src=["']https?:\/\/[^"']*["'][^>]*>/gi, '<img src="" alt="[imagem bloqueada]" style="display:inline-block;width:20px;height:20px;background:#eee;border:1px dashed #ccc;" />').replace(/background(-image)?\s*:\s*url\(['"]?https?:\/\/[^)]*\)/gi, 'background:transparent')}
-                          sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-                          title="Email HTML"
-                          style={{
-                            width: '100%',
-                            minHeight: '200px',
-                            height: '100%',
-                            border: 'none',
-                            background: '#fff',
-                            flex: 1,
-                          }}
-                          onLoad={(e) => {
-                            const iframe = e.target as HTMLIFrameElement;
-                            if (iframe.contentDocument) {
-                              const h = iframe.contentDocument.documentElement.scrollHeight;
-                              iframe.style.height = Math.max(200, h + 10) + 'px';
-                              // Force all links to open in new tab
-                              const links = iframe.contentDocument.querySelectorAll('a[href]');
-                              links.forEach((link) => {
-                                link.setAttribute('target', '_blank');
-                                link.setAttribute('rel', 'noopener noreferrer');
-                              });
-                            }
-                          }}
-                        />
-                      </>
-                    ) : (
-                      <div style={{ whiteSpace: 'pre-wrap' }}>
-                        {selectedEmail.body_text?.trim()
-                          ? selectedEmail.body_text
-                          : selectedEmail.snippet || "Sem conteúdo sincronizado."}
-                      </div>
-                    )}
+                    {selectedEmail.body_text?.trim()
+                      ? selectedEmail.body_text
+                      : selectedEmail.snippet || "Sem conteúdo sincronizado."}
                   </div>
                 </>
               )}
@@ -2530,4 +1807,3 @@ export default function EmailPage() {
     </>  
   );
 }
-

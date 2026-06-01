@@ -1,8 +1,11 @@
-/** @type {import('next').NextConfig} */
+/** @type {import(next).NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
   basePath: "/module/email",
   output: "standalone",
+  experimental: {
+    proxyTimeout: 120000,
+  },
   async rewrites() {
     const serverApiBase = process.env.SERVER_API_BASE_URL || "http://mod-email:4004";
     return [
@@ -13,5 +16,4 @@ const nextConfig = {
     ];
   },
 };
-
 module.exports = nextConfig;

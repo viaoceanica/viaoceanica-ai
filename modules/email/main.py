@@ -29,6 +29,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.responses import HTMLResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint, create_engine, delete as sql_delete, func, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -52,6 +53,7 @@ OLLAMA_EMBEDDING_URL = os.getenv("OLLAMA_EMBEDDING_URL", "http://host.docker.int
 EMAIL_EMBEDDING_MODEL = os.getenv("EMAIL_EMBEDDING_MODEL", "qwen3-embedding:8b")
 EMAIL_EMBEDDING_TIMEOUT_SECONDS = float(os.getenv("EMAIL_EMBEDDING_TIMEOUT_SECONDS", "120"))
 EMAIL_EMBEDDING_SOURCE_LIMIT = int(os.getenv("EMAIL_EMBEDDING_SOURCE_LIMIT", "12000"))
+IMAP_SYNC_BATCH_SIZE = max(1, int(os.getenv("EMAIL_IMAP_SYNC_BATCH_SIZE", "250")))
 _start_time = time.time()
 
 MailboxSecurityMode = Literal["ssl_tls", "starttls", "none"]
@@ -96,6 +98,7 @@ class Mailbox(Base):
     auth_method: Mapped[str] = mapped_column(String(32), default="password")
     folder: Mapped[str] = mapped_column(String(255), default="INBOX")
     validate_certificates: Mapped[bool] = mapped_column(Boolean, default=True)
+    signature_html: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     last_connection_test_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -225,6 +228,7 @@ class MailboxAdminUpsert(BaseModel):
     validate_certificates: bool = True
     sync_enabled: bool = True
     auth_method: Literal["password"] = "password"
+    signature_html: Optional[str] = None
 
     @field_validator("name", "email_address", "imap_host", "imap_username", "folder")
     @classmethod
@@ -1863,11 +1867,38 @@ def parse_fetch_payload(fetch_data: list | tuple | None) -> tuple[str, bytes]:
     return " ".join(meta_parts), raw_bytes
 
 
+def parse_fetch_payloads(fetch_data: list | tuple | None) -> list[tuple[str, bytes]]:
+    records: list[tuple[str, bytes]] = []
+    for entry in fetch_data or []:
+        if isinstance(entry, tuple):
+            meta, raw_bytes = parse_fetch_payload([entry])
+            records.append((meta, raw_bytes))
+    return records
+
+
 def parse_imap_flags(meta: str) -> set[str]:
     match = re.search(r"FLAGS \((.*?)\)", meta)
     if not match:
         return set()
     return {flag.strip() for flag in match.group(1).split() if flag.strip()}
+
+
+def parse_imap_uid(meta: str) -> str | None:
+    match = re.search(r"\bUID (\d+)\b", meta)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def iter_imap_sequence_ranges(total_messages: int, batch_size: int = IMAP_SYNC_BATCH_SIZE) -> list[tuple[int, int]]:
+    if total_messages <= 0:
+        return []
+    step = max(1, batch_size)
+    ranges: list[tuple[int, int]] = []
+    for batch_end in range(total_messages, 0, -step):
+        batch_start = max(1, batch_end - step + 1)
+        ranges.append((batch_start, batch_end))
+    return ranges
 
 
 def decode_imap_folder_name(entry: bytes | str) -> str | None:
@@ -2128,90 +2159,171 @@ def sync_selected_folder(
         except (TypeError, ValueError):
             remote_total = 0
 
-    search_status, search_data = client.uid("search", None, "ALL")
-    if search_status != "OK":
-        raise RuntimeError(f"Falha na pesquisa IMAP da pasta '{folder}': {search_data}")
-
-    all_uids: list[str] = []
-    if search_data and search_data[0]:
-        all_uids = [uid for uid in search_data[0].decode("utf-8", errors="ignore").split() if uid]
-    selected_uids = all_uids
-
-    existing = []
-    if selected_uids:
-        existing = session.scalars(
-            select(EmailMessage).where(
-                EmailMessage.tenant_id == mailbox.tenant_id,
-                EmailMessage.mailbox_id == mailbox.id,
-                EmailMessage.folder == folder,
-                EmailMessage.imap_uid.in_(selected_uids),
-            )
-        ).all()
-    existing_by_uid = {item.imap_uid: item for item in existing}
-
     synced_count = 0
     new_count = 0
     updated_count = 0
     embedded_count = 0
+    reconciled_count = 0
 
-    for uid in reversed(selected_uids):
-        fetch_status, fetch_data = client.uid("fetch", uid, "(UID FLAGS BODY.PEEK[])")
-        if fetch_status != "OK":
-            logger.warning("[email] Failed to fetch UID %s for mailbox %s folder %s: %s", uid, mailbox.id, folder, fetch_data)
-            continue
+    # --- Reconciliation: collect all remote UIDs for this folder ---
+    remote_uids: set[str] = set()
+    try:
+        search_status, search_data = client.uid("SEARCH", None, "ALL")
+        if search_status == "OK" and search_data and search_data[0]:
+            remote_uids = set(search_data[0].decode("utf-8", errors="ignore").split())
+    except Exception as exc:
+        logger.warning("[email] UID SEARCH failed for folder %s mailbox %s: %s", folder, mailbox.id, exc)
 
-        meta, raw_bytes = parse_fetch_payload(fetch_data)
-        flags = parse_imap_flags(meta)
-        payload = parse_email_payload(raw_bytes)
-
-        item = existing_by_uid.get(uid)
-        if item is None and payload.message_id_header:
-            item = session.scalar(
-                select(EmailMessage).where(
-                    EmailMessage.tenant_id == mailbox.tenant_id,
-                    EmailMessage.mailbox_id == mailbox.id,
-                    EmailMessage.folder == folder,
-                    EmailMessage.message_id_header == payload.message_id_header,
-                )
+    # Mark local emails as remote_deleted if their UID no longer exists on the server
+    if remote_uids:
+        local_emails = session.scalars(
+            select(EmailMessage).where(
+                EmailMessage.tenant_id == mailbox.tenant_id,
+                EmailMessage.mailbox_id == mailbox.id,
+                EmailMessage.folder == folder,
+                EmailMessage.remote_deleted.is_(False),
+            )
+        ).all()
+        for local_item in local_emails:
+            if local_item.imap_uid and local_item.imap_uid not in remote_uids:
+                local_item.remote_deleted = True
+                local_item.updated_at = utc_now()
+                reconciled_count += 1
+        if reconciled_count > 0:
+            session.commit()
+            logger.info(
+                "[email] Reconciled folder %s for mailbox %s: marked %s emails as remote_deleted",
+                folder, mailbox.id, reconciled_count,
+            )
+    elif remote_total == 0:
+        # Folder is empty on server - mark all local emails in this folder as remote_deleted
+        local_emails = session.scalars(
+            select(EmailMessage).where(
+                EmailMessage.tenant_id == mailbox.tenant_id,
+                EmailMessage.mailbox_id == mailbox.id,
+                EmailMessage.folder == folder,
+                EmailMessage.remote_deleted.is_(False),
+            )
+        ).all()
+        for local_item in local_emails:
+            local_item.remote_deleted = True
+            local_item.updated_at = utc_now()
+            reconciled_count += 1
+        if reconciled_count > 0:
+            session.commit()
+            logger.info(
+                "[email] Folder %s is empty on server for mailbox %s: marked %s emails as remote_deleted",
+                folder, mailbox.id, reconciled_count,
             )
 
-        if item is None:
-            item = EmailMessage(
-                id=str(uuid4()),
-                tenant_id=mailbox.tenant_id,
-                mailbox_id=mailbox.id,
-                imap_uid=uid,
-                folder=folder,
-            )
-            session.add(item)
-            new_count += 1
-        else:
-            updated_count += 1
+    # Re-select the folder since UID SEARCH may have changed state
+    select_status, select_data = client.select(folder, readonly=True)
+    if select_status != "OK":
+        raise RuntimeError(f"Falha ao reabrir a pasta '{folder}': {select_data}")
 
-        item.imap_uid = uid
-        item.folder = folder
-        item.message_id_header = payload.message_id_header
-        item.subject = payload.subject
-        item.from_name = payload.from_name
-        item.from_address = payload.from_address
-        item.to_addresses = payload.to_addresses
-        item.snippet = payload.snippet
-        item.body_text = payload.body_text
-        item.body_html = payload.body_html
-        item.received_at = payload.received_at or item.received_at or utc_now()
-        item.has_attachments = payload.has_attachments
-        item.is_seen = "\\Seen" in flags
-        item.is_flagged = "\\Flagged" in flags
-        item.remote_deleted = "\\Deleted" in flags
-        item.last_synced_at = utc_now()
-        item.updated_at = utc_now()
-        synced_count += 1
+    for batch_start, batch_end in iter_imap_sequence_ranges(remote_total):
+        batch_range = f"{batch_start}:{batch_end}"
+        disconnected_retry = False
 
-        try:
-            if sync_email_embedding(session, item):
-                embedded_count += 1
-        except Exception as exc:
-            logger.warning("[email] embedding sync failed for message %s: %s", item.id, exc)
+        while True:
+            try:
+                fetch_status, fetch_data = client.fetch(batch_range, "(UID FLAGS BODY.PEEK[])")
+                if fetch_status != "OK":
+                    raise RuntimeError(f"Falha ao obter mensagens IMAP na pasta '{folder}' para o intervalo {batch_range}: {fetch_data}")
+
+                records = parse_fetch_payloads(fetch_data)
+                if not records:
+                    break
+
+                batch_uids = [uid for uid in (parse_imap_uid(meta) for meta, _ in records) if uid]
+                existing = []
+                if batch_uids:
+                    existing = session.scalars(
+                        select(EmailMessage).where(
+                            EmailMessage.tenant_id == mailbox.tenant_id,
+                            EmailMessage.mailbox_id == mailbox.id,
+                            EmailMessage.folder == folder,
+                            EmailMessage.imap_uid.in_(batch_uids),
+                        )
+                    ).all()
+                existing_by_uid = {item.imap_uid: item for item in existing}
+
+                for meta, raw_bytes in records:
+                    uid = parse_imap_uid(meta)
+                    if uid is None:
+                        logger.warning("[email] Skipping IMAP message without UID in mailbox %s folder %s", mailbox.id, folder)
+                        continue
+
+                    flags = parse_imap_flags(meta)
+                    payload = parse_email_payload(raw_bytes)
+
+                    item = existing_by_uid.get(uid)
+                    if item is None and payload.message_id_header:
+                        item = session.scalar(
+                            select(EmailMessage).where(
+                                EmailMessage.tenant_id == mailbox.tenant_id,
+                                EmailMessage.mailbox_id == mailbox.id,
+                                EmailMessage.folder == folder,
+                                EmailMessage.message_id_header == payload.message_id_header,
+                            )
+                        )
+
+                    if item is None:
+                        item = EmailMessage(
+                            id=str(uuid4()),
+                            tenant_id=mailbox.tenant_id,
+                            mailbox_id=mailbox.id,
+                            imap_uid=uid,
+                            folder=folder,
+                        )
+                        session.add(item)
+                        new_count += 1
+                    else:
+                        updated_count += 1
+
+                    item.imap_uid = uid
+                    item.folder = folder
+                    item.message_id_header = (payload.message_id_header or "")[:512] or None
+                    item.subject = (payload.subject or "")[:512] or None
+                    item.from_name = (payload.from_name or "")[:255] or None
+                    item.from_address = (payload.from_address or "")[:255] or None
+                    item.to_addresses = payload.to_addresses
+                    item.snippet = payload.snippet
+                    item.body_text = payload.body_text
+                    item.body_html = payload.body_html
+                    item.received_at = payload.received_at or item.received_at or utc_now()
+                    item.has_attachments = payload.has_attachments
+                    item.is_seen = "\\Seen" in flags
+                    item.is_flagged = "\\Flagged" in flags
+                    item.remote_deleted = "\\Deleted" in flags
+                    item.last_synced_at = utc_now()
+                    item.updated_at = utc_now()
+                    synced_count += 1
+
+                    try:
+                        if sync_email_embedding(session, item):
+                            embedded_count += 1
+                    except Exception as exc:
+                        logger.warning("[email] embedding sync failed for message %s: %s", item.id, exc)
+
+                session.commit()
+                break
+            except Exception as exc:
+                disconnected = is_imap_disconnect_error(exc)
+                if disconnected:
+                    close_imap_client(client)
+                    client = None
+                    if not disconnected_retry:
+                        disconnected_retry = True
+                        logger.warning(
+                            "[email] IMAP connection dropped while syncing folder %s for mailbox %s interval %s, reconnecting once",
+                            folder,
+                            mailbox.id,
+                            batch_range,
+                        )
+                        client = connect(folder)
+                        continue
+                raise
 
     return {
         "folder": folder,
@@ -2219,8 +2331,212 @@ def sync_selected_folder(
         "created": new_count,
         "updated": updated_count,
         "embedded": embedded_count,
+        "reconciled": reconciled_count,
         "remote_total": remote_total,
     }
+
+
+def quick_sync_folder(
+    session: Session,
+    client: imaplib.IMAP4 | imaplib.IMAP4_SSL,
+    mailbox: Mailbox,
+    folder: str,
+) -> dict:
+    """Fast sync: reconcile UIDs (detect deletions) + fetch only emails from the last 24 hours."""
+    select_status, select_data = client.select(folder, readonly=True)
+    if select_status != "OK":
+        raise RuntimeError(f"Falha ao abrir a pasta '{folder}': {select_data}")
+
+    remote_total = 0
+    if select_data and select_data[0]:
+        try:
+            remote_total = int(select_data[0])
+        except (TypeError, ValueError):
+            remote_total = 0
+
+    synced_count = 0
+    new_count = 0
+    updated_count = 0
+    reconciled_count = 0
+
+    # --- Reconciliation: collect all remote UIDs for this folder ---
+    remote_uids: set[str] = set()
+    try:
+        search_status, search_data = client.uid("SEARCH", None, "ALL")
+        if search_status == "OK" and search_data and search_data[0]:
+            remote_uids = set(search_data[0].decode("utf-8", errors="ignore").split())
+    except Exception as exc:
+        logger.warning("[email] quick_sync UID SEARCH failed for folder %s mailbox %s: %s", folder, mailbox.id, exc)
+
+    # Mark local emails as remote_deleted if their UID no longer exists on the server
+    if remote_uids:
+        local_emails = session.scalars(
+            select(EmailMessage).where(
+                EmailMessage.tenant_id == mailbox.tenant_id,
+                EmailMessage.mailbox_id == mailbox.id,
+                EmailMessage.folder == folder,
+                EmailMessage.remote_deleted.is_(False),
+            )
+        ).all()
+        for local_item in local_emails:
+            if local_item.imap_uid and local_item.imap_uid not in remote_uids:
+                local_item.remote_deleted = True
+                local_item.updated_at = utc_now()
+                reconciled_count += 1
+        if reconciled_count > 0:
+            session.commit()
+            logger.info(
+                "[email] quick_sync reconciled folder %s for mailbox %s: marked %s emails as remote_deleted",
+                folder, mailbox.id, reconciled_count,
+            )
+    elif remote_total == 0:
+        local_emails = session.scalars(
+            select(EmailMessage).where(
+                EmailMessage.tenant_id == mailbox.tenant_id,
+                EmailMessage.mailbox_id == mailbox.id,
+                EmailMessage.folder == folder,
+                EmailMessage.remote_deleted.is_(False),
+            )
+        ).all()
+        for local_item in local_emails:
+            local_item.remote_deleted = True
+            local_item.updated_at = utc_now()
+            reconciled_count += 1
+        if reconciled_count > 0:
+            session.commit()
+
+    # --- Fetch only recent emails (last 24 hours) ---
+    since_date = (datetime.utcnow() - timedelta(days=1)).strftime("%d-%b-%Y")
+    recent_uids: list[str] = []
+    try:
+        search_status, search_data = client.uid("SEARCH", None, f"SINCE {since_date}")
+        if search_status == "OK" and search_data and search_data[0]:
+            recent_uids = search_data[0].decode("utf-8", errors="ignore").split()
+    except Exception as exc:
+        logger.warning("[email] quick_sync SINCE search failed for folder %s mailbox %s: %s", folder, mailbox.id, exc)
+
+    if recent_uids:
+        # Fetch recent emails in batches of 50 UIDs
+        batch_size = 50
+        for i in range(0, len(recent_uids), batch_size):
+            uid_batch = recent_uids[i:i + batch_size]
+            uid_set = ",".join(uid_batch)
+            try:
+                fetch_status, fetch_data = client.uid("FETCH", uid_set, "(UID FLAGS BODY.PEEK[])")
+                if fetch_status != "OK":
+                    continue
+
+                records = parse_fetch_payloads(fetch_data)
+                if not records:
+                    continue
+
+                batch_uids_parsed = [uid for uid in (parse_imap_uid(meta) for meta, _ in records) if uid]
+                existing = []
+                if batch_uids_parsed:
+                    existing = session.scalars(
+                        select(EmailMessage).where(
+                            EmailMessage.tenant_id == mailbox.tenant_id,
+                            EmailMessage.mailbox_id == mailbox.id,
+                            EmailMessage.folder == folder,
+                            EmailMessage.imap_uid.in_(batch_uids_parsed),
+                        )
+                    ).all()
+                existing_by_uid = {item.imap_uid: item for item in existing}
+
+                for meta, raw_bytes in records:
+                    uid = parse_imap_uid(meta)
+                    if uid is None:
+                        continue
+
+                    flags = parse_imap_flags(meta)
+                    payload = parse_email_payload(raw_bytes)
+
+                    item = existing_by_uid.get(uid)
+                    if item is None and payload.message_id_header:
+                        item = session.scalar(
+                            select(EmailMessage).where(
+                                EmailMessage.tenant_id == mailbox.tenant_id,
+                                EmailMessage.mailbox_id == mailbox.id,
+                                EmailMessage.folder == folder,
+                                EmailMessage.message_id_header == payload.message_id_header,
+                            )
+                        )
+
+                    if item is None:
+                        item = EmailMessage(
+                            id=str(uuid4()),
+                            tenant_id=mailbox.tenant_id,
+                            mailbox_id=mailbox.id,
+                            imap_uid=uid,
+                            folder=folder,
+                        )
+                        session.add(item)
+                        new_count += 1
+                    else:
+                        updated_count += 1
+
+                    item.imap_uid = uid
+                    item.folder = folder
+                    item.message_id_header = (payload.message_id_header or "")[:512] or None
+                    item.subject = (payload.subject or "")[:512] or None
+                    item.from_name = (payload.from_name or "")[:255] or None
+                    item.from_address = (payload.from_address or "")[:255] or None
+                    item.to_addresses = payload.to_addresses
+                    item.snippet = payload.snippet
+                    item.body_text = payload.body_text
+                    item.body_html = payload.body_html
+                    item.received_at = payload.received_at or item.received_at or utc_now()
+                    item.has_attachments = payload.has_attachments
+                    item.is_seen = "\\Seen" in flags
+                    item.is_flagged = "\\Flagged" in flags
+                    item.remote_deleted = "\\Deleted" in flags
+                    item.last_synced_at = utc_now()
+                    item.updated_at = utc_now()
+                    synced_count += 1
+
+                session.commit()
+            except Exception as exc:
+                logger.warning("[email] quick_sync fetch batch failed folder %s mailbox %s: %s", folder, mailbox.id, exc)
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+
+    return {
+        "folder": folder,
+        "fetched": synced_count,
+        "created": new_count,
+        "updated": updated_count,
+        "reconciled": reconciled_count,
+        "remote_total": remote_total,
+    }
+
+
+def clear_mailbox_folder_error(mailbox: Mailbox, folder: str) -> None:
+    """Remove stale per-folder sync errors after that folder syncs successfully.
+
+    Mailbox.last_error stores semicolon-separated entries in the format
+    "<folder>: <error>". A successful quick sync for one folder should not wipe
+    failures from other folders, but it should clear that folder's previous
+    failure so the admin UI does not keep showing stale warnings.
+    """
+    current_error = (getattr(mailbox, "last_error", None) or "").strip()
+    folder_name = str(folder or "").strip()
+    if not current_error or not folder_name:
+        return
+
+    remaining_errors = []
+    prefix = f"{folder_name}:"
+    for entry in current_error.split(";"):
+        normalized = entry.strip()
+        if not normalized:
+            continue
+        if normalized.startswith(prefix):
+            continue
+        remaining_errors.append(normalized)
+
+    mailbox.last_error = "; ".join(remaining_errors) if remaining_errors else None
+    mailbox.updated_at = utc_now()
 
 
 def sync_mailbox_messages(session: Session, mailbox: Mailbox) -> dict:
@@ -2286,6 +2602,7 @@ def sync_mailbox_messages(session: Session, mailbox: Mailbox) -> dict:
         synced_count = sum(int(item.get("fetched", 0)) for item in folder_results)
         new_count = sum(int(item.get("created", 0)) for item in folder_results)
         updated_count = sum(int(item.get("updated", 0)) for item in folder_results)
+        reconciled_total = sum(int(item.get("reconciled", 0)) for item in folder_results)
         remote_total = sum(int(item.get("remote_total", 0)) for item in folder_results)
 
         mailbox.status = "connected"
@@ -2328,6 +2645,7 @@ def sync_mailbox_messages(session: Session, mailbox: Mailbox) -> dict:
             "fetched": synced_count,
             "created": new_count,
             "updated": updated_count,
+            "reconciled": reconciled_total,
             "remote_total": remote_total,
             "stored": stored_count,
             "unread": unread_count,
@@ -2534,6 +2852,7 @@ def serialize_mailbox(item: Mailbox, stats: Optional[dict[str, int]] = None) -> 
         "stored_count": int(counts.get("stored_count", 0)),
         "unread_count": int(counts.get("unread_count", 0)),
         "flagged_count": int(counts.get("flagged_count", 0)),
+        "signature_html": item.signature_html,
         "last_error": item.last_error,
         "last_connection_test_at": item.last_connection_test_at.isoformat() if item.last_connection_test_at else None,
         "last_synced_at": item.last_synced_at.isoformat() if item.last_synced_at else None,
@@ -2554,8 +2873,8 @@ def serialize_admin_mailbox(item: Mailbox, stats: Optional[dict[str, int]] = Non
     return payload
 
 
-def serialize_email_message(item: EmailMessage) -> dict:
-    return {
+def serialize_email_message(item: EmailMessage, exclude_body: bool = False) -> dict:
+    result = {
         "id": item.id,
         "tenant_id": item.tenant_id,
         "mailbox_id": item.mailbox_id,
@@ -2567,8 +2886,6 @@ def serialize_email_message(item: EmailMessage) -> dict:
         "from_address": item.from_address,
         "to_addresses": item.to_addresses,
         "snippet": item.snippet,
-        "body_text": item.body_text,
-        "body_html": item.body_html,
         "received_at": item.received_at.isoformat() if item.received_at else None,
         "is_seen": bool(item.is_seen),
         "is_flagged": bool(item.is_flagged),
@@ -2578,6 +2895,10 @@ def serialize_email_message(item: EmailMessage) -> dict:
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
     }
+    if not exclude_body:
+        result["body_text"] = item.body_text
+        result["body_html"] = item.body_html
+    return result
 
 
 def serialize_campaign(item: EmailCampaign) -> dict:
@@ -2629,6 +2950,7 @@ def apply_mailbox_admin_payload(mailbox: Mailbox, payload: MailboxAdminUpsert, p
     mailbox.auth_method = payload.auth_method
     mailbox.status = "configured" if payload.sync_enabled else "paused"
     mailbox.last_error = None
+    mailbox.signature_html = payload.signature_html
     if password_to_store:
         mailbox.imap_password_encrypted = encrypt_secret(password_to_store)
 
@@ -2664,13 +2986,15 @@ async def extract_platform_headers(request: Request, call_next):
     if request.url.path in PUBLIC_PATHS:
         return await call_next(request)
 
-    user_id = request.headers.get("x-viao-user-id", "") or "0"
-    tenant_id = request.headers.get("x-viao-tenant-id", "") or request.headers.get("x-tenant-id", "")
-    session_id = request.headers.get("x-viao-session-id", "")
-    platform_roles = request.headers.get("x-viao-platform-roles", "")
-    company_role = request.headers.get("x-viao-company-role", "")
-    module_entitlements = request.headers.get("x-viao-module-entitlements", "")
-    request_id = request.headers.get("x-viao-request-id", "") or "unknown"
+    # Check headers first, then fallback to query params (for iframe-based requests like PDF preview)
+    qp = dict(request.query_params)
+    user_id = request.headers.get("x-viao-user-id", "") or qp.get("x-viao-user-id", "") or "0"
+    tenant_id = request.headers.get("x-viao-tenant-id", "") or request.headers.get("x-tenant-id", "") or qp.get("x-viao-tenant-id", "") or qp.get("x-tenant-id", "")
+    session_id = request.headers.get("x-viao-session-id", "") or qp.get("x-viao-session-id", "")
+    platform_roles = request.headers.get("x-viao-platform-roles", "") or qp.get("x-viao-platform-roles", "")
+    company_role = request.headers.get("x-viao-company-role", "") or qp.get("x-viao-company-role", "")
+    module_entitlements = request.headers.get("x-viao-module-entitlements", "") or qp.get("x-viao-module-entitlements", "")
+    request_id = request.headers.get("x-viao-request-id", "") or qp.get("x-viao-request-id", "") or "unknown"
 
     if not tenant_id:
         if ALLOW_DEMO_TENANT:
@@ -3005,19 +3329,80 @@ async def list_mailbox_folder_options(mailbox_id: str, request: Request):
         }
 
 
+@app.post("/api/v1/mailboxes/{mailbox_id}/quick-sync")
+async def quick_sync_mailbox(
+    mailbox_id: str,
+    request: Request,
+    folder: Optional[str] = None,
+):
+    """Quick sync: reconcile deletions + fetch last 24h for a specific folder.
+    Called when user opens a folder to get immediate updates."""
+    with get_db_session() as session:
+        item = get_mailbox_or_404(session, request.state.tenant_id, mailbox_id)
+        if not item.sync_enabled:
+            return {"success": True, "data": {"message": "Sync desativado", "skipped": True}}
+        if not item.imap_password_encrypted or not item.imap_host:
+            return {"success": True, "data": {"message": "Mailbox não configurada", "skipped": True}}
+
+        target_folder = folder or item.folder or "INBOX"
+        password = decrypt_secret(item.imap_password_encrypted)
+
+        client: imaplib.IMAP4 | imaplib.IMAP4_SSL | None = None
+        try:
+            client, _ = open_imap_connection(
+                host=item.imap_host,
+                port=int(item.imap_port),
+                username=item.imap_username,
+                password=password,
+                security_mode=item.security_mode or "ssl_tls",
+                validate_certificates=bool(item.validate_certificates),
+                folder=target_folder,
+                readonly=True,
+            )
+            result = quick_sync_folder(session, client, item, target_folder)
+            session.commit()
+            return {
+                "success": True,
+                "data": {
+                    "folder": target_folder,
+                    "reconciled": result.get("reconciled", 0),
+                    "created": result.get("created", 0),
+                    "updated": result.get("updated", 0),
+                    "fetched": result.get("fetched", 0),
+                    "remote_total": result.get("remote_total", 0),
+                },
+            }
+        except Exception as exc:
+            logger.warning("[email] quick_sync failed mailbox=%s folder=%s: %s", mailbox_id, target_folder, exc)
+            return {
+                "success": False,
+                "error": str(exc),
+            }
+        finally:
+            close_imap_client(client)
+
+
 @app.get("/api/v1/emails")
 async def list_emails(
     request: Request,
     mailbox_id: Optional[str] = None,
     folder: Optional[str] = None,
     include_children: bool = False,
-    limit: int = Query(default=100, ge=1, le=250),
+    limit: int | None = Query(default=None, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+    exclude_body: bool = True,
+    id: Optional[str] = None,
+    search: Optional[str] = Query(default=None, max_length=200),
 ):
     with get_db_session() as session:
         query = select(EmailMessage).where(
             EmailMessage.tenant_id == request.state.tenant_id,
             EmailMessage.remote_deleted.is_(False),
         )
+        # If a specific email ID is requested, filter by it and always include body
+        if id:
+            query = query.where(EmailMessage.id == id)
+            exclude_body = False
         if mailbox_id:
             query = query.where(EmailMessage.mailbox_id == mailbox_id)
         if folder:
@@ -3033,10 +3418,563 @@ async def list_emails(
             else:
                 query = query.where(EmailMessage.folder == folder)
 
-        items = session.scalars(query.order_by(EmailMessage.received_at.desc(), EmailMessage.updated_at.desc()).limit(limit)).all()
-        return {"success": True, "data": [serialize_email_message(item) for item in items]}
+        # Server-side keyword search across subject, from_name, from_address, snippet
+        if search and search.strip():
+            search_term = f"%{search.strip()}%"
+            query = query.where(
+                or_(
+                    EmailMessage.subject.ilike(search_term),
+                    EmailMessage.from_name.ilike(search_term),
+                    EmailMessage.from_address.ilike(search_term),
+                    EmailMessage.to_addresses.ilike(search_term),
+                    EmailMessage.snippet.ilike(search_term),
+                )
+            )
+
+        # Get total count for progressive loading info
+        total_count = session.scalar(select(func.count()).select_from(query.subquery()))
+        ordered = query.order_by(EmailMessage.received_at.desc(), EmailMessage.updated_at.desc())
+        if offset > 0:
+            ordered = ordered.offset(offset)
+        if limit is not None:
+            ordered = ordered.limit(limit)
+        items = session.scalars(ordered).all()
+        return {"success": True, "data": [serialize_email_message(item, exclude_body=exclude_body) for item in items], "total": total_count, "offset": offset, "has_more": (offset + len(items)) < (total_count or 0)}
 
 
+# ─── Single Email Detail Endpoint ───
+
+@app.get("/api/v1/emails/{email_id}")
+async def get_email_detail(
+    request: Request,
+    email_id: str,
+):
+    with get_db_session() as session:
+        item = session.scalar(
+            select(EmailMessage).where(
+                EmailMessage.id == email_id,
+                EmailMessage.tenant_id == request.state.tenant_id,
+            )
+        )
+        if not item:
+            raise HTTPException(status_code=404, detail="Email not found")
+        return {"success": True, "data": serialize_email_message(item, exclude_body=False)}
+
+
+# ─── Attachment Endpoints (v2 with Message-ID fallback) ───
+
+@app.get("/api/v1/emails/{email_id}/attachments")
+async def get_email_attachments(email_id: str, request: Request):
+    """List attachments for an email by fetching from IMAP."""
+    tenant_id = request.headers.get("X-Tenant-Id") or request.headers.get("x-tenant-id")
+    session = get_db_session()
+    try:
+        item = session.query(EmailMessage).filter_by(id=email_id).first()
+        if not item:
+            return JSONResponse({"success": False, "error": "Email not found"}, status_code=404)
+        mailbox = session.query(Mailbox).filter_by(id=str(item.mailbox_id)).first()
+        if not mailbox:
+            return JSONResponse({"success": False, "error": "Mailbox not found"}, status_code=404)
+
+        imap_host = mailbox.imap_host
+        imap_port = mailbox.imap_port or 993
+        imap_user = mailbox.imap_username or mailbox.email_address
+        imap_pass = decrypt_secret(mailbox.imap_password_encrypted)
+        use_ssl = mailbox.security_mode in ("ssl", "tls", "ssl_tls", None)
+
+        import imaplib, email as email_lib, socket
+        from email.header import decode_header as decode_email_header
+
+        if use_ssl:
+            conn = imaplib.IMAP4_SSL(imap_host, imap_port)
+        else:
+            conn = imaplib.IMAP4(imap_host, imap_port)
+        conn.socket().settimeout(30)
+        conn.login(imap_user, imap_pass)
+
+        raw_email = None
+        uid = str(item.imap_uid)
+        folder = item.folder or "INBOX"
+
+        # Try the stored folder first
+        try:
+            status, _ = conn.select(folder, readonly=True)
+            if status == "OK":
+                status, msg_data = conn.uid("FETCH", uid, "(RFC822)")
+                if status == "OK" and msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
+                    raw_email = msg_data[0][1]
+        except Exception:
+            pass
+
+        # Fallback: search by Message-ID in common folders only (avoid timeout)
+        if raw_email is None and item.message_id_header:
+            msg_id = item.message_id_header
+            fallback_folders = ["INBOX", "INBOX.Sent", "INBOX.Archive", "INBOX.Drafts", "INBOX.Trash"]
+            if folder and folder not in fallback_folders:
+                fallback_folders.insert(0, folder)
+            for fname in fallback_folders:
+                try:
+                    status2, _ = conn.select(fname, readonly=True)
+                    if status2 != "OK":
+                        continue
+                    status3, ids = conn.uid("SEARCH", None, "HEADER", "Message-ID", msg_id)
+                    if status3 == "OK" and ids[0]:
+                        found_uid = ids[0].split()[0].decode()
+                        status4, msg_data = conn.uid("FETCH", found_uid, "(RFC822)")
+                        if status4 == "OK" and msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
+                            raw_email = msg_data[0][1]
+                            break
+                except Exception:
+                    continue
+        if raw_email is None and item.message_id_header:
+            msg_id = item.message_id_header
+            try:
+                status, folders_list = conn.list()
+                if status == "OK":
+                    for f_line in folders_list:
+                        try:
+                            decoded = f_line.decode()
+                            # Parse folder name from LIST response
+                            parts = decoded.split(' "." ') if '"."' in decoded else decoded.split(' "/" ')
+                            if len(parts) >= 2:
+                                fname = parts[-1].strip().strip('"')
+                            else:
+                                continue
+                            status2, _ = conn.select(fname, readonly=True)
+                            if status2 != "OK":
+                                continue
+                            status3, ids = conn.uid("SEARCH", None, "HEADER", "Message-ID", msg_id)
+                            if status3 == "OK" and ids[0]:
+                                found_uid = ids[0].split()[0].decode()
+                                status4, msg_data = conn.uid("FETCH", found_uid, "(RFC822)")
+                                if status4 == "OK" and msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
+                                    raw_email = msg_data[0][1]
+                                    break
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+
+        if raw_email is None:
+            conn.logout()
+            return JSONResponse({"success": True, "data": [], "warning": "Email not found on IMAP server"})
+
+        msg = email_lib.message_from_bytes(raw_email)
+        attachments = []
+        idx = 0
+        for part in msg.walk():
+            content_disposition = str(part.get("Content-Disposition") or "")
+            content_type = part.get_content_type()
+            filename = part.get_filename()
+
+            # Decode encoded filenames
+            if filename:
+                decoded_parts = decode_email_header(filename)
+                filename = ""
+                for data, charset in decoded_parts:
+                    if isinstance(data, bytes):
+                        filename += data.decode(charset or "utf-8", errors="replace")
+                    else:
+                        filename += data
+
+            is_attachment = False
+            if "attachment" in content_disposition:
+                is_attachment = True
+            elif "inline" in content_disposition and filename:
+                is_attachment = True
+            elif content_type and not content_type.startswith("text/") and not content_type.startswith("multipart/") and filename:
+                is_attachment = True
+
+            if is_attachment and filename:
+                payload = part.get_payload(decode=True)
+                size = len(payload) if payload else 0
+                attachments.append({
+                    "index": idx,
+                    "filename": filename,
+                    "content_type": content_type,
+                    "size": size
+                })
+                idx += 1
+
+        conn.logout()
+        return JSONResponse({"success": True, "data": attachments})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+    finally:
+        session.close()
+
+
+@app.get("/api/v1/emails/{email_id}/attachments/{att_index}")
+async def download_email_attachment(email_id: str, att_index: int, request: Request):
+    """Download a specific attachment by index."""
+    tenant_id = request.headers.get("X-Tenant-Id") or request.headers.get("x-tenant-id")
+    session = get_db_session()
+    try:
+        item = session.query(EmailMessage).filter_by(id=email_id).first()
+        if not item:
+            return JSONResponse({"success": False, "error": "Email not found"}, status_code=404)
+        mailbox = session.query(Mailbox).filter_by(id=str(item.mailbox_id)).first()
+        if not mailbox:
+            return JSONResponse({"success": False, "error": "Mailbox not found"}, status_code=404)
+
+        imap_host = mailbox.imap_host
+        imap_port = mailbox.imap_port or 993
+        imap_user = mailbox.imap_username or mailbox.email_address
+        imap_pass = decrypt_secret(mailbox.imap_password_encrypted)
+        use_ssl = mailbox.security_mode in ("ssl", "tls", "ssl_tls", None)
+
+        import imaplib, email as email_lib, socket
+        from email.header import decode_header as decode_email_header
+
+        if use_ssl:
+            conn = imaplib.IMAP4_SSL(imap_host, imap_port)
+        else:
+            conn = imaplib.IMAP4(imap_host, imap_port)
+        conn.socket().settimeout(30)
+        conn.login(imap_user, imap_pass)
+
+        raw_email = None
+        uid = str(item.imap_uid)
+        folder = item.folder or "INBOX"
+
+        # Try the stored folder first
+        try:
+            status, _ = conn.select(folder, readonly=True)
+            if status == "OK":
+                status, msg_data = conn.uid("FETCH", uid, "(RFC822)")
+                if status == "OK" and msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
+                    raw_email = msg_data[0][1]
+        except Exception:
+            pass
+
+        # Fallback: search by Message-ID in common folders only (avoid timeout)
+        if raw_email is None and item.message_id_header:
+            msg_id = item.message_id_header
+            fallback_folders = ["INBOX", "INBOX.Sent", "INBOX.Archive", "INBOX.Drafts", "INBOX.Trash"]
+            if folder and folder not in fallback_folders:
+                fallback_folders.insert(0, folder)
+            for fname in fallback_folders:
+                try:
+                    status2, _ = conn.select(fname, readonly=True)
+                    if status2 != "OK":
+                        continue
+                    status3, ids = conn.uid("SEARCH", None, "HEADER", "Message-ID", msg_id)
+                    if status3 == "OK" and ids[0]:
+                        found_uid = ids[0].split()[0].decode()
+                        status4, msg_data = conn.uid("FETCH", found_uid, "(RFC822)")
+                        if status4 == "OK" and msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
+                            raw_email = msg_data[0][1]
+                            break
+                except Exception:
+                    continue
+        if raw_email is None and item.message_id_header:
+            msg_id = item.message_id_header
+            try:
+                status, folders_list = conn.list()
+                if status == "OK":
+                    for f_line in folders_list:
+                        try:
+                            decoded = f_line.decode()
+                            parts = decoded.split(' "." ') if '"."' in decoded else decoded.split(' "/" ')
+                            if len(parts) >= 2:
+                                fname = parts[-1].strip().strip('"')
+                            else:
+                                continue
+                            status2, _ = conn.select(fname, readonly=True)
+                            if status2 != "OK":
+                                continue
+                            status3, ids = conn.uid("SEARCH", None, "HEADER", "Message-ID", msg_id)
+                            if status3 == "OK" and ids[0]:
+                                found_uid = ids[0].split()[0].decode()
+                                status4, msg_data = conn.uid("FETCH", found_uid, "(RFC822)")
+                                if status4 == "OK" and msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
+                                    raw_email = msg_data[0][1]
+                                    break
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+
+        if raw_email is None:
+            conn.logout()
+            return JSONResponse({"success": False, "error": "Email not found on IMAP server"}, status_code=404)
+
+        msg = email_lib.message_from_bytes(raw_email)
+        current_idx = 0
+        for part in msg.walk():
+            content_disposition = str(part.get("Content-Disposition") or "")
+            content_type = part.get_content_type()
+            filename = part.get_filename()
+
+            if filename:
+                decoded_parts = decode_email_header(filename)
+                filename = ""
+                for data, charset in decoded_parts:
+                    if isinstance(data, bytes):
+                        filename += data.decode(charset or "utf-8", errors="replace")
+                    else:
+                        filename += data
+
+            is_attachment = False
+            if "attachment" in content_disposition:
+                is_attachment = True
+            elif "inline" in content_disposition and filename:
+                is_attachment = True
+            elif content_type and not content_type.startswith("text/") and not content_type.startswith("multipart/") and filename:
+                is_attachment = True
+
+            if is_attachment and filename:
+                if current_idx == att_index:
+                    payload = part.get_payload(decode=True)
+                    conn.logout()
+                    from starlette.responses import Response
+                    safe_filename = filename.encode("ascii", errors="replace").decode()
+                    return Response(
+                        content=payload,
+                        media_type=content_type or "application/octet-stream",
+                        headers={
+                            "Content-Disposition": f'attachment; filename="{safe_filename}"',
+                            "Content-Length": str(len(payload))
+                        }
+                    )
+                current_idx += 1
+
+        conn.logout()
+        return JSONResponse({"success": False, "error": "Attachment not found"}, status_code=404)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+    finally:
+        session.close()
+
+
+@app.get("/api/v1/emails/{email_id}/attachments/{att_index}/preview")
+async def preview_email_attachment(email_id: str, att_index: int, request: Request):
+    """Preview a document attachment (Word/Excel) as HTML."""
+    tenant_id = request.headers.get("X-Tenant-Id") or request.headers.get("x-tenant-id")
+    session = get_db_session()
+    try:
+        item = session.query(EmailMessage).filter_by(id=email_id).first()
+        if not item:
+            return JSONResponse({"success": False, "error": "Email not found"}, status_code=404)
+        mailbox = session.query(Mailbox).filter_by(id=str(item.mailbox_id)).first()
+        if not mailbox:
+            return JSONResponse({"success": False, "error": "Mailbox not found"}, status_code=404)
+
+        imap_host = mailbox.imap_host
+        imap_port = mailbox.imap_port or 993
+        imap_user = mailbox.imap_username or mailbox.email_address
+        imap_pass = decrypt_secret(mailbox.imap_password_encrypted)
+        use_ssl = mailbox.security_mode in ("ssl", "tls", "ssl_tls", None)
+
+        import imaplib, email as email_lib, socket, tempfile, os
+        from email.header import decode_header as decode_email_header
+
+        if use_ssl:
+            conn = imaplib.IMAP4_SSL(imap_host, imap_port)
+        else:
+            conn = imaplib.IMAP4(imap_host, imap_port)
+        conn.socket().settimeout(30)
+        conn.login(imap_user, imap_pass)
+
+        raw_email = None
+        uid = str(item.imap_uid)
+        folder = item.folder or "INBOX"
+
+        # Try the stored folder first
+        try:
+            status, _ = conn.select(folder, readonly=True)
+            if status == "OK":
+                status, msg_data = conn.uid("FETCH", uid, "(RFC822)")
+                if status == "OK" and msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
+                    raw_email = msg_data[0][1]
+        except Exception:
+            pass
+
+        # Fallback: search by Message-ID in common folders only (avoid timeout)
+        if raw_email is None and item.message_id_header:
+            msg_id = item.message_id_header
+            fallback_folders = ["INBOX", "INBOX.Sent", "INBOX.Archive", "INBOX.Drafts", "INBOX.Trash"]
+            if folder and folder not in fallback_folders:
+                fallback_folders.insert(0, folder)
+            for fname in fallback_folders:
+                try:
+                    status2, _ = conn.select(fname, readonly=True)
+                    if status2 != "OK":
+                        continue
+                    status3, ids = conn.uid("SEARCH", None, "HEADER", "Message-ID", msg_id)
+                    if status3 == "OK" and ids[0]:
+                        found_uid = ids[0].split()[0].decode()
+                        status4, msg_data = conn.uid("FETCH", found_uid, "(RFC822)")
+                        if status4 == "OK" and msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
+                            raw_email = msg_data[0][1]
+                            break
+                except Exception:
+                    continue
+        if raw_email is None and item.message_id_header:
+            msg_id = item.message_id_header
+            try:
+                status, folders_list = conn.list()
+                if status == "OK":
+                    for f_line in folders_list:
+                        try:
+                            decoded = f_line.decode()
+                            parts = decoded.split(' "." ') if '"."' in decoded else decoded.split(' "/" ')
+                            if len(parts) >= 2:
+                                fname = parts[-1].strip().strip('"')
+                            else:
+                                continue
+                            status2, _ = conn.select(fname, readonly=True)
+                            if status2 != "OK":
+                                continue
+                            status3, ids = conn.uid("SEARCH", None, "HEADER", "Message-ID", msg_id)
+                            if status3 == "OK" and ids[0]:
+                                found_uid = ids[0].split()[0].decode()
+                                status4, msg_data = conn.uid("FETCH", found_uid, "(RFC822)")
+                                if status4 == "OK" and msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
+                                    raw_email = msg_data[0][1]
+                                    break
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+
+        if raw_email is None:
+            conn.logout()
+            return HTMLResponse("<html><body><p style='text-align:center;margin-top:40px;color:#666;'>Email não encontrado no servidor IMAP.</p></body></html>")
+
+        msg = email_lib.message_from_bytes(raw_email)
+        current_idx = 0
+        for part in msg.walk():
+            content_disposition = str(part.get("Content-Disposition") or "")
+            content_type = part.get_content_type()
+            filename = part.get_filename()
+
+            if filename:
+                decoded_parts = decode_email_header(filename)
+                filename = ""
+                for data, charset in decoded_parts:
+                    if isinstance(data, bytes):
+                        filename += data.decode(charset or "utf-8", errors="replace")
+                    else:
+                        filename += data
+
+            is_attachment = False
+            if "attachment" in content_disposition:
+                is_attachment = True
+            elif "inline" in content_disposition and filename:
+                is_attachment = True
+            elif content_type and not content_type.startswith("text/") and not content_type.startswith("multipart/") and filename:
+                is_attachment = True
+
+            if is_attachment and filename:
+                if current_idx == att_index:
+                    payload = part.get_payload(decode=True)
+                    conn.logout()
+
+                    ext = os.path.splitext(filename)[1].lower()
+                    if not ext and content_type:
+                        import mimetypes
+                        ext_guess = mimetypes.guess_extension(content_type)
+                        if ext_guess:
+                            ext = ext_guess
+
+                    # Word documents
+                    if ext in (".docx", ".doc"):
+                        try:
+                            import mammoth
+                            import io
+                            result = mammoth.convert_to_html(io.BytesIO(payload))
+                            html_content = result.value
+                            html_page = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 24px; max-width: 800px; margin: 0 auto; line-height: 1.6; color: #333; }}
+img {{ max-width: 100%; height: auto; }}
+table {{ border-collapse: collapse; width: 100%; margin: 16px 0; }}
+th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+th {{ background: #f5f5f5; }}
+</style></head><body>{html_content}</body></html>"""
+                            from starlette.responses import HTMLResponse
+                            return HTMLResponse(html_page)
+                        except Exception as e:
+                            from starlette.responses import HTMLResponse
+                            return HTMLResponse(f"<html><body><p style='text-align:center;margin-top:40px;color:#c00;'>Erro ao converter documento: {str(e)}</p></body></html>")
+
+                    # Excel documents
+                    elif ext in (".xlsx", ".xls"):
+                        try:
+                            import openpyxl
+                            import io
+                            wb = openpyxl.load_workbook(io.BytesIO(payload), read_only=True, data_only=True)
+                            html_parts = []
+                            for sheet_name in wb.sheetnames:
+                                ws = wb[sheet_name]
+                                html_parts.append(f"<h2>{sheet_name}</h2>")
+                                html_parts.append("<table>")
+                                for row in ws.iter_rows(max_row=200, values_only=True):
+                                    html_parts.append("<tr>")
+                                    for cell in row:
+                                        val = str(cell) if cell is not None else ""
+                                        html_parts.append(f"<td>{val}</td>")
+                                    html_parts.append("</tr>")
+                                html_parts.append("</table>")
+                            wb.close()
+                            html_content = "".join(html_parts)
+                            html_page = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 24px; color: #333; }}
+table {{ border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 13px; }}
+th, td {{ border: 1px solid #ddd; padding: 6px 10px; text-align: left; }}
+th {{ background: #f5f5f5; font-weight: 600; }}
+tr:nth-child(even) {{ background: #fafafa; }}
+h2 {{ color: #555; border-bottom: 1px solid #eee; padding-bottom: 8px; }}
+</style></head><body>{html_content}</body></html>"""
+                            from starlette.responses import HTMLResponse
+                            return HTMLResponse(html_page)
+                        except Exception as e:
+                            from starlette.responses import HTMLResponse
+                            return HTMLResponse(f"<html><body><p style='text-align:center;margin-top:40px;color:#c00;'>Erro ao converter folha de cálculo: {str(e)}</p></body></html>")
+
+                    # PDF - serve directly for iframe embed
+                    elif ext == ".pdf":
+                        from starlette.responses import Response
+                        return Response(
+                            content=payload,
+                            media_type="application/pdf",
+                            headers={"Content-Disposition": "inline"}
+                        )
+
+                    # Images - serve directly
+                    elif ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"):
+                        from starlette.responses import Response
+                        return Response(
+                            content=payload,
+                            media_type=content_type or "image/png",
+                            headers={"Content-Disposition": "inline"}
+                        )
+
+                    else:
+                        from starlette.responses import HTMLResponse
+                        return HTMLResponse(f"""<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+<div style="text-align:center;color:#666;">
+<p style="font-size:48px;margin:0;">📄</p>
+<p style="font-size:16px;">{filename}</p>
+<p style="font-size:13px;color:#999;">Pré-visualização não disponível para este tipo de ficheiro.</p>
+</div></body></html>""")
+                current_idx += 1
+
+        conn.logout()
+        return JSONResponse({"success": False, "error": "Attachment not found"}, status_code=404)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        from starlette.responses import HTMLResponse
+        return HTMLResponse(f"<html><body><p style='color:#c00;text-align:center;margin-top:40px;'>Erro: {str(e)}</p></body></html>", status_code=500)
+    finally:
+        session.close()
 @app.post("/api/v1/emails/{email_id}/actions")
 async def email_action(email_id: str, request: Request, payload: EmailActionRequest):
     with get_db_session() as session:
@@ -3274,6 +4212,760 @@ async def create_automation(request: Request, payload: AutomationCreate):
         session.commit()
         session.refresh(item)
         return {"success": True, "data": serialize_automation(item)}
+
+
+
+
+# --- Email Send/Reply/Forward Endpoint ---
+
+class EmailSendRequest(BaseModel):
+    mode: Literal["reply", "reply_all", "forward", "new"] = "reply"
+    to: str = Field(min_length=3, max_length=2048)
+    cc: Optional[str] = Field(default=None, max_length=2048)
+    subject: str = Field(min_length=1, max_length=512)
+    body_html: str = Field(min_length=1)
+    body_text: Optional[str] = Field(default=None)
+    in_reply_to: Optional[str] = Field(default=None, max_length=512)
+
+    @field_validator("to", "cc")
+    @classmethod
+    def strip_addresses(cls, value):
+        if value is None:
+            return None
+        return value.strip()
+
+
+def send_email_via_smtp(
+    *,
+    mailbox,
+    password: str,
+    from_address: str,
+    to_addresses: list,
+    cc_addresses: list,
+    subject: str,
+    body_html: str,
+    body_text=None,
+    in_reply_to=None,
+    references=None,
+    attachments=None,
+):
+    import smtplib as _smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email.mime.base import MIMEBase
+    from email import encoders
+    from email.utils import formataddr, formatdate, make_msgid
+
+    msg = MIMEMultipart("mixed") if attachments else MIMEMultipart("alternative")
+    msg["From"] = formataddr((mailbox.name or "", from_address))
+    msg["To"] = ", ".join(to_addresses)
+    if cc_addresses:
+        msg["Cc"] = ", ".join(cc_addresses)
+    msg["Subject"] = subject
+    msg["Date"] = formatdate(localtime=True)
+    domain = from_address.split("@")[-1] if "@" in from_address else "viaoceanica.com"
+    msg["Message-ID"] = make_msgid(domain=domain)
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+    if references:
+        msg["References"] = references
+
+    if attachments:
+        alt_part = MIMEMultipart("alternative")
+        if body_text:
+            alt_part.attach(MIMEText(body_text, "plain", "utf-8"))
+        else:
+            plain = re.sub(r"<[^>]+>", "", body_html)
+            plain = re.sub(r"\s+", " ", plain).strip()
+            alt_part.attach(MIMEText(plain, "plain", "utf-8"))
+        alt_part.attach(MIMEText(body_html, "html", "utf-8"))
+        msg.attach(alt_part)
+        for att in attachments:
+            part = MIMEBase(att["content_type"].split("/")[0], att["content_type"].split("/")[-1])
+            part.set_payload(att["data"])
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", "attachment", filename=att["filename"])
+            msg.attach(part)
+    else:
+        if body_text:
+            msg.attach(MIMEText(body_text, "plain", "utf-8"))
+        else:
+            plain = re.sub(r"<[^>]+>", "", body_html)
+            plain = re.sub(r"\s+", " ", plain).strip()
+            msg.attach(MIMEText(plain, "plain", "utf-8"))
+        msg.attach(MIMEText(body_html, "html", "utf-8"))
+
+    all_recipients = list(to_addresses)
+    if cc_addresses:
+        all_recipients.extend(cc_addresses)
+
+    smtp_host = mailbox.imap_host
+    smtp_port = 587
+    smtp_username = mailbox.imap_username
+
+    ctx = ssl.create_default_context()
+    if not mailbox.validate_certificates:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+    raw_message = msg.as_string()
+    server = _smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+    try:
+        server.ehlo()
+        server.starttls(context=ctx)
+        server.ehlo()
+        server.login(smtp_username, password)
+        server.sendmail(from_address, all_recipients, raw_message)
+    finally:
+        try:
+            server.quit()
+        except Exception:
+            pass
+    return raw_message
+
+
+@app.post("/api/v1/emails/{email_id}/send")
+async def send_email_reply(email_id: str, request: Request, payload: EmailSendRequest = None):
+    """Send a reply, reply-all, or forward for an existing email. Supports JSON or multipart/form-data with attachments.
+    After sending:
+      1. Saves a copy to INBOX.Sent via IMAP APPEND
+      2. Marks original email as read (\\Seen)
+      3. Marks original as answered (\\Answered) for reply/reply_all
+      4. Marks original as forwarded ($Forwarded) for forward
+      5. Updates unread count in response
+      6-7. Returns data for frontend to update UI
+      8. Returns specific SMTP error messages
+      9. Validates recipients
+      10. Preserves threading with In-Reply-To and References
+    """
+    from fastapi import UploadFile
+    content_type = request.headers.get("content-type", "")
+    attachment_files = []
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        mode = form.get("mode", "reply")
+        to = form.get("to", "")
+        cc = form.get("cc", "")
+        subject = form.get("subject", "")
+        body_html = form.get("body_html", "")
+        body_text = form.get("body_text", "")
+        in_reply_to = form.get("in_reply_to", "")
+        files = form.getlist("attachments")
+        for f in files:
+            if hasattr(f, "read"):
+                file_data = await f.read()
+                attachment_files.append({
+                    "filename": f.filename or "attachment",
+                    "content_type": f.content_type or "application/octet-stream",
+                    "data": file_data,
+                })
+    else:
+        if payload is None:
+            body = await request.json()
+            from pydantic import ValidationError
+            try:
+                payload = EmailSendRequest(**body)
+            except ValidationError as e:
+                raise HTTPException(status_code=422, detail=str(e))
+        mode = payload.mode
+        to = payload.to
+        cc = payload.cc or ""
+        subject = payload.subject
+        body_html = payload.body_html
+        body_text = payload.body_text
+        in_reply_to = payload.in_reply_to or ""
+
+    # Ponto 9: Validar formato de email dos destinatarios
+    import re as _re_validate
+    email_pattern = _re_validate.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+    with get_db_session() as session:
+        item = get_email_or_404(session, request.state.tenant_id, email_id)
+        mailbox = get_mailbox_or_404(session, request.state.tenant_id, item.mailbox_id)
+        if mailbox.access_mode != "read_write":
+            raise HTTPException(status_code=409, detail="A mailbox esta configurada em modo so de leitura")
+        if not mailbox.imap_password_encrypted:
+            raise HTTPException(status_code=422, detail="A palavra-passe da mailbox nao esta guardada")
+        if not mailbox.imap_host or not mailbox.imap_username:
+            raise HTTPException(status_code=422, detail="E necessario configurar o host e utilizador da mailbox")
+        password = decrypt_secret(mailbox.imap_password_encrypted)
+        from_address = mailbox.email_address
+        to_list = [addr.strip() for addr in to.split(",") if addr.strip()]
+        cc_list = [addr.strip() for addr in cc.split(",") if addr.strip()]
+        if not to_list:
+            raise HTTPException(status_code=422, detail="E necessario pelo menos um destinatario")
+        # Ponto 9: Validar formato
+        invalid_addrs = [a for a in to_list + cc_list if not email_pattern.match(a)]
+        if invalid_addrs:
+            raise HTTPException(status_code=422, detail=f"Enderecos de email invalidos: {', '.join(invalid_addrs)}")
+
+        # Ponto 10: Construir References corretamente (encadear thread)
+        references_parts = []
+        if item.message_id_header:
+            references_parts.append(item.message_id_header)
+        if in_reply_to and in_reply_to != item.message_id_header:
+            references_parts.append(in_reply_to)
+        references = " ".join(references_parts) if references_parts else None
+
+        # Ponto 15: Incluir assinatura de email se configurada
+        if mailbox.signature_html:
+            body_html = body_html + '<br><br><div class="email-signature">' + mailbox.signature_html + '</div>'
+
+        # Ponto 8: Enviar com mensagem de erro especifica
+        try:
+            raw_message = send_email_via_smtp(
+                mailbox=mailbox, password=password, from_address=from_address,
+                to_addresses=to_list, cc_addresses=cc_list, subject=subject,
+                body_html=body_html, body_text=body_text or None,
+                in_reply_to=in_reply_to or None, references=references,
+                attachments=attachment_files if attachment_files else None,
+            )
+        except Exception as exc:
+            logger.error("[email-send] SMTP error for %s: %s", from_address, exc)
+            error_msg = str(exc)
+            if "Authentication" in error_msg or "credentials" in error_msg.lower():
+                raise HTTPException(status_code=500, detail="Erro de autenticacao SMTP: credenciais invalidas ou expiradas")
+            elif "timed out" in error_msg.lower() or "timeout" in error_msg.lower():
+                raise HTTPException(status_code=500, detail="Erro de timeout: o servidor SMTP nao respondeu a tempo")
+            elif "refused" in error_msg.lower():
+                raise HTTPException(status_code=500, detail="Conexao recusada pelo servidor SMTP")
+            else:
+                raise HTTPException(status_code=500, detail=f"Erro ao enviar email: {error_msg}")
+
+        # --- Pos-envio: operacoes IMAP ---
+        imap_client = None
+        post_send_errors = []
+        was_unread = not item.is_seen
+        try:
+            imap_client, _ = open_imap_connection(
+                host=mailbox.imap_host,
+                port=int(mailbox.imap_port or 993),
+                username=mailbox.imap_username,
+                password=password,
+                security_mode=mailbox.security_mode or "ssl_tls",
+                validate_certificates=bool(mailbox.validate_certificates),
+                folder=item.folder or "INBOX",
+                readonly=False,
+            )
+
+            # Ponto 2: Marcar email original como lido
+            if not item.is_seen:
+                try:
+                    status, _ = imap_client.uid("store", item.imap_uid, "+FLAGS", "(\\Seen)")
+                    if status == "OK":
+                        item.is_seen = True
+                except Exception as e:
+                    post_send_errors.append(f"Marcar como lido: {e}")
+
+            # Ponto 3: Marcar como respondido (reply/reply_all)
+            if mode in ("reply", "reply_all"):
+                try:
+                    imap_client.uid("store", item.imap_uid, "+FLAGS", "(\\Answered)")
+                except Exception as e:
+                    post_send_errors.append(f"Marcar como respondido: {e}")
+
+            # Ponto 4: Marcar como reencaminhado (forward)
+            if mode == "forward":
+                try:
+                    imap_client.uid("store", item.imap_uid, "+FLAGS", "($Forwarded)")
+                except Exception as e:
+                    post_send_errors.append(f"Marcar como reencaminhado: {e}")
+
+        except Exception as e:
+            post_send_errors.append(f"Conexao IMAP para flags: {e}")
+        finally:
+            if imap_client:
+                try:
+                    imap_client.close()
+                    imap_client.logout()
+                except Exception:
+                    pass
+
+        # Ponto 1: Guardar copia nos Itens Enviados via IMAP APPEND
+        imap_sent = None
+        try:
+            sent_folder = "INBOX.Sent"
+            imap_sent, _ = open_imap_connection(
+                host=mailbox.imap_host,
+                port=int(mailbox.imap_port or 993),
+                username=mailbox.imap_username,
+                password=password,
+                security_mode=mailbox.security_mode or "ssl_tls",
+                validate_certificates=bool(mailbox.validate_certificates),
+                folder=sent_folder,
+                readonly=False,
+            )
+            import time as _time
+            import imaplib as _imaplib
+            append_time = _imaplib.Time2Internaldate(_time.time())
+            append_status, append_data = imap_sent.append(
+                sent_folder,
+                "(\\Seen)",
+                append_time,
+                raw_message.encode("utf-8") if isinstance(raw_message, str) else raw_message,
+            )
+            if append_status != "OK":
+                post_send_errors.append(f"APPEND para Sent: {append_data}")
+            else:
+                logger.info("[email-send] Copia guardada em %s", sent_folder)
+        except Exception as e:
+            post_send_errors.append(f"Guardar copia nos Enviados: {e}")
+        finally:
+            if imap_sent:
+                try:
+                    imap_sent.close()
+                    imap_sent.logout()
+                except Exception:
+                    pass
+
+        # Atualizar BD
+        mailbox.status = "connected"
+        mailbox.last_error = None
+        mailbox.last_synced_at = utc_now()
+        item.updated_at = utc_now()
+        session.commit()
+
+        if post_send_errors:
+            logger.warning("[email-send] Pos-envio warnings: %s", post_send_errors)
+
+        # Ponto 5: Retornar info de unread para o frontend atualizar
+        return {
+            "success": True,
+            "data": {
+                "message": "Email enviado com sucesso",
+                "from": from_address,
+                "to": to_list,
+                "cc": cc_list,
+                "subject": subject,
+                "attachments_count": len(attachment_files),
+                "original_marked_read": bool(item.is_seen),
+                "was_unread": was_unread,
+                "mode": mode,
+                "post_send_warnings": post_send_errors if post_send_errors else None,
+            }
+        }
+
+
+class NewEmailRequest(BaseModel):
+    to: str = Field(min_length=3, max_length=2048)
+    cc: Optional[str] = Field(default=None, max_length=2048)
+    bcc: Optional[str] = Field(default=None, max_length=2048)
+    subject: str = Field(min_length=1, max_length=512)
+    body_html: str = Field(min_length=1)
+    body_text: Optional[str] = Field(default=None)
+
+    @field_validator("to", "cc", "bcc")
+    @classmethod
+    def strip_addresses(cls, value):
+        if value is None:
+            return None
+        return value.strip()
+
+
+@app.post("/api/v1/mailboxes/{mailbox_id}/send-new")
+async def send_new_email(mailbox_id: str, request: Request, payload: NewEmailRequest = None):
+    """Send a new email (not a reply/forward). Supports JSON or multipart/form-data with attachments.
+    After sending:
+      1. Saves a copy to INBOX.Sent via IMAP APPEND
+      2. Validates recipients
+      3. Returns specific SMTP error messages
+    """
+    from fastapi import UploadFile
+    content_type = request.headers.get("content-type", "")
+    attachment_files = []
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        to = form.get("to", "")
+        cc = form.get("cc", "")
+        bcc = form.get("bcc", "")
+        subject = form.get("subject", "")
+        body_html = form.get("body_html", "")
+        body_text = form.get("body_text", "")
+        files = form.getlist("attachments")
+        for f in files:
+            if hasattr(f, "read"):
+                file_data = await f.read()
+                attachment_files.append({
+                    "filename": f.filename or "attachment",
+                    "content_type": f.content_type or "application/octet-stream",
+                    "data": file_data,
+                })
+    else:
+        if payload is None:
+            body = await request.json()
+            from pydantic import ValidationError
+            try:
+                payload = NewEmailRequest(**body)
+            except ValidationError as e:
+                raise HTTPException(status_code=422, detail=str(e))
+        to = payload.to
+        cc = payload.cc or ""
+        bcc = payload.bcc or ""
+        subject = payload.subject
+        body_html = payload.body_html
+        body_text = payload.body_text
+
+    # Validar formato de email dos destinatarios
+    import re as _re_validate
+    email_pattern = _re_validate.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+    with get_db_session() as session:
+        mailbox = get_mailbox_or_404(session, request.state.tenant_id, mailbox_id)
+        if mailbox.access_mode != "read_write":
+            raise HTTPException(status_code=409, detail="A mailbox esta configurada em modo so de leitura")
+        if not mailbox.imap_password_encrypted:
+            raise HTTPException(status_code=422, detail="A palavra-passe da mailbox nao esta guardada")
+        if not mailbox.imap_host or not mailbox.imap_username:
+            raise HTTPException(status_code=422, detail="E necessario configurar o host e utilizador da mailbox")
+        password = decrypt_secret(mailbox.imap_password_encrypted)
+        from_address = mailbox.email_address
+        to_list = [addr.strip() for addr in to.split(",") if addr.strip()]
+        cc_list = [addr.strip() for addr in cc.split(",") if addr.strip()]
+        bcc_list = [addr.strip() for addr in bcc.split(",") if addr.strip()]
+        if not to_list:
+            raise HTTPException(status_code=422, detail="E necessario pelo menos um destinatario")
+        # Validar formato
+        invalid_addrs = [a for a in to_list + cc_list + bcc_list if not email_pattern.match(a)]
+        if invalid_addrs:
+            raise HTTPException(status_code=422, detail=f"Enderecos de email invalidos: {', '.join(invalid_addrs)}")
+
+        # Ponto 15: Incluir assinatura de email se configurada
+        if mailbox.signature_html:
+            body_html = body_html + '<br><br><div class="email-signature">' + mailbox.signature_html + '</div>'
+
+        # Enviar via SMTP
+        try:
+            raw_message = send_email_via_smtp(
+                mailbox=mailbox, password=password, from_address=from_address,
+                to_addresses=to_list + bcc_list, cc_addresses=cc_list, subject=subject,
+                body_html=body_html, body_text=body_text or None,
+                in_reply_to=None, references=None,
+                attachments=attachment_files if attachment_files else None,
+            )
+        except Exception as exc:
+            logger.error("[email-send-new] SMTP error for %s: %s", from_address, exc)
+            error_msg = str(exc)
+            if "Authentication" in error_msg or "credentials" in error_msg.lower():
+                raise HTTPException(status_code=500, detail="Erro de autenticacao SMTP: credenciais invalidas ou expiradas")
+            elif "timed out" in error_msg.lower() or "timeout" in error_msg.lower():
+                raise HTTPException(status_code=500, detail="Erro de timeout: o servidor SMTP nao respondeu a tempo")
+            elif "refused" in error_msg.lower():
+                raise HTTPException(status_code=500, detail="Conexao recusada pelo servidor SMTP")
+            else:
+                raise HTTPException(status_code=500, detail=f"Erro ao enviar email: {error_msg}")
+
+        # Guardar copia nos Itens Enviados via IMAP APPEND
+        post_send_errors = []
+        imap_sent = None
+        try:
+            sent_folder = "INBOX.Sent"
+            imap_sent, _ = open_imap_connection(
+                host=mailbox.imap_host,
+                port=int(mailbox.imap_port or 993),
+                username=mailbox.imap_username,
+                password=password,
+                security_mode=mailbox.security_mode or "ssl_tls",
+                validate_certificates=bool(mailbox.validate_certificates),
+                folder=sent_folder,
+                readonly=False,
+            )
+            import time as _time
+            import imaplib as _imaplib
+            append_time = _imaplib.Time2Internaldate(_time.time())
+            append_status, append_data = imap_sent.append(
+                sent_folder,
+                "(\\Seen)",
+                append_time,
+                raw_message.encode("utf-8") if isinstance(raw_message, str) else raw_message,
+            )
+            if append_status != "OK":
+                post_send_errors.append(f"APPEND para Sent: {append_data}")
+            else:
+                logger.info("[email-send-new] Copia guardada em %s", sent_folder)
+        except Exception as e:
+            post_send_errors.append(f"Guardar copia nos Enviados: {e}")
+        finally:
+            if imap_sent:
+                try:
+                    imap_sent.close()
+                    imap_sent.logout()
+                except Exception:
+                    pass
+
+        # Atualizar BD
+        mailbox.status = "connected"
+        mailbox.last_error = None
+        mailbox.last_synced_at = utc_now()
+        session.commit()
+
+        if post_send_errors:
+            logger.warning("[email-send-new] Pos-envio warnings: %s", post_send_errors)
+
+        return {
+            "success": True,
+            "data": {
+                "message": "Email enviado com sucesso",
+                "from": from_address,
+                "to": to_list,
+                "cc": cc_list,
+                "bcc": bcc_list,
+                "subject": subject,
+                "attachments_count": len(attachment_files),
+                "post_send_warnings": post_send_errors if post_send_errors else None,
+            }
+        }
+
+
+# ─── RASCUNHOS (DRAFTS) ─────────────────────────────────────────────────────────
+
+
+@app.post("/api/v1/mailboxes/{mailbox_id}/save-draft")
+async def save_draft(mailbox_id: str, request: Request):
+    """Guardar email como rascunho na pasta Drafts (IMAP APPEND + BD)."""
+    session = SessionLocal()
+    try:
+        mailbox = session.query(Mailbox).filter_by(id=mailbox_id).first()
+        if not mailbox:
+            return JSONResponse(status_code=404, content={"error": "Mailbox não encontrada"})
+
+        # Parse body
+        content_type = request.headers.get("content-type", "")
+        if "multipart/form-data" in content_type:
+            form = await request.form()
+            to_addresses = form.get("to", "")
+            cc_addresses = form.get("cc", "")
+            bcc_addresses = form.get("bcc", "")
+            subject = form.get("subject", "")
+            body_html = form.get("body_html", "")
+            body_text = form.get("body_text", "")
+            draft_id = form.get("draft_id", None)  # Se estiver a atualizar um rascunho existente
+            # Attachments
+            attachments = []
+            for key in form:
+                if key.startswith("attachment"):
+                    f = form[key]
+                    if hasattr(f, "read"):
+                        data = await f.read()
+                        attachments.append({
+                            "filename": f.filename,
+                            "content_type": f.content_type or "application/octet-stream",
+                            "data": data,
+                        })
+        else:
+            body = await request.json()
+            to_addresses = body.get("to", "")
+            cc_addresses = body.get("cc", "")
+            bcc_addresses = body.get("bcc", "")
+            subject = body.get("subject", "")
+            body_html = body.get("body_html", "")
+            body_text = body.get("body_text", "")
+            draft_id = body.get("draft_id", None)
+            attachments = []
+
+        # Construir mensagem MIME para o rascunho
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        from email.mime.base import MIMEBase
+        from email import encoders
+        from email.utils import formataddr, formatdate, make_msgid
+
+        from_address = mailbox.imap_username
+        msg = MIMEMultipart("mixed") if attachments else MIMEMultipart("alternative")
+        msg["From"] = formataddr((mailbox.name or "", from_address))
+        if to_addresses:
+            msg["To"] = to_addresses
+        if cc_addresses:
+            msg["Cc"] = cc_addresses
+        if bcc_addresses:
+            msg["Bcc"] = bcc_addresses
+        msg["Subject"] = subject or ""
+        msg["Date"] = formatdate(localtime=True)
+        domain = from_address.split("@")[-1] if "@" in from_address else "viaoceanica.com"
+        msg["Message-ID"] = make_msgid(domain=domain)
+        msg["X-Draft"] = "true"
+
+        if attachments:
+            alt_part = MIMEMultipart("alternative")
+            plain = body_text or re.sub(r"<[^>]+>", "", body_html or "")
+            alt_part.attach(MIMEText(plain, "plain", "utf-8"))
+            if body_html:
+                alt_part.attach(MIMEText(body_html, "html", "utf-8"))
+            msg.attach(alt_part)
+            for att in attachments:
+                part = MIMEBase(att["content_type"].split("/")[0], att["content_type"].split("/")[-1])
+                part.set_payload(att["data"])
+                encoders.encode_base64(part)
+                part.add_header("Content-Disposition", "attachment", filename=att["filename"])
+                msg.attach(part)
+        else:
+            plain = body_text or re.sub(r"<[^>]+>", "", body_html or "")
+            msg.attach(MIMEText(plain, "plain", "utf-8"))
+            if body_html:
+                msg.attach(MIMEText(body_html, "html", "utf-8"))
+
+        raw_message = msg.as_string()
+
+        # Se estiver a atualizar um rascunho existente, apagar o anterior primeiro
+        if draft_id:
+            try:
+                old_draft = session.query(EmailMessage).filter_by(id=draft_id, mailbox_id=mailbox_id).first()
+                if old_draft and old_draft.imap_uid:
+                    password = decrypt_secret(mailbox.encrypted_password)
+                    imap_del = open_imap_connection(mailbox, password, folder="INBOX.Drafts")
+                    try:
+                        imap_del.uid("STORE", str(old_draft.imap_uid), "+FLAGS", "(\\Deleted)")
+                        imap_del.expunge()
+                    finally:
+                        try:
+                            imap_del.close()
+                            imap_del.logout()
+                        except Exception:
+                            pass
+                    old_draft.remote_deleted = True
+                    session.flush()
+            except Exception as e:
+                logger.warning("[draft] Erro ao apagar rascunho anterior: %s", e)
+
+        # APPEND para pasta Drafts via IMAP
+        password = decrypt_secret(mailbox.encrypted_password)
+        drafts_folder = "INBOX.Drafts"
+        imap_client = None
+        new_uid = None
+        try:
+            imap_client = open_imap_connection(mailbox, password, folder=drafts_folder)
+            import time as _time
+            append_status, append_data = imap_client.append(
+                drafts_folder,
+                "(\\Seen \\Draft)",
+                imaplib.Time2Internaldate(_time.time()),
+                raw_message.encode("utf-8"),
+            )
+            if append_status == "OK":
+                # Tentar extrair o UID do APPENDUID response
+                if append_data and append_data[0]:
+                    match = re.search(r"APPENDUID\s+\d+\s+(\d+)", append_data[0].decode() if isinstance(append_data[0], bytes) else str(append_data[0]))
+                    if match:
+                        new_uid = int(match.group(1))
+                logger.info("[draft] Rascunho guardado em %s (UID=%s)", drafts_folder, new_uid)
+            else:
+                logger.error("[draft] APPEND falhou: %s", append_data)
+                return JSONResponse(status_code=500, content={"error": "Falha ao guardar rascunho no servidor IMAP"})
+        except Exception as e:
+            logger.error("[draft] Erro IMAP APPEND: %s", e)
+            return JSONResponse(status_code=500, content={"error": f"Erro ao guardar rascunho: {e}"})
+        finally:
+            if imap_client:
+                try:
+                    imap_client.close()
+                    imap_client.logout()
+                except Exception:
+                    pass
+
+        # Criar registo na BD
+        import uuid as _uuid
+        new_email = EmailMessage(
+            id=str(_uuid.uuid4()),
+            mailbox_id=mailbox_id,
+            folder=drafts_folder,
+            imap_uid=new_uid,
+            message_id_header=msg["Message-ID"][:512] if msg["Message-ID"] else None,
+            subject=(subject or "")[:512],
+            from_address=from_address[:255],
+            from_name=(mailbox.name or "")[:255],
+            to_addresses=to_addresses,
+            cc_addresses=cc_addresses or None,
+            bcc_addresses=bcc_addresses or None,
+            date=utc_now(),
+            snippet=(body_text or re.sub(r"<[^>]+>", "", body_html or ""))[:200],
+            body_text=body_text or re.sub(r"<[^>]+>", "", body_html or ""),
+            body_html=body_html or None,
+            is_seen=True,
+            has_attachments=len(attachments) > 0,
+            remote_deleted=False,
+        )
+        session.add(new_email)
+        session.commit()
+
+        return JSONResponse(content={
+            "success": True,
+            "data": {
+                "id": new_email.id,
+                "message": "Rascunho guardado com sucesso",
+            }
+        })
+    except Exception as e:
+        session.rollback()
+        logger.error("[draft] Erro: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": f"Erro ao guardar rascunho: {e}"})
+    finally:
+        session.close()
+
+
+@app.delete("/api/v1/mailboxes/{mailbox_id}/drafts/{draft_id}")
+async def delete_draft(mailbox_id: str, draft_id: str):
+    """Apagar um rascunho (IMAP DELETE + EXPUNGE + marcar na BD)."""
+    session = SessionLocal()
+    try:
+        mailbox = session.query(Mailbox).filter_by(id=mailbox_id).first()
+        if not mailbox:
+            return JSONResponse(status_code=404, content={"error": "Mailbox não encontrada"})
+
+        draft = session.query(EmailMessage).filter_by(id=draft_id, mailbox_id=mailbox_id).first()
+        if not draft:
+            return JSONResponse(status_code=404, content={"error": "Rascunho não encontrado"})
+
+        # Apagar no IMAP
+        if draft.imap_uid:
+            try:
+                password = decrypt_secret(mailbox.encrypted_password)
+                imap_client = open_imap_connection(mailbox, password, folder=draft.folder or "INBOX.Drafts")
+                try:
+                    imap_client.uid("STORE", str(draft.imap_uid), "+FLAGS", "(\\Deleted)")
+                    imap_client.expunge()
+                    logger.info("[draft] Rascunho UID=%s apagado do IMAP", draft.imap_uid)
+                finally:
+                    try:
+                        imap_client.close()
+                        imap_client.logout()
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning("[draft] Erro ao apagar rascunho do IMAP: %s", e)
+
+        # Marcar como apagado na BD
+        draft.remote_deleted = True
+        session.commit()
+
+        return JSONResponse(content={"success": True, "data": {"message": "Rascunho apagado"}})
+    except Exception as e:
+        session.rollback()
+        logger.error("[draft] Erro ao apagar: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": f"Erro ao apagar rascunho: {e}"})
+    finally:
+        session.close()
+
+
+# --- Endpoint para assinatura de email ---
+@app.get("/api/v1/mailboxes/{mailbox_id}/signature")
+async def get_signature(mailbox_id: str, request: Request):
+    """Obter a assinatura HTML de uma mailbox."""
+    with get_db_session() as session:
+        mailbox = get_mailbox_or_404(session, request.state.tenant_id, mailbox_id)
+        return {"success": True, "data": {"signature_html": mailbox.signature_html or ""}}
+
+
+@app.put("/api/v1/mailboxes/{mailbox_id}/signature")
+async def update_signature(mailbox_id: str, request: Request):
+    """Atualizar a assinatura HTML de uma mailbox."""
+    body = await request.json()
+    signature_html = body.get("signature_html", "")
+    with get_db_session() as session:
+        mailbox = get_mailbox_or_404(session, request.state.tenant_id, mailbox_id)
+        mailbox.signature_html = signature_html.strip() if signature_html else None
+        mailbox.updated_at = utc_now()
+        session.add(mailbox)
+        session.commit()
+        return {"success": True, "data": {"signature_html": mailbox.signature_html or ""}}
 
 
 if __name__ == "__main__":

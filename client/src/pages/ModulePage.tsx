@@ -6,6 +6,7 @@ import { Puzzle, Construction, ShieldAlert, Loader2, Receipt, BookOpen, Mail } f
 import { Button } from "@/components/ui/button";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/_core/hooks/useAuth";
+import { buildEmailAssistantContextRelay, EMAIL_ASSISTANT_CONTEXT_EVENT } from "./moduleAssistantContextBridge";
 
 const iconMap: Record<string, React.ElementType> = {
   contabilidade: Receipt,
@@ -82,12 +83,40 @@ export default function ModulePage() {
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === "viao-context-request") {
         sendIframeContext();
+        return;
       }
+
+      buildEmailAssistantContextRelay({
+        slug,
+        iframeWindow: iframeRef.current?.contentWindow || null,
+      })(event);
     };
 
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [iframeLoaded, user]);
+  }, [iframeLoaded, user, slug]);
+
+  useEffect(() => {
+    if (slug !== "email" || typeof window === "undefined") return;
+    return () => {
+      (window as Window & { __viaEmailAssistantContext?: unknown }).__viaEmailAssistantContext = null;
+      window.dispatchEvent(new CustomEvent(EMAIL_ASSISTANT_CONTEXT_EVENT, { detail: null }));
+    };
+  }, [slug]);
+
+  useEffect(() => {
+    const forwardEmailAction = (event: Event) => {
+      if (slug !== "email" || !iframeRef.current?.contentWindow) return;
+      const customEvent = event as CustomEvent;
+      iframeRef.current.contentWindow.postMessage(
+        { type: "viao-email-assistant-action", action: customEvent.detail },
+        "*"
+      );
+    };
+
+    window.addEventListener("viao-agent-email-action", forwardEmailAction as EventListener);
+    return () => window.removeEventListener("viao-agent-email-action", forwardEmailAction as EventListener);
+  }, [slug]);
 
   if (isLoading) {
     return (
@@ -141,6 +170,16 @@ export default function ModulePage() {
     : iframeSrc;
   const resolvedIframeSrc = resolvedIframeSrcBase;
 
+  const handleModuleViewToggle = () => {
+    const nextView = moduleView === "admin" ? "main" : "admin";
+    const nextSrc = nextView === "admin" && adminIframeSrc ? adminIframeSrc : iframeSrc;
+    setIframeLoaded(false);
+    setModuleView(nextView);
+    if (iframeRef.current && nextSrc) {
+      iframeRef.current.src = nextSrc;
+    }
+  };
+
   if (iframeSrc) {
     return (
       <div className="space-y-4">
@@ -155,12 +194,7 @@ export default function ModulePage() {
           <Badge variant="default" className="ml-2">Ativo</Badge>
           {canAdminModule && adminIframeSrc && (
             <div className="ml-auto flex gap-2">
-              <Button variant="outline" size="sm" onClick={() => {
-                setIframeLoaded(false);
-                setModuleView((prev) => (prev === "admin" ? "main" : "admin"));
-                const target = document.getElementById("module-iframe-container");
-                target?.scrollIntoView({ behavior: "smooth", block: "start" });
-              }}>
+              <Button variant="outline" size="sm" onClick={handleModuleViewToggle}>
                 {moduleView === "admin" ? "Ver interface" : "Administração"}
               </Button>
             </div>
@@ -177,6 +211,7 @@ export default function ModulePage() {
             </div>
           )}
           <iframe
+            key={resolvedIframeSrc}
             ref={iframeRef}
             src={resolvedIframeSrc}
             className="w-full border-0"

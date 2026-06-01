@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: viaoceanica_social_media
+      POSTGRES_USER: viaoceanica
+      POSTGRES_PASSWORD: social_media_dev_password
+    volumes:
+      - social_media_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U viaoceanica -d viaoceanica_social_media"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mod-social-media:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      TZ: ${TZ:-Atlantic/Azores}
+      MOD_SOCIAL_MEDIA_PORT: "4005"
+      DATABASE_URL: postgresql+psycopg2://viaoceanica:social_media_dev_password@postgres:5432/viaoceanica_social_media
+      AI_SERVICE_URL: ${AI_SERVICE_URL:-http://ai-service:4010}
+      AI_AGENT_ID: social-media
+      AI_MODEL: ${AI_MODEL:-ollama/qwen2.5:14b-instruct}
+      ALLOW_DEMO_TENANT: "false"
+    ports:
+      - "4005:4005"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - default
+      - viaoceanica-ai-live
+
+  social-media-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      SERVER_API_BASE_URL: http://mod-social-media:4005
+      NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:4005
+      PORT: "3000"
+    ports:
+      - "3005:3000"
+    depends_on:
+      - mod-social-media
+
+volumes:
+  social_media_pgdata:
+
+networks:
+  viaoceanica-ai-live:
+    external: true
+    name: viaoceanica-ai-live_default

@@ -119,17 +119,20 @@ export default function AdminCompanies() {
       return;
     }
 
-    const payload = {
+    const payload: Record<string, unknown> = {
       name: companyForm.name.trim(),
       sector: companyForm.sector || null,
       email: companyForm.email || null,
       ownerEmail: companyForm.email ? companyForm.email.trim().toLowerCase() : null,
-      ownerPassword: companyForm.ownerPassword || null,
       phone: companyForm.phone || null,
       address: companyForm.address || null,
       website: companyForm.website || null,
       planId: companyForm.planId ? Number(companyForm.planId) : null,
     };
+
+    if (!companyDialog.editId || companyForm.ownerPassword) {
+      payload.ownerPassword = companyForm.ownerPassword;
+    }
 
     if (companyDialog.editId) {
       await updateCompanyMut.mutateAsync(`/api/platform/tenants/admin/companies/${companyDialog.editId}`, payload);
@@ -280,6 +283,8 @@ export default function AdminCompanies() {
               <Label>{companyDialog.editId ? "Nova password do proprietário (opcional)" : "Password inicial"}</Label>
               <Input
                 type="password"
+                name={companyDialog.editId ? `tenant-owner-password-edit-${companyDialog.editId}` : "tenant-owner-password-create"}
+                autoComplete="new-password"
                 value={companyForm.ownerPassword}
                 onChange={(e) => setCompanyForm((p) => ({ ...p, ownerPassword: e.target.value }))}
                 placeholder={companyDialog.editId ? "Deixar em branco para não alterar" : "Mínimo 6 caracteres"}

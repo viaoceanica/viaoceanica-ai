@@ -505,7 +505,7 @@ export default function AdminModules() {
   const handleDownloadScaffold = async (moduleForm: ModuleForm) => {
     setScaffoldPending(true);
     try {
-      const res = await apiFetch("/api/platform/registry/modules/scaffold", {
+      const res = await apiFetch<{ base64: string; filename?: string }>("/api/platform/registry/modules/scaffold", {
         method: "POST",
         body: JSON.stringify({
           slug: moduleForm.slug,

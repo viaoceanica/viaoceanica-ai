@@ -13,6 +13,25 @@
 # Python cache
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.venv/
+
+# Runtime data and local secrets
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+
+# Local backup/scratch files
+*.bak
+*.bak-*
+
+# Next.js
+**/.next/
+**/next-env.d.ts
+**/*.tsbuildinfo
 
 # Native/build cache
 /node_modules/.package-lock.json

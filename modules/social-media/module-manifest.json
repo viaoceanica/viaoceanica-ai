@@ -1,0 +1,17 @@
+{
+  "module_key": "social-media",
+  "name": "Redes Sociais",
+  "version": "1.0.0",
+  "description": "Planeamento, geração, aprovação, calendário e exportação manual de publicações para redes sociais com apoio de IA.",
+  "route": "/module/social-media",
+  "frontend_mount_type": "iframe",
+  "backend_service_url": "http://mod-social-media:4005",
+  "health_endpoint": "/health",
+  "readiness_endpoint": "/ready",
+  "status": "active",
+  "icon": "Share2",
+  "capabilities": ["ai", "storage", "analytics"],
+  "ai_agent_id": "social-media",
+  "min_plan": null,
+  "tenant_restricted": false
+}

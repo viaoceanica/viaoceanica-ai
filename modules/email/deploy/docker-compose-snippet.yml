@@ -46,6 +46,7 @@
       AI_AGENT_ID: email
       EMAIL_CREDENTIALS_SECRET: ${EMAIL_CREDENTIALS_SECRET:-change-me-email-credentials-secret}
       EMAIL_SYNC_INTERVAL_SECONDS: ${EMAIL_SYNC_INTERVAL_SECONDS:-300}
+      EMAIL_IMAP_SYNC_BATCH_SIZE: ${EMAIL_IMAP_SYNC_BATCH_SIZE:-100}
       ALLOW_DEMO_TENANT: "false"
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -60,7 +61,7 @@
       resources:
         limits:
           cpus: "0.25"
-          memory: 192M
+          memory: 1024M
 
   email-frontend:
     build:

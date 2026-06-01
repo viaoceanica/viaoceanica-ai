@@ -61,6 +61,7 @@ services:
       AI_AGENT_ID: ${AI_AGENT_ID:-email}
       EMAIL_CREDENTIALS_SECRET: ${EMAIL_CREDENTIALS_SECRET:-change-me-email-credentials-secret}
       EMAIL_SYNC_INTERVAL_SECONDS: ${EMAIL_SYNC_INTERVAL_SECONDS:-300}
+      EMAIL_IMAP_SYNC_BATCH_SIZE: ${EMAIL_IMAP_SYNC_BATCH_SIZE:-100}
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-}
       ALLOW_DEMO_TENANT: ${ALLOW_DEMO_TENANT:-false}
     extra_hosts:
@@ -76,10 +77,10 @@ services:
       resources:
         limits:
           cpus: "0.25"
-          memory: 192M
+          memory: 1024M
         reservations:
           cpus: "0.05"
-          memory: 64M
+          memory: 128M
 
   email-frontend:
     build:

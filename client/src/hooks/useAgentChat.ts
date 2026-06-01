@@ -24,12 +24,22 @@ export interface AgentRequestContext {
   [key: string]: unknown;
 }
 
+export interface AgentEmailAction {
+  type: string;
+  draftId?: string;
+  mailboxId?: string;
+  folder?: string;
+  subject?: string;
+  to?: string;
+}
+
 interface AgentChatResponse {
   reply: string;
   agent: string;
   module: string;
   model: string;
   files?: ExportedFile[];
+  emailAction?: AgentEmailAction;
   usage: {
     prompt_tokens: number;
     completion_tokens: number;
@@ -150,6 +160,9 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
               files: data.files,
             },
           ]);
+          if (data.emailAction && typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("viao-agent-email-action", { detail: data.emailAction }));
+          }
           // Update quota after each message
           fetchQuota();
         }
