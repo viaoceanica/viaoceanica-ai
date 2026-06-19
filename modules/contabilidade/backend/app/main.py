@@ -1676,6 +1676,7 @@ MAX_ZIP_MEMBER_SIZE = 20 * 1024 * 1024  # 20 MB per file
 MAX_ZIP_TOTAL_UNCOMPRESSED = 100 * 1024 * 1024  # 100 MB total
 MAX_FAILED_IMPORT_BLOB = 20 * 1024 * 1024  # 20 MB stored for retry
 MAX_R2_OBJECT_SIZE = 50 * 1024 * 1024  # 50 MB guardrail for direct storage ingest
+STORAGE_QUEUE_FLUSH_LIMIT = max(1, int(os.getenv("STORAGE_QUEUE_FLUSH_LIMIT", "50")))
 
 
 def _r2_endpoint() -> str:
@@ -1793,7 +1794,7 @@ def _enqueue_storage_upload(
     return row
 
 
-def _flush_storage_upload_queue(session: Session, *, limit: int = 10) -> dict[str, int]:
+def _flush_storage_upload_queue(session: Session, *, limit: int = STORAGE_QUEUE_FLUSH_LIMIT) -> dict[str, int]:
     if not _r2_is_configured():
         return {"attempted": 0, "uploaded": 0, "failed": 0}
 
@@ -2321,7 +2322,7 @@ def update_tenant_profile(tenant_id: str, payload: TenantProfileRequest, session
 @app.get("/api/tenants/{tenant_id}/invoices", response_model=InvoiceListResponse)
 def list_invoices(tenant_id: str, session: Session = Depends(get_session)):
     tenant_id = require_tenant(tenant_id)
-    _flush_storage_upload_queue(session, limit=10)
+    _flush_storage_upload_queue(session, limit=STORAGE_QUEUE_FLUSH_LIMIT)
     invoices = (
         session.query(Invoice)
         .options(selectinload(Invoice.line_items))
@@ -2369,7 +2370,7 @@ def list_failed_imports(tenant_id: str, session: Session = Depends(get_session))
 @app.get("/api/tenants/{tenant_id}/storage/upload-queue")
 def storage_upload_queue_status(tenant_id: str, limit: int = 100, session: Session = Depends(get_session)):
     tenant_id = require_tenant(tenant_id)
-    _flush_storage_upload_queue(session, limit=20)
+    _flush_storage_upload_queue(session, limit=STORAGE_QUEUE_FLUSH_LIMIT)
 
     limit = max(1, min(limit, 500))
     rows = (
@@ -3423,7 +3424,7 @@ def ingest_invoices(
     session: Session = Depends(get_session),
 ):
     tenant_id = require_tenant(tenant_id)
-    _flush_storage_upload_queue(session, limit=20)
+    _flush_storage_upload_queue(session, limit=STORAGE_QUEUE_FLUSH_LIMIT)
     if not files:
         raise HTTPException(status_code=400, detail="Selecione pelo menos um ficheiro")
 
