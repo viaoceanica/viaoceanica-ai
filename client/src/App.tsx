@@ -5,6 +5,7 @@ import { Route, Switch, useLocation } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import DashboardLayout from "./components/DashboardLayout";
+import { useAuth } from "./_core/hooks/useAuth";
 
 // Pages
 import Home from "./pages/Home";
@@ -30,6 +31,7 @@ import AdminTokens from "./pages/admin/AdminTokens";
 import AdminModules from "./pages/admin/AdminModules";
 import AdminPlans from "./pages/admin/AdminPlans";
 import AdminAIUsage from "./pages/admin/AdminAIUsage";
+import AdminSupport from "./pages/admin/AdminSupport";
 
 function CompanyDashboardContent() {
   const [location] = useLocation();
@@ -71,9 +73,13 @@ function CompanyDashboardContent() {
 
 function AdminContent() {
   const [location] = useLocation();
-  
+  const { user } = useAuth();
+  const isTechnician = user?.platformRole === "technician";
+
   let content;
-  if (location === "/admin") {
+  if (isTechnician || location === "/admin/support") {
+    content = <AdminSupport />;
+  } else if (location === "/admin") {
     content = <AdminDashboard />;
   } else if (location === "/admin/companies") {
     content = <AdminCompanies />;

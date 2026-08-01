@@ -28,7 +28,7 @@ import {
 
 // ─── Enums ──────────────────────────────────────────────────────────
 
-export const platformRoleEnum = pgEnum("platform_role", ["user", "admin"]);
+export const platformRoleEnum = pgEnum("platform_role", ["user", "admin", "technician"]);
 export const companyRoleEnum = pgEnum("company_role", ["owner", "admin", "member"]);
 export const invitationStatusEnum = pgEnum("invitation_status", ["pending", "accepted", "expired"]);
 export const tokenTypeEnum = pgEnum("token_type", ["credit", "debit"]);

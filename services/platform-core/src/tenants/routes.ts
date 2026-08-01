@@ -32,12 +32,47 @@ function requireAuth(req: Request, res: Response, next: Function) {
 }
 
 function requireAdmin(req: Request, res: Response, next: Function) {
-  const roles = req.headers["x-viao-platform-roles"] as string;
-  if (!roles || !roles.includes("admin")) {
+  const roles = new Set(String(req.headers["x-viao-platform-roles"] || "").split(",").map((role) => role.trim()));
+  if (!roles.has("admin")) {
     return res.status(403).json({ success: false, error: { code: "FORBIDDEN" } });
   }
   next();
 }
+
+function requireSupportOperator(req: Request, res: Response, next: Function) {
+  const roles = new Set(String(req.headers["x-viao-platform-roles"] || "").split(",").map((role) => role.trim()));
+  if (!roles.has("admin") && !roles.has("technician")) {
+    return res.status(403).json({ success: false, error: { code: "FORBIDDEN" } });
+  }
+  next();
+}
+
+// ─── Support: Client directory (read-only, no plan or token data) ───
+
+router.get("/support/companies", requireAuth, requireSupportOperator, async (_req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: "DB_UNAVAILABLE" } });
+
+    const result = await db
+      .select({
+        id: companies.id,
+        name: companies.name,
+        sector: companies.sector,
+        email: companies.email,
+        phone: companies.phone,
+        website: companies.website,
+        createdAt: companies.createdAt,
+      })
+      .from(companies)
+      .orderBy(companies.name);
+
+    return res.json({ success: true, data: result });
+  } catch (error) {
+    console.error("[Tenants] Support companies error:", error);
+    return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR" } });
+  }
+});
 
 // ─── Company ────────────────────────────────────────────────────────
 

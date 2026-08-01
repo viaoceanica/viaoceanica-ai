@@ -237,6 +237,54 @@ app.use("/api/module/:moduleKey", async (req, res, next) => {
     });
   }
 
+  const requestedTenantId = String(req.headers["x-viao-target-tenant-id"] || "").trim();
+  const hasRequestedTenant = Boolean(requestedTenantId);
+  if (hasRequestedTenant) {
+    const platformRoles = new Set(
+      String(req.headers["x-viao-platform-roles"] || "")
+        .split(",")
+        .map((role) => role.trim())
+        .filter(Boolean)
+    );
+    const isSupportOperator = platformRoles.has("admin") || platformRoles.has("technician");
+    const parsedTenantId = Number(requestedTenantId);
+
+    if (moduleKey !== "helpdesk" || !isSupportOperator || !/^\d+$/.test(requestedTenantId) || !Number.isSafeInteger(parsedTenantId) || parsedTenantId < 1) {
+      return res.status(403).json({
+        success: false,
+        error: { code: "FORBIDDEN", message: "A seleção de cliente é exclusiva do suporte Helpdesk" },
+      });
+    }
+
+    // The selected tenant must be one exposed by the restricted support endpoint.
+    // This rejects arbitrary numeric IDs even when the caller has the technician role.
+    try {
+      const companiesRes = await fetch(`${PLATFORM_CORE_URL}/api/v1/tenants/support/companies`, {
+        headers: {
+          "x-viao-user-id": String(req.headers["x-viao-user-id"] || ""),
+          "x-viao-platform-roles": String(req.headers["x-viao-platform-roles"] || ""),
+        },
+      });
+      if (!companiesRes.ok) throw new Error(`support companies lookup returned ${companiesRes.status}`);
+      const companies = await companiesRes.json() as Array<{ id?: number | string }>;
+      if (!Array.isArray(companies) || !companies.some((company) => String(company.id) === requestedTenantId)) {
+        return res.status(403).json({
+          success: false,
+          error: { code: "FORBIDDEN", message: "Cliente não autorizado para suporte" },
+        });
+      }
+    } catch {
+      return res.status(503).json({
+        success: false,
+        error: { code: "SUPPORT_CONTEXT_UNAVAILABLE", message: "Não foi possível validar o cliente de suporte" },
+      });
+    }
+
+    // The browser may request a tenant, but only the authenticated gateway fixes the tenant header sent downstream.
+    req.headers["x-viao-tenant-id"] = requestedTenantId;
+  }
+  delete req.headers["x-viao-target-tenant-id"];
+
   // Enforce module entitlement: check if tenant has access to this module
   const tenantId = req.headers["x-viao-tenant-id"];
   if (tenantId && tenantId !== "0") {

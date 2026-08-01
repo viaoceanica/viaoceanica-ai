@@ -47,7 +47,11 @@ type AdminSummaryResponse = {
   };
 };
 
-const API_BASE = "/module/helpdesk/api-proxy";
+const API_BASE = "/api/module/helpdesk";
+
+function requestHeaders(tenantId: string, supportMode: boolean): HeadersInit {
+  return supportMode ? { "x-viao-target-tenant-id": tenantId } : {};
+}
 
 const emptyForm = {
   requester_name: "",
@@ -64,6 +68,7 @@ const fieldClass = "h-10 w-full rounded-[8px] border border-viao-line bg-white p
 
 export default function Home() {
   const [tenantId, setTenantId] = useState("");
+  const [supportMode, setSupportMode] = useState(false);
   const [status, setStatus] = useState<TicketStatusResponse | null>(null);
   const [adminSummary, setAdminSummary] = useState<AdminSummaryResponse | null>(null);
   const [tickets, setTickets] = useState<Ticket[]>([]);
@@ -82,38 +87,35 @@ export default function Home() {
 
   useEffect(() => {
     const handleContextMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin || event.source !== window.parent) return;
       const payload = event.data;
-      if (!payload || payload.type !== "viao-context") return;
-      if (payload.tenantId) setTenantId(String(payload.tenantId));
+      if (!payload || payload.type !== "viao-context" || !payload.tenantId) return;
+      setTenantId(String(payload.tenantId));
+      setSupportMode(Boolean(payload.supportMode));
+      if (payload.supportMode) {
+        setForm((current) => ({
+          ...current,
+          requester_name: current.requester_name || String(payload.companyName || ""),
+          requester_email: current.requester_email || String(payload.companyEmail || ""),
+        }));
+      }
     };
 
     window.addEventListener("message", handleContextMessage);
-    try {
-      if (window.parent && window.parent !== window) {
-        window.parent.postMessage({ type: "viao-context-request" }, "*");
-      }
-    } catch {
-      // ignore
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage({ type: "viao-context-request" }, window.location.origin);
     }
 
-    const standaloneFallback = window.setTimeout(() => {
-      if (window.parent === window) {
-        setTenantId((prev) => prev || "demo");
-      }
-    }, 800);
-
-    return () => {
-      window.removeEventListener("message", handleContextMessage);
-      window.clearTimeout(standaloneFallback);
-    };
+    return () => window.removeEventListener("message", handleContextMessage);
   }, []);
 
   async function loadData(activeTenantId: string) {
-    const tenantHeaders = { "x-tenant-id": activeTenantId };
+    const headers = requestHeaders(activeTenantId, supportMode);
+    const requestInit = { credentials: "include" as RequestCredentials, headers };
     const [statusRes, ticketsRes, adminRes] = await Promise.all([
-      fetch(`${API_BASE}/api/status`, { headers: tenantHeaders }),
-      fetch(`${API_BASE}/api/tickets`, { headers: tenantHeaders }),
-      fetch(`${API_BASE}/api/tenants/${activeTenantId}/admin/summary`, { headers: tenantHeaders }),
+      fetch(`${API_BASE}/status`, requestInit),
+      fetch(`${API_BASE}/tickets`, requestInit),
+      fetch(`${API_BASE}/tenants/${activeTenantId}/admin/summary`, requestInit),
     ]);
 
     const statusJson = (await statusRes.json()) as TicketStatusResponse;
@@ -126,8 +128,9 @@ export default function Home() {
   }
 
   async function loadTicketDetail(ticketId: string, activeTenantId: string) {
-    const response = await fetch(`${API_BASE}/api/tickets/${ticketId}`, {
-      headers: { "x-tenant-id": activeTenantId },
+    const response = await fetch(`${API_BASE}/tickets/${ticketId}`, {
+      credentials: "include",
+      headers: requestHeaders(activeTenantId, supportMode),
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload?.detail || "Falha ao carregar ticket");
@@ -137,7 +140,7 @@ export default function Home() {
   useEffect(() => {
     if (!tenantReady) return;
     loadData(tenantId).catch((err) => setError(err instanceof Error ? err.message : "Erro ao carregar helpdesk"));
-  }, [tenantId, tenantReady]);
+  }, [tenantId, tenantReady, supportMode]);
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -145,11 +148,12 @@ export default function Home() {
     setIsSubmitting(true);
     setError("");
     try {
-      const response = await fetch(`${API_BASE}/api/tickets`, {
+      const response = await fetch(`${API_BASE}/tickets`, {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
-          "x-tenant-id": tenantId,
+          ...requestHeaders(tenantId, supportMode),
         },
         body: JSON.stringify(form),
       });
@@ -173,11 +177,12 @@ export default function Home() {
     else setIsPostingNote(true);
     setError("");
     try {
-      const response = await fetch(`${API_BASE}/api/tickets/${selectedTicket.id}/conversations`, {
+      const response = await fetch(`${API_BASE}/tickets/${selectedTicket.id}/conversations`, {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
-          "x-tenant-id": tenantId,
+          ...requestHeaders(tenantId, supportMode),
         },
         body: JSON.stringify({
           kind,

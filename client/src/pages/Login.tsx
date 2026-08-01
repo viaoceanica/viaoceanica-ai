@@ -34,8 +34,8 @@ export default function Login() {
       }
 
       toast.success("Login efetuado com sucesso");
-      // Check if admin
-      if (data.data?.user?.platformRole === "admin") {
+      // Platform administrators and technicians use the restricted administration area.
+      if (["admin", "technician"].includes(data.data?.user?.platformRole)) {
         setLocation("/admin");
       } else {
         setLocation("/dashboard");

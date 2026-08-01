@@ -48,6 +48,7 @@ import {
   Mail,
   Receipt,
   Brain,
+  LifeBuoy,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -80,6 +81,10 @@ const adminMenuItems = [
   { icon: Puzzle, label: "Módulos", path: "/admin/modules" },
   { icon: Settings, label: "Planos", path: "/admin/plans" },
   { icon: Brain, label: "Consumo AI", path: "/admin/ai-usage" },
+];
+
+const technicianMenuItems = [
+  { icon: LifeBuoy, label: "Suporte", path: "/admin/support" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
@@ -133,6 +138,17 @@ export default function DashboardLayout({
     );
   }
 
+  if (variant === "admin" && !["admin", "technician"].includes(user.platformRole)) {
+    return (
+      <div className="flex min-h-screen items-center justify-center p-8">
+        <div className="max-w-md text-center">
+          <h1 className="text-2xl font-semibold">Acesso restrito</h1>
+          <p className="mt-2 text-sm text-muted-foreground">Não tem permissões para aceder à administração.</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <SidebarProvider
       style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
@@ -165,6 +181,8 @@ function DashboardLayoutContent({
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const isMobile = useIsMobile();
+  const isTechnician = user?.platformRole === "technician";
+  const visibleAdminMenuItems = isTechnician ? technicianMenuItems : adminMenuItems;
 
   // Fetch active modules for the current user (entitlements)
   const { data: activeModules, refetch: refetchActiveModules } = useQuery<any[]>(
@@ -192,7 +210,7 @@ function DashboardLayoutContent({
   // Determine active label for mobile header
   const getActiveLabel = () => {
     if (variant === "admin") {
-      const item = adminMenuItems.find(i => location.startsWith(i.path) && i.path !== "/admin") || adminMenuItems[0];
+      const item = visibleAdminMenuItems.find(i => location.startsWith(i.path)) || visibleAdminMenuItems[0];
       return item?.label ?? "Menu";
     }
     if (location === "/dashboard") return "Dashboard";
@@ -252,7 +270,7 @@ function DashboardLayoutContent({
                 <div className="flex items-center gap-2 min-w-0">
                   <img src={LOGO_URL} alt="Via Oceânica" className="h-5 invert dark:invert-0" />
                   {variant === "admin" && (
-                    <span className="text-[10px] font-medium text-primary bg-primary/10 px-1.5 py-0.5 rounded">ADMIN</span>
+                    <span className="text-[10px] font-medium text-primary bg-primary/10 px-1.5 py-0.5 rounded">{isTechnician ? "SUPORTE" : "ADMIN"}</span>
                   )}
                 </div>
               )}
@@ -263,7 +281,7 @@ function DashboardLayoutContent({
             {variant === "admin" ? (
               /* ─── Admin: flat menu ─── */
               <SidebarMenu className="px-2 py-1">
-                {adminMenuItems.map(item => {
+                {visibleAdminMenuItems.map(item => {
                   const isActive = location === item.path || (item.path !== "/admin" && location.startsWith(item.path));
                   return (
                     <SidebarMenuItem key={item.path}>
@@ -435,7 +453,7 @@ function DashboardLayoutContent({
         )}
         <main className="flex-1 p-6">{children}</main>
       </SidebarInset>
-      <ModuleAssistant moduleKey={currentModuleKey} />
+      {!isTechnician && <ModuleAssistant moduleKey={currentModuleKey} />}
     </>
   );
 }

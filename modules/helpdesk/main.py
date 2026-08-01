@@ -214,7 +214,7 @@ def require_tenant_admin(tenant_id: str) -> ModuleContext:
         raise HTTPException(status_code=403, detail="tenant_id em conflito com o contexto autenticado")
 
     platform_roles = {role.strip() for role in (ctx.platform_roles or "").split(",") if role.strip()}
-    if "admin" in platform_roles:
+    if {"admin", "technician"} & platform_roles:
         return ctx
 
     if ctx.company_role not in {"owner", "admin"}:

@@ -112,6 +112,12 @@ jobs:
             
             # Restart with zero-downtime strategy
             docker compose up -d --remove-orphans
+
+            # Apply idempotent database migrations before the service health checks.
+            for migration in deploy/migrations/*.sql; do
+              [ -e "$migration" ] || continue
+              docker compose exec -T postgres psql -U viaoceanica -d viaoceanica_platform -v ON_ERROR_STOP=1 < "$migration"
+            done
             
             # Wait for health checks
             sleep 30

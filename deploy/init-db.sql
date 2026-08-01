@@ -5,7 +5,7 @@
 -- ─── Enums ──────────────────────────────────────────────────────────
 
 DO $$ BEGIN
-  CREATE TYPE platform_role AS ENUM ('user', 'admin');
+  CREATE TYPE platform_role AS ENUM ('user', 'admin', 'technician');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
